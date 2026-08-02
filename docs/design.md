@@ -1,147 +1,147 @@
-# Houdini Agent Panel — панель агента внутри Houdini
+# Houdini Agent Panel — an agent panel inside Houdini
 
 ## Context
 
-Чтобы пользоваться агентом со сценой Houdini, сегодня нужен открытый терминал с `claude` и настройка MCP руками через конфиги и порты. Для художника это непроходимо: он не откроет терминал и не станет править `~/.claude.json`.
+To use an agent against a Houdini scene today you need an open terminal running `claude` and MCP set up by hand through config files and ports. For an artist that's a non-starter: they won't open a terminal and won't edit `~/.claude.json`.
 
-SideFX официального решения не сделала. Показанный на кейноуте Houdini 22 APEX Script MCP — справочник по одному языку для риггеров, он не управляет сценой и нигде не опубликован. Коммерческий Houdini AI Assistant ($129) решает задачу своим клиентом с BYO-ключом, переусложнённым UI (диалог на восемь полей ради логина, магический префикс `ACPY:` для режима действия) и, судя по отзывам, слабым слоем работы со сценой.
+SideFX hasn't shipped an official solution. The APEX Script MCP shown at the Houdini 22 keynote is a reference tool for one language aimed at riggers — it doesn't drive the scene and isn't published anywhere. The commercial Houdini AI Assistant ($129) solves the problem with its own BYO-key client, an overcomplicated UI (an eight-field dialog just to log in, a magic `ACPY:` prefix for action mode), and, going by reviews, a weak scene-manipulation layer.
 
-Задача: надстройка над **fxhoudinimcp** (189 инструментов, официальный `hwebserver` под капотом), дающая нативную панель-чат внутри Houdini. Ставится инсталлятором, агент поднимается сам, художник не видит ни портов, ни конфигов. UI по образцу Claude Code: минимум кнопок, слеш-команды, чип режима.
+Task: a layer on top of **fxhoudinimcp** (189 tools, the official `hwebserver` under the hood) that gives Houdini a native chat panel. Installed by an installer, the agent comes up on its own, the artist never sees ports or config files. UI modeled on Claude Code: minimal buttons, slash commands, a mode chip.
 
-**Мы не пишем ни агента, ни инструменты для Houdini.** Пишем ACP-клиент и инсталлятор, связывающие чужой готовый код.
+**We don't write the agent or the Houdini tools.** We write the ACP client and installer that tie together existing, already-built code.
 
 ## Approach
 
-Отдельный репозиторий `MAY4VFX/houdini-agent-panel`, MIT. Пакет `houdini-agent-panel` с жёсткой зависимостью от `fxhoudinimcp`.
+A separate repository, `MAY4VFX/houdini-agent-panel`, MIT-licensed. Package `houdini-agent-panel` with a hard dependency on `fxhoudinimcp`.
 
-### Четыре слоя
+### Four layers
 
-| Слой | Ответственность | Не знает про |
+| Layer | Responsibility | Doesn't know about |
 |---|---|---|
-| Панель (`.pypanel`, Qt) | лента, ввод, чипы, плашка обновлений | ACP, Houdini |
-| ACP-клиент | сессии, стриминг, разрешения, режимы, логин | Houdini |
-| Реестр/рантайм | скачать агента и Node, проверить sha256 | UI |
-| Мост к сцене | — не пишем, это fxhoudinimcp как есть | — |
+| Panel (`.pypanel`, Qt) | feed, input, chips, update banner | ACP, Houdini |
+| ACP client | sessions, streaming, permissions, modes, login | Houdini |
+| Registry/runtime | download the agent and Node, verify sha256 | UI |
+| Scene bridge | — not our code, this is fxhoudinimcp as-is | — |
 
-### Агенты v1
+### v1 agents
 
-Из официального реестра ACP:
+From the official ACP registry:
 
-| Агент | Лицензия | Распространение | Примечание |
+| Agent | License | Distribution | Note |
 |---|---|---|---|
 | Claude Agent | proprietary | npx | |
 | Codex | Apache-2.0 | npx | |
 | Gemini CLI | Apache-2.0 | npx | |
-| Grok Build | proprietary | npx | это и есть Grok CLI |
-| Kimi CLI | MIT | binary | **нет сборки под darwin-x86_64** — панель обязана назвать причину, а не прятать агента |
-| OpenCode | MIT | binary | все платформы; путь для локальных и удалённых своих моделей |
+| Grok Build | proprietary | npx | this is Grok CLI |
+| Kimi CLI | MIT | binary | **no darwin-x86_64 build** — the panel must state the reason, not hide the agent |
+| OpenCode | MIT | binary | every platform; the path for local and remote custom models |
 
-Плюс **«Свой агент»** — поле с командой и аргументами, говорим по ACP с тем, что у человека уже стоит. Ни скачивания, ни версий. Закрывает всё, чего нет в реестре.
+Plus **"Custom Agent"** — a field for a command and arguments, speaking ACP with whatever's already installed on the machine. No download, no versions. Covers everything the registry doesn't.
 
-**Ставятся выборочно, а не пачкой.** Инсталлятор по умолчанию не ставит ни одного: либо спрашивает, либо принимает `--agents claude,codex`. Тот же экран «Агенты» живёт в панели постоянно — поставить, обновить, удалить любого из реестра в любой момент. Качаем один выбранный агент, а не шесть про запас.
+**Installed selectively, not in bulk.** By default the installer doesn't install a single one: it either asks, or accepts `--agents claude,codex`. The same "Agents" screen lives permanently inside the panel — install, update, or remove any registry agent at any time. We download exactly one chosen agent, not six just in case.
 
-**Node обязателен**: 4 из 6 агентов ставятся через npx, без вендоринга Node панель почти пуста.
+**Node is mandatory**: 4 of 6 agents install via npx, and without vendoring Node the panel would be nearly empty.
 
-**Свои и удалённые модели (Hermes и подобные)** подключаются не как агент, а как модель внутри OpenCode или goose: ACP не умеет удалённых агентов, но агент — локальный процесс, а эндпоинт модели может быть где угодно.
+**Custom and remote models (Hermes and similar)** plug in not as an agent but as a model inside OpenCode or goose: ACP has no concept of a remote agent, but the agent itself is a local process, while the model's endpoint can be anywhere.
 
-### Проверенные факты, на которых стоит дизайн
+### Verified facts the design rests on
 
-- **ACP — только stdio.** Клиент поднимает процесс агента и говорит через stdin/stdout. Удалённых агентов протокол не предусматривает.
-- **Много сессий на одном соединении** — прямо заявлено в архитектуре ACP.
-- **Панели**: `.pypanel` — XML с `<interface>` и `<script>`, где `onCreateInterface()` возвращает Qt-виджет. В H22 таких 60 штук, механизм штатный.
-- **`hutil.PySide`** — шим самой Houdini: на H22 отдаёт PySide6, на 20.5 — PySide2. Один код на обе версии. Уточнено при разведке: шим появился внутри 20.5.x не сразу — в 20.5.278 его нет (есть только `hutil.Qt`), в 20.5.445 уже есть. Поэтому импорт идёт через собственный модуль `ui/qt.py`: `hutil.PySide` → PySide6 → PySide2.
-- **Qt в H22**: `QtWidgets`, `QtNetwork`, `QtWebSockets`, `QtWebEngineWidgets` доступны.
-- **ACP SDK**: `agent-client-protocol` 0.12.0 на PyPI, `>=3.10,<3.15` — покрывает H20.5 (3.11) и H22 (3.13).
-- **Реестр**: `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Запись содержит `version` и `distribution`: `npx.package` либо `binary.<platform>` с `archive`, `cmd`, `args`, `sha256`.
-- **`session/new`**: `cwd` (абсолютный, обязательный) + `mcpServers` со списком `{name, command, args, env}`.
-- **Логин**: `initialize` возвращает `authMethods` (`id`, `name`, `description`); клиент зовёт `authenticate(methodId)`; работа без логина даёт `auth_required`; `logout` — если объявлен `agentCapabilities.auth.logout`.
-- **Разрешения**: `session/request_permission` с массивом `options`, у каждой `optionId`, `name`, `kind` ∈ {`allow_once`, `allow_always`, `reject_once`, `reject_always`}.
-- **Режимы**: `availableModes` + `currentModeId`, переключение `session/set_mode`, уведомление `current_mode_update`.
-- **Слеш-команды**: `available_commands_update`, вызов обычным текстом.
-- **Вложения**: контент-блоки `text`, `image` (cap `image`), `audio` (cap `audio`), embedded resource (cap `embeddedContext`), `resource_link`, @-упоминания.
-- **Лента**: `session/update` даёт `agent_message_chunk`, `plan`, `tool_call`, `tool_call_update`, `usage_update`. Виды вызова: `read`/`edit`/`delete`/`move`/`search`/`execute`/`think`/`fetch`/`other`. Статусы: `pending`/`in_progress`/`completed`/`failed`.
-- **Порт fx плавающий**: сервер занимает первый свободный из 8100..8115, бридж ищет «первый живой снизу вверх». Пин через `HOUDINI_PORT` отключает сканирование (`fxhoudinimcp/server.py:58`). Уточнено при разведке: панель живёт в том же процессе, что и сервер, поэтому свой порт она не ищет сканом, а берёт из `fxhoudinimcp_server.startup.get_port()`. Скан остаётся запасным вариантом и находит чужую Houdini, а не свою.
-- **Установка внутрь Houdini, а не на `PYTHONPATH`.** Выяснено при разведке и меняет план установки: `pydantic` тащит скомпилированный `pydantic_core`, у Python 3.11 (H20.5) и 3.13 (H22) разные ABI, поэтому положить site-packages installer-питона на `PYTHONPATH` Houdini нельзя. `hython` обеих версий несёт рабочий pip (проверено), так что инсталлятор ставит панель со всеми зависимостями в отдельное дерево на версию Python. Подробности — в [`architecture.md`](architecture.md) §0.
-- **cwd процесса Houdini — домашняя папка**, не проект. Поэтому `$HIP`.
+- **ACP is stdio only.** The client spawns the agent's process and talks over stdin/stdout. The protocol has no notion of remote agents.
+- **Many sessions over one connection** — stated directly in ACP's architecture docs.
+- **Panels**: `.pypanel` is XML with an `<interface>` and a `<script>`, where `onCreateInterface()` returns a Qt widget. H22 ships 60 of these, it's a standard mechanism.
+- **`hutil.PySide`** — Houdini's own shim: on H22 it hands back PySide6, on 20.5 it hands back PySide2. One codebase for both versions. Confirmed during recon: the shim didn't appear right at the start of the 20.5.x line — it's missing in 20.5.278 (only `hutil.Qt` exists there), present by 20.5.445. That's why imports go through our own `ui/qt.py` module: `hutil.PySide` → PySide6 → PySide2.
+- **Qt in H22**: `QtWidgets`, `QtNetwork`, `QtWebSockets`, `QtWebEngineWidgets` are all available.
+- **ACP SDK**: `agent-client-protocol` 0.12.0 on PyPI, `>=3.10,<3.15` — covers H20.5 (3.11) and H22 (3.13).
+- **Registry**: `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. An entry carries `version` and `distribution`: either `npx.package` or `binary.<platform>` with `archive`, `cmd`, `args`, `sha256`.
+- **`session/new`**: `cwd` (absolute, required) + `mcpServers` as a list of `{name, command, args, env}`.
+- **Login**: `initialize` returns `authMethods` (`id`, `name`, `description`); the client calls `authenticate(methodId)`; working without logging in yields `auth_required`; `logout` exists if `agentCapabilities.auth.logout` is declared.
+- **Permissions**: `session/request_permission` with an `options` array, each with `optionId`, `name`, `kind` ∈ {`allow_once`, `allow_always`, `reject_once`, `reject_always`}.
+- **Modes**: `availableModes` + `currentModeId`, switched via `session/set_mode`, notified via `current_mode_update`.
+- **Slash commands**: `available_commands_update`, invoked as plain text.
+- **Attachments**: content blocks `text`, `image` (cap `image`), `audio` (cap `audio`), embedded resource (cap `embeddedContext`), `resource_link`, @-mentions.
+- **The feed**: `session/update` delivers `agent_message_chunk`, `plan`, `tool_call`, `tool_call_update`, `usage_update`. Call kinds: `read`/`edit`/`delete`/`move`/`search`/`execute`/`think`/`fetch`/`other`. Statuses: `pending`/`in_progress`/`completed`/`failed`.
+- **The fx port floats**: the server takes the first free one out of 8100..8115, the bridge searches "the first live one bottom to top." Pinning it via `HOUDINI_PORT` disables the scan (`fxhoudinimcp/server.py:58`). Clarified during recon: the panel lives in the same process as the server, so it doesn't scan for its own port — it reads it from `fxhoudinimcp_server.startup.get_port()`. The scan remains a fallback and can find someone else's Houdini rather than its own.
+- **Installed inside Houdini, not onto `PYTHONPATH`.** Found during recon, and it changes the install plan: `pydantic` carries a compiled `pydantic_core`, and Python 3.11 (H20.5) and 3.13 (H22) have different ABIs, so putting the installer Python's site-packages onto Houdini's `PYTHONPATH` isn't an option. `hython` on both versions ships a working pip (verified), so the installer installs the panel and all its dependencies into a separate tree per Python version. Details in [`architecture.md`](architecture.md) §0.
+- **The Houdini process's cwd is the home folder**, not the project. Hence `$HIP`.
 
-### Ключевые решения
+### Key decisions
 
-**Ничего не изобретаем поверх агента.** Логин, режимы, разрешения, слеш-команды, вложения — всё приходит от агента данными. Правило: *агент не умеет — контрол не рисуется.* Это удержит панель от превращения в диалог на восемь полей.
+**We invent nothing on top of the agent.** Login, modes, permissions, slash commands, attachments — everything arrives as data from the agent. The rule: *the agent doesn't support it — the control doesn't get drawn.* This is what keeps the panel from turning into an eight-field dialog.
 
-**Привязка к своей сцене.** Панель знает фактический порт fx в своём процессе и передаёт агенту `mcpServers[0].env = {HOUDINI_HOST, HOUDINI_PORT}`. Две открытые Houdini — каждая панель работает со своей сценой.
+**Bound to its own scene.** The panel knows the fx server's actual port in its own process and passes the agent `mcpServers[0].env = {HOUDINI_HOST, HOUDINI_PORT}`. Two open Houdinis — each panel works against its own scene.
 
-**Один агент, много сессий.** Один процесс на Houdini, сессии независимы по `sessionId`, панель показывает выбранную. Две панели рядом — два разговора без второго процесса.
+**One agent, many sessions.** One process per Houdini, sessions are independent by `sessionId`, the panel shows the selected one. Two panels side by side — two conversations without a second process.
 
-**Node вендорим.** Подходящий системный — используем; нет — качаем официальный архив с nodejs.org, сверяем по `SHASUMS256.txt`, распаковываем к себе. Систему не трогаем. Прецедент — сама Houdini, приносящая свой Python.
+**We vendor Node.** A suitable system one — use it; none — download the official archive from nodejs.org, verify it against `SHASUMS256.txt`, extract it into our own directory. The system is never touched. Precedent: Houdini itself, which ships its own Python.
 
-**cwd = `$HIP`**, показывается строкой без выбора. Доступ к файлам вне папки закрывается штатным запросом разрешения.
+**cwd = `$HIP`**, shown as a string with no picker. Access to files outside that folder is gated by the standard permission request.
 
-**Обновления — сравнение версий.** Агенты: `version` из реестра против установленного. Панель и fx: `pypi.org/pypi/<имя>/json`. Проверка не чаще раза в сутки, кешируется. Тихая плашка «Есть обновление X → Обновить», не модалка.
+**Updates via version comparison.** Agents: `version` from the registry against what's installed. The panel and fx: `pypi.org/pypi/<name>/json`. Checked no more than once a day, cached. A quiet "Update available X → Update" banner, not a modal.
 
-**Телеметрия — анонимная, с явным согласием.** Спрашиваем при первом запуске, по умолчанию выключена. Только версии панели/fx/агента, ОС и факты падений. Никогда — содержимое сцен, промптов и путей. Отключается в любой момент; нужна короткая страница политики в репозитории.
+**Telemetry — anonymous, with explicit consent.** Asked at first launch, off by default. Only panel/fx/agent versions, OS, and crash facts. Never scene contents, prompts, or paths. Can be turned off at any time; needs a short policy page in the repository.
 
-**Оповещения — канал связи с пользователями.** Статический JSON по фиксированному адресу, забирается тем же суточным запросом, что и версии. Сообщение: `id`, важность, заголовок, текст, кнопки со ссылками, таргетинг по версиям, срок годности. Показанные `id` запоминаются локально.
+**Announcements — a communication channel to users.** A static JSON file at a fixed address, fetched by the same daily request as version checks. A message has: `id`, severity, title, text, buttons with links, version targeting, an expiration date. Shown `id`s are remembered locally.
 
-В обычном режиме ведёт себя как апдейт-нотификация десктопных клиентов — тихая плашка. Для важного — **попап над полем ввода**: лента читается, панель закрывается, Houdini работает, но написать агенту нельзя, пока не нажата кнопка из попапа. Это же основа под будущую монетизацию (лимиты, «на кофе») и любую срочную связь.
+In the normal case it behaves like a desktop client's update notification — a quiet banner. For anything important — a **popup over the input field**: the feed stays readable, the panel can be closed, Houdini keeps working, but messaging the agent is blocked until the button in the popup is pressed. This also lays the groundwork for future monetization (limits, "buy me a coffee") and any urgent communication.
 
-Ограничение, которое надо понимать: факт перехода по ссылке проверить нельзя — фиксируется только нажатие кнопки, открывшей ссылку.
+A limitation worth understanding: there's no way to verify whether the link was actually followed — only the fact that the button that opened it was pressed gets recorded.
 
-Блокировать саму Houdini не будем никогда: ошибка в фиде не должна останавливать чужую работу над сценой.
+We will never block Houdini itself: an error in the feed must not stop someone else's work on their scene.
 
-**Настройки панели** (минимальный набор, отдельный экран): агент по умолчанию; автостарт агента при открытии панели; проверять обновления; показывать оповещения; телеметрия; папка данных с кнопкой «Открыть»; эндпоинт локального whisper для голоса у агентов без capability `audio`; «Скопировать диагностику» для баг-репортов.
+**Panel settings** (a minimal set, its own screen): default agent; auto-start the agent when the panel opens; check for updates; show announcements; telemetry; the data folder with an "Open" button; a local whisper endpoint for voice on agents lacking the `audio` capability; "Copy diagnostics" for bug reports.
 
-**Асинхронность.** SDK асинхронный, Qt синхронный. ACP-клиент живёт в своём asyncio-цикле на рабочем QThread, в UI отдаёт через Qt-сигналы. `hou` из этого потока не трогаем: работа со сценой идёт через отдельный процесс fx. Без `qasync`. Самая рискованная по багам часть — тормоза UI и гонки искать здесь.
+**Asynchrony.** The SDK is async, Qt is synchronous. The ACP client lives on its own asyncio loop on a worker QThread, and hands things to the UI via Qt signals. `hou` is never touched from that thread: scene work goes through the separate fx process. No `qasync`. This is the part most at risk of bugs — look here for UI stalls and races.
 
-### Установка
+### Installation
 
-Только локальная:
+Local only:
 ```
 pip install houdini-agent-panel
 python -m houdini_agent_panel install     # → $HOUDINI_USER_PREF_DIR/packages
 ```
 
-Пути нигде не зашиваем, чтобы сетевой режим добавился потом без переписывания. Положить дерево на `$HSITE` руками TD сможет и так — это штатный механизм Houdini, мы просто не автоматизируем и не тестируем этот путь в v1.
+We don't hardcode paths anywhere, so a networked mode can be added later without a rewrite. A TD can still drop the tree onto `$HSITE` by hand — that's a standard Houdini mechanism, we just don't automate or test that path in v1.
 
-Причина, по которой сетевой режим отложен: **логин всегда персональный.** Сетевая установка убирает шаг «поставь», но не убирает «залогинься» — у каждого своя учётка Claude/Gemini/Grok. Плюс преднаполнение шары под все ОС означает тащить туда три Node и три дерева `node_modules`, версионировать и обновлять их. Это работа дистрибутива, а не инсталлятора панели, и делать её вслепую, без живых студийных пользователей, рано.
+Why the networked mode is deferred: **logging in is always personal.** A network install removes the "install" step but not the "log in" one — everyone has their own Claude/Gemini/Grok account. Plus pre-populating a share for every OS means hauling three copies of Node and three `node_modules` trees there, versioning and updating them. That's a distribution's job, not the panel installer's, and doing it blind, without real studio users, is premature.
 
 ### UI
 
-Одна колонка, три зоны.
+One column, three zones.
 
-**Верх** — чип агента (иконка из реестра плюс имя, по клику смена и переход на экран «Агенты»), чип рабочей папки `$HIP`, справа выбор сессии, «+» и шестерёнка настроек. Тихие оповещения и плашка обновления вклиниваются сюда строкой.
+**Top** — an agent chip (icon from the registry plus a name, clicking it switches and jumps to the "Agents" screen), a working-folder chip for `$HIP`, session picker on the right, a "+" and a settings gear. Quiet announcements and the update banner slot in here as a row.
 
-**Середина** — лента. Сообщения без рамок. Вызов инструмента — сворачиваемая строка с иконкой по `kind` и живым статусом. План агента — блоком со списком шагов. Запрос разрешения — строка с кнопками из `options` агента.
+**Middle** — the feed. Messages with no borders. A tool call is a collapsible row with an icon by `kind` and a live status. The agent's plan is a block with a list of steps. A permission request is a row with buttons built from the agent's `options`.
 
-**Низ** — растущее поле ввода. Слева: «+» для файлов (только при `image`/`embeddedContext`), микрофон (только при `audio` или настроенном локальном whisper), чип режима из `availableModes`. Справа — счётчик из `usage_update` и кнопка отправки, превращающаяся в стоп.
+**Bottom** — a growing input field. On the left: a "+" for files (only with `image`/`embeddedContext`), a microphone (only with `audio` or a configured local whisper), a mode chip built from `availableModes`. On the right — a counter from `usage_update` and a send button that turns into a stop button.
 
-Слеш-команды — попап над полем при вводе `/`, список из `available_commands_update`.
+Slash commands — a popup over the field on typing `/`, a list from `available_commands_update`.
 
-Блокирующее оповещение садится **над полем ввода**: лента остаётся читаемой, ввод заблокирован до нажатия кнопки из сообщения.
+A blocking announcement sits **above the input field**: the feed stays readable, input is blocked until the message's button is pressed.
 
 ## Files
 
 ```
 python/houdini_agent_panel/
   __main__.py          # CLI: install / uninstall / houdini-package
-  install.py           # package json в пользовательские prefs
-  registry.py          # реестр ACP, выбор distribution под платформу
-  runtime.py           # скачать + sha256 + распаковать: агенты и портативный Node
-  client.py            # ACP поверх agent-client-protocol, asyncio на QThread
-  sessions.py          # пул сессий на одном соединении
+  install.py           # package json into user prefs
+  registry.py          # ACP registry, picking the distribution for the platform
+  runtime.py           # download + sha256 + extract: agents and portable Node
+  client.py            # ACP on top of agent-client-protocol, asyncio on a QThread
+  sessions.py          # session pool over one connection
   auth.py              # authMethods / authenticate / logout
-  updates.py           # версии из реестра и PyPI, кеш на сутки
-  announcements.py     # фид оповещений, таргетинг по версиям, память показанных id
-  settings.py          # чтение/запись настроек панели
-  telemetry.py         # опциональная, по умолчанию выключена
+  updates.py           # versions from the registry and PyPI, cached daily
+  announcements.py     # announcements feed, version targeting, seen-id memory
+  settings.py          # reading/writing panel settings
+  telemetry.py         # optional, off by default
   ui/
-    panel.py           # корневой виджет
-    transcript.py      # отрисовка по kind/status, план, сообщения
-    permissions.py     # кнопки из options агента
-    composer.py        # ввод, слеш-попап, вложения, микрофон
-    chips.py           # агент, режим, папка, сессия, токены
-    agents.py          # экран установки/обновления/удаления агентов
-    settings_view.py   # экран настроек
-    announcement.py    # плашка и блокирующий попап над вводом
+    panel.py           # root widget
+    transcript.py      # rendering by kind/status, plan, messages
+    permissions.py     # buttons from the agent's options
+    composer.py         # input, slash popup, attachments, microphone
+    chips.py            # agent, mode, folder, session, tokens
+    agents.py           # install/update/remove screen for agents
+    settings_view.py    # settings screen
+    announcement.py      # banner and blocking popup over input
 houdini/
   python3.11libs/uiready.py
   python3.13libs/uiready.py
@@ -149,33 +149,33 @@ houdini/
 tests/
 ```
 
-Импорты Qt — только через `hutil.PySide`. Переиспользовать из `fxhoudinimcp/install.py`: `resolve_houdini_dirs`, `desktop_config_path`, `printable_argv` — не дублировать определение путей Houdini под три ОС.
+Qt imports — only through `hutil.PySide`. Reuse from `fxhoudinimcp/install.py`: `resolve_houdini_dirs`, `desktop_config_path`, `printable_argv` — don't duplicate the definition of Houdini's paths across three OSes.
 
 ## Verification
 
-1. `python -m houdini_agent_panel install --dry-run` — печатает план, ничего не меняет. Без `--agents` ни один агент не качается.
-2. Установка, перезапуск Houdini 22 → панель в меню панелей, fx поднялся сам, экран выбора агента при первом открытии.
-3. Выбрать OpenCode (бинарь, без Node) → скачался, сверился хеш, стартовал; ответ приходит стримом.
-4. Выбрать Claude Agent (npx) на машине **без** Node → панель ставит портативный Node и стартует агента.
-5. Агент без логина → `auth_required`, панель показывает методы из `authMethods`, вход проходит.
-6. Попросить создать ноду → в ленте вызов инструмента fx со сменой статусов, нода появилась в сцене.
-7. Попросить шелл-команду → кнопки разрешения от агента; `reject_once` отменяет.
-8. Переключить чип режима → `session/set_mode`, поведение меняется.
-9. Открыть вторую панель → новая сессия, первый разговор жив, процесс агента один (проверить по `ps`).
-10. Вторая Houdini с другой сценой → её панель работает со своей сценой (сверить `hip_file` в health fx).
-11. «Свой агент» с произвольной командой → соединение поднимается, сессия работает.
-12. Подменить версию в кеше → появляется плашка, кнопка обновляет.
-13. Доустановить второго агента из экрана «Агенты» → появился в списке, переключение работает; удаление чистит папку данных.
-14. Подложить в фид оповещение обычной важности → тихая плашка, закрывается, второй раз не показывается.
-15. Подложить блокирующее оповещение → попап над вводом, агенту написать нельзя, лента читается, панель закрывается, Houdini не заблокирована; после нажатия кнопки ввод разблокирован.
-16. Оповещение с таргетингом на чужую версию → не показывается.
-17. Выключить оповещения и телеметрию в настройках → сетевых запросов к фиду и в телеметрию нет.
-18. `pytest` — юниты на registry/runtime/updates/announcements/sessions/settings с замоканной сетью.
+1. `python -m houdini_agent_panel install --dry-run` — prints the plan, changes nothing. Without `--agents`, no agent gets downloaded.
+2. Install, restart Houdini 22 → the panel is in the panels menu, fx comes up on its own, the agent picker shows on first open.
+3. Pick OpenCode (a binary, no Node) → downloads, hash verifies, starts; the reply streams in.
+4. Pick Claude Agent (npx) on a machine **without** Node → the panel installs a portable Node and starts the agent.
+5. An agent with no login → `auth_required`, the panel shows the methods from `authMethods`, logging in works.
+6. Ask it to create a node → the feed shows an fx tool call moving through statuses, the node shows up in the scene.
+7. Ask for a shell command → permission buttons from the agent; `reject_once` cancels it.
+8. Switch the mode chip → `session/set_mode`, behavior changes.
+9. Open a second panel → a new session, the first conversation is still alive, there's one agent process (verify with `ps`).
+10. A second Houdini with a different scene → its panel works against its own scene (cross-check `hip_file` in fx's health).
+11. "Custom Agent" with an arbitrary command → the connection comes up, the session works.
+12. Fake a version in the cache → a banner appears, the button updates it.
+13. Install a second agent from the "Agents" screen → shows up in the list, switching works; removing it wipes its data folder.
+14. Drop a normal-severity announcement into the feed → a quiet banner, dismissible, doesn't show a second time.
+15. Drop a blocking announcement → a popup over the input, the agent can't be messaged, the feed is readable, the panel can be closed, Houdini isn't blocked; pressing the button unblocks input.
+16. An announcement targeted at a different version → doesn't show.
+17. Turn off announcements and telemetry in settings → no network requests to the feed or telemetry.
+18. `pytest` — unit tests for registry/runtime/updates/announcements/sessions/settings with the network mocked.
 
 ## Deferred
 
-- Сетевая студийная установка с преднаполнением рантаймов под выбранные ОС.
-- Выбор рабочей папки и добавление корней из `hou.fileReferences()` (API проверен, работает).
-- История между перезапусками (`session/load`, опциональная capability).
-- Несколько разных агентов одновременно в одной Houdini.
-- Внесение панели в апстрим fx через PR.
+- A networked studio install with runtimes pre-populated for chosen OSes.
+- Choosing a working folder and adding roots from `hou.fileReferences()` (API verified, works).
+- History across restarts (`session/load`, an optional capability).
+- Several different agents at once inside one Houdini.
+- Upstreaming the panel into fx via a PR.

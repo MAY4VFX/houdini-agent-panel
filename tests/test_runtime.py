@@ -1,4 +1,4 @@
-"""Тесты установки агентов: скачивание+sha256, Zip Slip, идемпотентность."""
+"""Tests for installing agents: download+sha256, Zip Slip, idempotency."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_download_and_verify_network_error_leaves_nothing(tmp_path, fetcher):
 
     dest = tmp_path / "out" / "file.bin"
     with pytest.raises(NetworkError):
-        # URL не зарегистрирован в FakeFetcher -> NetworkError.
+        # URL isn't registered in FakeFetcher -> NetworkError.
         runtime.download_and_verify("https://example.test/missing.bin", "0" * 64, dest, fetch=fetcher)
     assert not dest.exists()
     assert not dest.with_name(dest.name + ".part").exists()
@@ -145,9 +145,9 @@ def test_extract_archive_does_not_follow_outward_symlink(tmp_path):
         tf.addfile(link_info)
     dest = tmp_path / "out"
 
-    runtime.extract_archive(archive, dest)  # не должно упасть
+    runtime.extract_archive(archive, dest)  # must not raise
 
-    assert not (dest / "link").exists()  # симлинк просто не создан
+    assert not (dest / "link").exists()  # the symlink is simply never created
 
 
 def test_extract_archive_unknown_format_raises(tmp_path):
@@ -186,19 +186,21 @@ def test_install_agent_npx_ensures_node_and_writes_manifest(monkeypatch):
     assert spec.args == ["/fake/npx-cli.js", "--yes", "@test/agent@1.0.0", "--acp"]
     assert spec.env["FOO"] == "bar"
 
-    # PATH до нашего Node обязателен: npx-cli.js порождает дочерние процессы
-    # командой `node` и ищет её в PATH. Без этого агент на машине без Node
-    # умирает до первого байта — регрессия, пойманная только живым запуском.
+    # A PATH pointing to our Node is mandatory: npx-cli.js spawns child
+    # processes with the `node` command and looks for it on PATH. Without
+    # this, the agent on a machine without Node dies before its first byte
+    # — a regression caught only by a live run.
     assert spec.env["PATH"].split(os.pathsep)[0] == str(fake_node.parent)
     assert runtime.is_installed(entry)
     assert runtime.installed_version(entry.id) == "1.0.0"
 
 
 def test_install_agent_npx_is_idempotent(monkeypatch):
-    # "Идемпотентно" здесь — про повторную СЕТЕВУЮ установку пакета/Node, а не
-    # про то, что launch_spec вообще не тронет node.ensure_node(): она дешёвая
-    # (find_system_node — просто shutil.which) и вызывается при каждой сборке
-    # LaunchSpec, в том числе для уже установленного агента.
+    # "Idempotent" here is about not re-downloading the package/Node over
+    # the NETWORK, not about launch_spec never touching node.ensure_node()
+    # at all: that call is cheap (find_system_node is just shutil.which)
+    # and gets called every time a LaunchSpec is built, including for an
+    # already-installed agent.
     entry = _npx_entry()
     monkeypatch.setattr(
         "houdini_agent_panel.node.ensure_node", lambda **k: Path("/fake/node")
@@ -215,7 +217,7 @@ def test_install_agent_npx_is_idempotent(monkeypatch):
     second = runtime.install_agent(entry)
 
     assert second == first
-    # повторная установка не переписывает манифест заново.
+    # reinstalling doesn't rewrite the manifest again.
     assert manifest.read_text("utf-8") == installed_at_after_first
 
 
@@ -282,7 +284,7 @@ def test_install_agent_binary_missing_sha256_refuses_install(tmp_path, fetcher, 
     )
     with pytest.raises(runtime.InstallError):
         runtime.install_agent(entry, fetch=fetcher)
-    assert fetcher.calls == []  # даже не пытались качать — нечем проверить
+    assert fetcher.calls == []  # didn't even try to download — nothing to verify against
 
 
 def test_install_agent_unavailable_platform_raises_with_reason(monkeypatch):
@@ -306,16 +308,16 @@ def test_install_agent_binary_is_idempotent(tmp_path, fetcher, monkeypatch):
     assert len(fetcher.calls) == 1
 
     runtime.install_agent(entry, fetch=fetcher)
-    assert len(fetcher.calls) == 1  # та же версия — второй раз не качали
+    assert len(fetcher.calls) == 1  # same version — didn't download it a second time
 
 
 # --- uninstall_agent / launch_spec -------------------------------------------
 
 
 def test_installed_version_does_not_create_directory_for_unknown_agent():
-    # is_installed()/installed_version() дергаются для каждого агента реестра
-    # при отрисовке экрана "Агенты" — простая проверка статуса не должна
-    # заводить пустые папки на диске для агентов, которых никто не ставил.
+    # is_installed()/installed_version() are called for every agent in the
+    # registry when rendering the "Agents" screen — a plain status check
+    # must not create empty folders on disk for agents nobody ever installed.
     assert runtime.installed_version("never-installed-agent") is None
     assert not (paths.agents_dir() / "never-installed-agent").exists()
 
@@ -332,9 +334,9 @@ def test_uninstall_agent_removes_only_its_own_directory(tmp_path, fetcher, monke
 
     runtime.uninstall_agent(entry.id)
 
-    # Через paths.agent_dir() тут не проверяем: она создаёт директорию как
-    # побочный эффект (paths._sub делает mkdir при каждом обращении), и
-    # проверка "не существует" через неё сама бы её пересоздала.
+    # We don't check this via paths.agent_dir() here: it creates the
+    # directory as a side effect (paths._sub does a mkdir on every access),
+    # and checking "doesn't exist" through it would recreate it right there.
     assert not (paths.agents_dir() / entry.id).exists()
     assert sibling_marker.exists()
     assert runtime.installed_version(entry.id) is None

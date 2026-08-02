@@ -1,19 +1,20 @@
-"""Сравнение версий: агенты из реестра, панель и fx с PyPI.
+"""Version comparison: registry agents, the panel, and fx against PyPI.
 
-Своего парсера версий, а не зависимости на ``packaging``, потому что
-``packaging`` — лишнее колесо в ``--target``-дереве, которое ставится внутрь
-самой Houdini (см. docs/architecture.md §0). Разбор ниже покрывает то, что
-реально встречается в номерах версий на PyPI и в реестре ACP: числовые
-сегменты, пре-релизы (``a``/``b``/``rc``/alpha/beta), ``.postN``, ``.devN``.
-Экзотика вроде эпох (``1!2.0``) или локальных версий (``+abc``) не нужна ни
-одному из трёх пакетов, которые тут сравниваются.
+We use our own version parser instead of a dependency on ``packaging``,
+because ``packaging`` is an extra wheel in the ``--target`` tree that gets
+installed inside Houdini itself (see docs/architecture.md §0). The parsing
+below covers what actually shows up in version numbers on PyPI and in the
+ACP registry: numeric segments, pre-releases
+(``a``/``b``/``rc``/alpha/beta), ``.postN``, ``.devN``. Exotic things like
+epochs (``1!2.0``) or local versions (``+abc``) aren't needed by any of the
+three packages compared here.
 
-Сравнение по сегментам (не отсортированные строки!) сохраняет тот же порядок
-приоритетов, что и PEP 440: ``devN`` раньше любого пре-релиза, финальный
-релиз позже любого пре-релиза, ``postN`` позже финального. Мусор в строке
-версии — ``None``/``False``, не исключение: тихая плашка «обновление
-доступно» появляющаяся каждый день из-за нечитаемой версии хуже, чем
-отсутствие плашки вообще.
+Comparing by segments (not sorted strings!) preserves the same priority
+order as PEP 440: ``devN`` comes before any pre-release, a final release
+comes after any pre-release, ``postN`` comes after the final release.
+Garbage in a version string yields ``None``/``False``, not an exception: a
+silent "update available" banner showing up every day because of an
+unreadable version is worse than no banner at all.
 """
 
 from __future__ import annotations
@@ -31,14 +32,14 @@ from .network import Fetcher, NetworkError, fetch_json
 from .settings import Settings
 
 if TYPE_CHECKING:
-    # Только для подсказок типов — во время исполнения на registry.py не
-    # завязываемся (duck typing по .id/.name/.version), чтобы модуль не тянул
-    # за собой циклических или преждевременных импортов.
+    # Type hints only — we don't tie ourselves to registry.py at runtime
+    # (duck typing on .id/.name/.version), so the module doesn't drag in
+    # circular or premature imports.
     from .registry import AgentEntry
 
 PYPI_URL = "https://pypi.org/pypi/{name}/json"
 
-#: Пакеты панели и fx на PyPI — по ним сверяется kind="panel"/"fx".
+#: The panel's and fx's packages on PyPI — kind="panel"/"fx" are checked against these.
 _PANEL_PACKAGE = "houdini-agent-panel"
 _FX_PACKAGE = "fxhoudinimcp"
 
@@ -49,13 +50,13 @@ _MAX_AGE = timedelta(days=1)
 @dataclass(frozen=True)
 class Update:
     kind: str  # "agent" | "panel" | "fx"
-    target: str  # agent_id или имя пакета
-    label: str  # что показать человеку
+    target: str  # agent_id or the package name
+    label: str  # what to show the human
     current: str
     latest: str
 
 
-# --- разбор и сравнение версий ----------------------------------------------
+# --- version parsing and comparison ----------------------------------------
 
 _VERSION_RE = re.compile(
     r"""
@@ -70,7 +71,7 @@ _VERSION_RE = re.compile(
     re.VERBOSE | re.IGNORECASE,
 )
 
-#: PEP 440 считает "c" синонимом "rc"; "pre"/"preview" — то же самое семейство.
+#: PEP 440 treats "c" as a synonym for "rc"; "pre"/"preview" are the same family.
 _PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}
 
 _NEG_INF = float("-inf")
@@ -78,7 +79,7 @@ _POS_INF = float("inf")
 
 
 def _parse_version(text: str) -> tuple | None:
-    """``(release, pre, post, dev)`` или ``None`` на всё, что не разобралось."""
+    """``(release, pre, post, dev)``, or ``None`` for anything that doesn't parse."""
     if not isinstance(text, str) or not text.strip():
         return None
     match = _VERSION_RE.match(text)
@@ -86,8 +87,9 @@ def _parse_version(text: str) -> tuple | None:
         return None
 
     release = tuple(int(part) for part in match.group("release").split("."))
-    # Хвостовые нули не значимы (1.2.0 == 1.2): срезаем, чтобы сравнение
-    # кортежей разной длины не путало "короче" с "меньше".
+    # Trailing zeros aren't significant (1.2.0 == 1.2): trim them so
+    # comparing tuples of different lengths doesn't confuse "shorter" with
+    # "smaller".
     while len(release) > 1 and release[-1] == 0:
         release = release[:-1]
 
@@ -111,10 +113,10 @@ def _parse_version(text: str) -> tuple | None:
 
 
 def _version_key(text: str):
-    """Ключ для сравнения кортежами. ``None`` — версия не разобралась.
+    """A key for tuple comparison. ``None`` — the version didn't parse.
 
-    Порядок внутри одного релиза (по PEP 440):
-    ``devN`` < любой пре-релиз < финальный релиз < ``postN``.
+    Ordering within one release (per PEP 440):
+    ``devN`` < any pre-release < final release < ``postN``.
     """
     parsed = _parse_version(text)
     if parsed is None:
@@ -122,9 +124,9 @@ def _version_key(text: str):
     release, pre, post, dev = parsed
 
     if pre is None and post is None and dev is not None:
-        pre_key: tuple = (_NEG_INF,)  # чистый dev-релиз — раньше всех пре-релизов
+        pre_key: tuple = (_NEG_INF,)  # a pure dev release comes before every pre-release
     elif pre is None:
-        pre_key = (_POS_INF,)  # финальный релиз — позже любого пре-релиза
+        pre_key = (_POS_INF,)  # a final release comes after any pre-release
     else:
         pre_key = pre
 
@@ -134,11 +136,12 @@ def _version_key(text: str):
 
 
 def compare_versions(a: str, b: str) -> int | None:
-    """-1/0/1 по PEP 440-порядку; ``None`` — хоть одна версия не разобралась.
+    """-1/0/1 following PEP 440 ordering; ``None`` — at least one version didn't parse.
 
-    Общая точка сравнения версий на весь проект: ``announcements.py``
-    использует её же для таргетинга по ``panel_versions``, чтобы не заводить
-    второй парсер версий рядом.
+    The single shared point of version comparison for the whole project:
+    ``announcements.py`` uses this same function for targeting by
+    ``panel_versions``, so it doesn't need a second version parser next to
+    it.
     """
     key_a, key_b = _version_key(a), _version_key(b)
     if key_a is None or key_b is None:
@@ -151,7 +154,7 @@ def compare_versions(a: str, b: str) -> int | None:
 
 
 def is_newer(latest: str, current: str) -> bool:
-    """``latest`` строго новее ``current``. Мусор в любой из строк — ``False``."""
+    """Is ``latest`` strictly newer than ``current``? Garbage in either string yields ``False``."""
     cmp = compare_versions(latest, current)
     return cmp is not None and cmp > 0
 
@@ -160,11 +163,11 @@ def is_newer(latest: str, current: str) -> bool:
 
 
 def pypi_latest(name: str, *, fetch: Fetcher | None = None) -> str | None:
-    """Последняя версия пакета на PyPI. ``None`` — ответ не в ожидаемой форме.
+    """The latest version of a package on PyPI. ``None`` — the response wasn't in the expected shape.
 
-    Сетевые ошибки не глушатся здесь: это решение вызывающей стороны
-    (``check`` ниже глушит их поштучно, чтобы недоступность PyPI для одного
-    пакета не прятала результат для другого).
+    Network errors aren't swallowed here: that's the caller's call
+    (``check`` below swallows them one at a time, so one package being
+    unavailable on PyPI doesn't hide the result for another).
     """
     payload = fetch_json(PYPI_URL.format(name=name), fetch=fetch)
     if not isinstance(payload, dict):
@@ -181,7 +184,7 @@ def _current_panel_version() -> str | None:
         from importlib.metadata import version
 
         return version(_PANEL_PACKAGE)
-    except Exception:  # noqa: BLE001 - метаданных может не быть в --target-дереве
+    except Exception:  # noqa: BLE001 - metadata may be missing in a --target tree
         try:
             from . import __version__
 
@@ -195,11 +198,11 @@ def _current_fx_version() -> str | None:
         from importlib.metadata import version
 
         return version(_FX_PACKAGE)
-    except Exception:  # noqa: BLE001 - fxhoudinimcp недоступен вне Houdini-плагина
+    except Exception:  # noqa: BLE001 - fxhoudinimcp is unavailable outside the Houdini plugin
         return None
 
 
-# --- проверка --------------------------------------------------------------
+# --- checking --------------------------------------------------------------
 
 
 def _cache_path() -> Path:
@@ -264,19 +267,20 @@ def check(
     panel_version: str | None = None,
     fx_version: str | None = None,
 ) -> list[Update]:
-    """Список доступных обновлений: агенты (из ``entries``), панель, fx.
+    """The list of available updates: agents (from ``entries``), the panel, fx.
 
-    ``settings.check_updates=False`` — ``[]`` и ни одного сетевого вызова,
-    проверяется тестом по счётчику ``FakeFetcher.calls``.
+    ``settings.check_updates=False`` returns ``[]`` and makes zero network
+    calls, verified by a test via the ``FakeFetcher.calls`` counter.
 
-    Кеш в ``<cache>/updates.json`` держит всю проверку целиком (агенты в неё
-    попадают тоже, хотя сети не требуют) не чаще раза в сутки — так проще
-    и совпадает с контрактом design.md, который не разводит агентов и PyPI
-    по разной частоте проверки. ``force`` обходит кеш.
+    The cache at ``<cache>/updates.json`` covers the whole check as one unit
+    (agents end up in it too, even though they need no network) no more
+    than once a day — it's simpler this way, and matches the design.md
+    contract, which doesn't split agents and PyPI into different check
+    frequencies. ``force`` bypasses the cache.
 
-    ``panel_version``/``fx_version`` — переопределение автоопределяемой
-    текущей версии (тестам нужно контролировать её без реальных метаданных
-    пакета в окружении); по умолчанию берутся из ``importlib.metadata``.
+    ``panel_version``/``fx_version`` override the auto-detected current
+    version (tests need to control it without real package metadata in the
+    environment); by default they're taken from ``importlib.metadata``.
     """
     if not settings.check_updates:
         return []
@@ -313,8 +317,9 @@ def check(
         try:
             latest = pypi_latest(package, fetch=fetch)
         except NetworkError:
-            # Один недоступный PyPI-пакет не должен прятать результат для
-            # другого (агенты уже посчитаны, второй пакет ниже по циклу).
+            # One unavailable PyPI package shouldn't hide the result for
+            # another (agents are already computed, the second package is
+            # further down the loop).
             continue
         if latest and is_newer(latest, current):
             updates.append(

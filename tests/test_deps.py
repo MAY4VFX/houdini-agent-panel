@@ -1,8 +1,8 @@
-"""Тесты на поиск hython и установку зависимостей панели в Houdini-Python.
+"""Tests for finding hython and installing the panel's dependencies into Houdini's Python.
 
-Настоящую Houdini не запускаем: `find_hython`/`python_version_of` работают на
-моках файловой системы (через monkeypatch корневых констант модуля) и
-`subprocess.run`.
+We never launch a real Houdini: `find_hython`/`python_version_of` work
+against filesystem mocks (via monkeypatching the module's root constants)
+and `subprocess.run`.
 """
 
 from __future__ import annotations
@@ -156,7 +156,7 @@ def test_python_version_of_raises_deps_error_on_timeout(monkeypatch):
 
 def test_install_deps_dry_run_does_not_touch_disk_or_subprocess(tmp_path, monkeypatch):
     def explode(*args, **kwargs):
-        raise AssertionError("dry-run не должен звать subprocess")
+        raise AssertionError("dry-run must not invoke subprocess")
 
     monkeypatch.setattr(deps.subprocess, "run", explode)
     target = tmp_path / "deps"
@@ -216,11 +216,11 @@ def _capture_install_argv(monkeypatch, tmp_path, **kwargs) -> list[str]:
 
 
 def test_install_deps_find_links_alone_does_not_cut_off_pypi(monkeypatch, tmp_path):
-    """«Возьми колесо панели отсюда» и «не ходи в интернет» — разные намерения.
+    """"Take the panel's wheel from here" and "don't touch the internet" are different intents.
 
-    Когда это был один флаг, главный сценарий разработки не работал: ставишь
-    локально собранное колесо панели, а `acp` и `pydantic` взять неоткуда,
-    потому что `--no-index` закрыл заодно и их.
+    When this was a single flag, the main development scenario didn't work:
+    you install a locally built panel wheel, but there's nowhere to get
+    `acp` and `pydantic` from, because `--no-index` shut those off too.
     """
     argv = _capture_install_argv(monkeypatch, tmp_path, find_links="/local/wheels")
 

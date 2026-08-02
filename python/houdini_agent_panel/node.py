@@ -1,8 +1,9 @@
-"""Портативный Node.js: найти системный или скачать свой.
+"""Portable Node.js: find a system one or download our own.
 
-4 из 6 агентов v1 (см. design.md) ставятся через npx, поэтому Node обязателен.
-Систему никогда не трогаем — либо используем то, что уже стоит и достаточно
-свежее, либо качаем официальный архив с nodejs.org в `paths.node_dir()`.
+4 of the 6 v1 agents (see design.md) install via npx, so Node is mandatory.
+We never touch the system install — we either use what's already there and
+recent enough, or download the official archive from nodejs.org into
+`paths.node_dir()`.
 """
 
 from __future__ import annotations
@@ -22,20 +23,20 @@ from . import runtime
 from .network import Fetcher, urlopen_fetch
 from .runtime import ChecksumError, InstallError, Progress
 
-#: Ниже этой версии считаем системный Node непригодным (слишком старый npx).
+#: Below this version we consider the system Node unusable (npx too old).
 MIN_NODE = (20, 0, 0)
-#: Что качаем, если системного нет или он слишком стар.
+#: What we download if there's no system Node or it's too old.
 NODE_VERSION = "22.14.0"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
 
 def find_system_node(minimum: tuple[int, int, int] = MIN_NODE) -> Path | None:
-    """Системный `node`, если он есть в PATH и не старше `minimum`.
+    """The system `node`, if it's on PATH and not older than `minimum`.
 
-    Мусор в выводе `node --version` (не тот бинарь, повреждённая установка) —
-    трактуем как "системного нет", а не падаем: панель не обязана понимать,
-    что именно пошло не так с чужим Node на диске у человека.
+    Garbage in `node --version`'s output (wrong binary, a broken install) is
+    treated as "no system Node", not a crash: the panel isn't obligated to
+    understand exactly what's wrong with someone else's Node on disk.
     """
     found = shutil.which("node")
     if not found:
@@ -63,11 +64,11 @@ def _parse_version(text: str) -> tuple[int, int, int] | None:
 
 
 def node_platform() -> tuple[str, str]:
-    """("darwin", "arm64") — имена, как их использует nodejs.org в архивах."""
+    """("darwin", "arm64") — the names nodejs.org uses in its archives."""
     system = platform.system()
     os_name = {"Darwin": "darwin", "Linux": "linux", "Windows": "win"}.get(system)
     if os_name is None:
-        raise InstallError(f"неизвестная платформа: {system!r}")
+        raise InstallError(f"unknown platform: {system!r}")
     machine = platform.machine().lower()
     arch = {
         "arm64": "arm64",
@@ -89,7 +90,7 @@ def shasums_url(version: str = NODE_VERSION) -> str:
 
 
 def _find_sha256(shasums_text: str, archive_name: str) -> str | None:
-    """SHASUMS256.txt — строки вида `<hex-sha256>  <filename>`."""
+    """SHASUMS256.txt — lines of the form `<hex-sha256>  <filename>`."""
     for line in shasums_text.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == archive_name:
@@ -98,7 +99,7 @@ def _find_sha256(shasums_text: str, archive_name: str) -> str | None:
 
 
 def _node_bin_path(root: Path, os_name: str | None = None) -> Path:
-    """Путь к бинарю node внутри распакованного архива nodejs.org."""
+    """Path to the node binary inside a nodejs.org archive once extracted."""
     os_name = os_name or node_platform()[0]
     if os_name == "win":
         return root / "node.exe"
@@ -108,10 +109,13 @@ def _node_bin_path(root: Path, os_name: str | None = None) -> Path:
 def install_node(
     *, version: str = NODE_VERSION, progress: Progress | None = None, fetch: Fetcher | None = None
 ) -> Path:
-    """Скачать архив с nodejs.org, сверить по SHASUMS256.txt, распаковать.
+    """Download the archive from nodejs.org, verify it against
+    SHASUMS256.txt, extract it.
 
-    Идемпотентно: версия уже стоит в `paths.node_dir()/<version>` — сеть не
-    трогаем вовсе. Систему не трогаем никогда — ставим только в свой каталог.
+    Idempotent: if the version is already installed at
+    `paths.node_dir()/<version>`, we don't touch the network at all. We
+    never touch the system install — we only install into our own
+    directory.
     """
     target_dir = paths.node_dir() / version
     node_bin = _node_bin_path(target_dir)
@@ -125,7 +129,7 @@ def install_node(
     shasums_text = fetch_impl(shasums_url(version)).decode("utf-8")
     sha256 = _find_sha256(shasums_text, archive_name)
     if sha256 is None:
-        raise ChecksumError(f"{archive_name}: нет записи в SHASUMS256.txt")
+        raise ChecksumError(f"{archive_name}: no entry in SHASUMS256.txt")
 
     node_root = paths.node_dir()
     with tempfile.TemporaryDirectory(dir=node_root) as tmp_name:
@@ -139,7 +143,7 @@ def install_node(
 
         roots = list(extract_root.iterdir())
         if len(roots) != 1 or not roots[0].is_dir():
-            raise InstallError(f"{archive_name}: неожиданное содержимое архива")
+            raise InstallError(f"{archive_name}: unexpected archive contents")
 
         if target_dir.exists():
             shutil.rmtree(target_dir)
@@ -148,18 +152,20 @@ def install_node(
 
     result = _node_bin_path(target_dir)
     if not result.exists():
-        raise InstallError(f"после распаковки не найден бинарь node в {target_dir}")
+        raise InstallError(f"node binary not found in {target_dir} after extraction")
     return result
 
 
 def ensure_node(*, progress: Progress | None = None, fetch: Fetcher | None = None) -> Path:
-    """Системный Node, если он годится; иначе — свой в `paths.node_dir()`.
+    """The system Node if it's good enough; otherwise, our own under
+    `paths.node_dir()`.
 
-    `fetch` не было в исходном контракте архитектуры (`docs/architecture.md`
-    §5 перечисляет `ensure_node(*, progress=None) -> Path`), но без него
-    `install_agent` не смог бы прокинуть `FakeFetcher` теста через
-    `ensure_node -> install_node -> network`. Отступление сделано и здесь, и
-    во всех вызывающих (`runtime.install_agent`, `runtime.launch_spec`).
+    `fetch` wasn't in the original architecture contract
+    (`docs/architecture.md` §5 lists `ensure_node(*, progress=None) -> Path`),
+    but without it `install_agent` couldn't thread the test's `FakeFetcher`
+    through `ensure_node -> install_node -> network`. The deviation was made
+    both here and in every caller (`runtime.install_agent`,
+    `runtime.launch_spec`).
     """
     system_node = find_system_node()
     if system_node is not None:
@@ -170,39 +176,40 @@ def ensure_node(*, progress: Progress | None = None, fetch: Fetcher | None = Non
 def npx_argv(node_bin: Path, package: str, args: Sequence[str]) -> list[str]:
     """`[<node>, <npx-cli.js>, "--yes", package, *args]`.
 
-    Зовём `npx-cli.js` напрямую нашим же `node`, а не шелловый шим `npx`: шим
-    ищет `node` в PATH, а окружение агента у нас почти пустое
-    (`docs/facts/acp-sdk.md` — `default_environment()`), в нём PATH до нашего
-    Node может не быть вовсе.
+    We call `npx-cli.js` directly with our own `node`, rather than the
+    shell shim `npx`: the shim looks for `node` on PATH, and our agent
+    environment is nearly empty (`docs/facts/acp-sdk.md` —
+    `default_environment()`), so PATH might not even lead to our Node at
+    all.
     """
     npx_cli = _npx_cli_path(node_bin)
     return [str(node_bin), str(npx_cli), "--yes", package, *args]
 
 
 class NpxNotFoundError(RuntimeError):
-    """Рядом с этим Node нет npm. Явная ошибка вместо пути в никуда."""
+    """There's no npm next to this Node. An explicit error instead of a dead end."""
 
 
 def npx_cli_candidates(node_bin: Path) -> list[Path]:
-    """Где может лежать `npx-cli.js` относительно данного `node`.
+    """Where `npx-cli.js` might live relative to a given `node`.
 
-    Раньше здесь была одна догадка с `resolve()`, и она разваливалась ровно на
-    самом типичном случае — Homebrew. `/opt/homebrew/bin/node` это symlink в
-    `Cellar/node/<версия>/bin/node`, но npm Homebrew кладёт НЕ туда, а в
-    `/opt/homebrew/lib/node_modules`. То есть `resolve()` уводил в дерево, где
-    npm нет вовсе, и мы возвращали несуществующий путь как ни в чём не бывало.
+    There used to be a single guess here using `resolve()`, and it fell
+    apart on exactly the most common case — Homebrew. `/opt/homebrew/bin/node`
+    is a symlink into `Cellar/node/<version>/bin/node`, but Homebrew's npm
+    isn't installed there — it's in `/opt/homebrew/lib/node_modules`. So
+    `resolve()` led into a tree that has no npm at all, and we'd return a
+    nonexistent path as if nothing was wrong.
 
-    Поэтому теперь это список: и по симлинку, и по реальному пути, и обе
-    раскладки — POSIX (`bin/../lib/node_modules`) и Windows
-    (`node_modules` рядом с `node.exe`). Проверять существование обязан
-    вызывающий.
+    So now it's a list: via the symlink, via the real path, and both
+    layouts — POSIX (`bin/../lib/node_modules`) and Windows (`node_modules`
+    next to `node.exe`). Checking existence is the caller's job.
     """
     candidates: list[Path] = []
     for base in (node_bin, node_bin.resolve()):
         parent = base.parent
-        # Windows: node.exe и node_modules лежат в одном каталоге.
+        # Windows: node.exe and node_modules live in the same directory.
         candidates.append(parent / "node_modules" / "npm" / "bin" / "npx-cli.js")
-        # POSIX: <root>/bin/node и <root>/lib/node_modules.
+        # POSIX: <root>/bin/node and <root>/lib/node_modules.
         candidates.append(parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js")
 
     unique: list[Path] = []
@@ -213,34 +220,36 @@ def npx_cli_candidates(node_bin: Path) -> list[Path]:
 
 
 def _npx_cli_path(node_bin: Path) -> Path:
-    """Первый существующий кандидат.
+    """The first candidate that actually exists.
 
-    Не нашлось ничего — падаем с внятным текстом прямо здесь. Вернуть
-    несуществующий путь означало бы запустить `node <нет-такого-файла>`:
-    процесс умирает мгновенно и молча, а панель остаётся ждать приветствия от
-    покойника. Именно так это и выглядело у художника — «Запускаю…» навсегда.
+    If nothing was found, we fail right here with a clear message.
+    Returning a nonexistent path would mean running `node <no-such-file>`:
+    the process dies instantly and silently, while the panel is left
+    waiting for a greeting from a corpse. That's exactly what it looked
+    like for the artist — "Launching…" forever.
     """
     for candidate in npx_cli_candidates(node_bin):
         if candidate.is_file():
             return candidate
     raise NpxNotFoundError(
-        f"рядом с {node_bin} нет npm (искал npx-cli.js в: "
+        f"no npm found next to {node_bin} (looked for npx-cli.js in: "
         + ", ".join(str(c) for c in npx_cli_candidates(node_bin))
         + ")"
     )
 
 
 def path_with_node(node_bin: Path, base: str | None = None) -> str:
-    """PATH, в начале которого лежит каталог с нашим `node`.
+    """A PATH with our `node`'s directory prepended.
 
-    Нужно не нам, а самому npm: `npx-cli.js` порождает дочерние процессы
-    командой `node` и ищет её в PATH. Без этого агент на машине без Node
-    умирает до первого байта, а клиент видит только «соединение закрыто» —
-    диагностировать это со стороны панели практически нечем.
+    This isn't for us, it's for npm itself: `npx-cli.js` spawns child
+    processes with the `node` command and looks for it on PATH. Without
+    this, the agent on a machine without Node dies before its first byte,
+    and the client only sees "connection closed" — there's practically
+    nothing to diagnose from the panel's side.
 
-    Дописываем в начало к тому PATH, который уже есть, а не заменяем его:
-    агенту могут понадобиться и другие инструменты с машины, и отбирать их
-    у него мы не собираемся.
+    We prepend to whatever PATH already exists rather than replacing it:
+    the agent may need other tools from the machine too, and we're not
+    going to take them away from it.
     """
     node_dir = str(node_bin.parent)
     existing = base if base is not None else os.environ.get("PATH", "")

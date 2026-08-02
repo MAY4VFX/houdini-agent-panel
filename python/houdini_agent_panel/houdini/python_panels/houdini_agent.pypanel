@@ -7,22 +7,23 @@
  in a single file. -->
   <interface name="hap::agent" label="Agent" icon="MISC_python" showNetworkNavigationBar="false" help_url="">
     <script><![CDATA[
-# Панель ACP-агента. onCreateInterface() обязан вернуть QWidget при любом
-# раскладе: если зависимости панели не поставились (прервавшийся install)
-# или сам импорт панели упал по любой другой причине, художник должен увидеть
-# читаемую причину и подсказку, а не пустую серую панель без единого слова.
+# The ACP agent panel. onCreateInterface() must return a QWidget no matter
+# what: if the panel's dependencies failed to install (an interrupted
+# install) or the panel's own import fails for any other reason, the artist
+# should see a readable cause and a hint, not an empty gray panel without a
+# single word on it.
 
-# Табов одной панели может быть несколько, и каждый держит свой виджет.
-# Различаем их по paneTab из kwargs — так делают штатные панели SideFX
-# (см. LightLinker.pypanel).
+# A single panel can have several tabs, and each one holds its own widget.
+# We tell them apart by the paneTab from kwargs — that's how SideFX's own
+# panels do it (see LightLinker.pypanel).
 _panels = {}
 
 
 def _pane_key():
-    # kwargs — глобал, который Houdini кладёт в область видимости этого скрипта.
-    # Обращаться к нему по имени напрямую нельзя: при вызове из другого
-    # контекста получим NameError ровно в тот момент, когда панель и так уже
-    # в беде.
+    # kwargs is a global that Houdini places into this script's scope.
+    # It can't be referenced by name directly: calling from a different
+    # context would raise NameError at the exact moment the panel is
+    # already in trouble.
     pane = (globals().get("kwargs") or {}).get("paneTab")
     return id(pane) if pane is not None else None
 
@@ -55,9 +56,10 @@ def onCreateInterface():
 
 
 def onDestroyInterface():
-    # Именно закрытие таба. onDeactivateInterface для этого не годится: он
-    # срабатывает всякий раз, когда художник переключился на соседнюю вкладку
-    # пейна, и teardown на нём гасил бы живого агента посреди работы.
+    # Specifically the tab being closed. onDeactivateInterface doesn't work
+    # for this: it fires every time the artist switches to a neighboring
+    # tab in the pane, and tearing down on that would kill a live agent in
+    # the middle of its work.
     panel = _panels.pop(_pane_key(), None)
     if panel is None:
         return
@@ -66,7 +68,7 @@ def onDestroyInterface():
         try:
             shutdown()
         except Exception as exc:  # noqa: BLE001
-            print("[houdini-agent-panel] ошибка при закрытии панели: %r" % (exc,))
+            print("[houdini-agent-panel] error while closing the panel: %r" % (exc,))
 
 
 def _log_location():
@@ -95,7 +97,7 @@ def _log_exception(what, exc):
 def _error_widget(exc):
     try:
         from houdini_agent_panel.ui.qt import QtWidgets
-    except Exception:  # noqa: BLE001 - последний рубеж: шим самой Houdini
+    except Exception:  # noqa: BLE001 - last resort: Houdini's own shim
         from hutil.Qt import QtWidgets
 
     message = (
@@ -110,8 +112,8 @@ def _error_widget(exc):
     layout = QtWidgets.QVBoxLayout(widget)
     label = QtWidgets.QLabel(message)
     label.setWordWrap(True)
-    # Текст ошибки нужно уметь выделить и скопировать в баг-репорт: переписывать
-    # трейсбек руками с экрана никто не станет.
+    # The error text needs to be selectable and copyable into a bug report:
+    # nobody's going to retype a traceback off the screen by hand.
     try:
         from houdini_agent_panel.ui.qt import Qt
 

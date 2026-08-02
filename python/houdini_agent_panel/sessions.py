@@ -1,9 +1,9 @@
-"""Пул сессий на одном ACP-соединении.
+"""Session pool on top of a single ACP connection.
 
-Один `SessionPool` на процесс Houdini (модуль-синглтон `pool()`) — второй таб
-панели обязан видеть тот же список сессий и тот же живой процесс агента: два
-таба, один `AcpClient`, один процесс агента, разные `current` (см.
-docs/architecture.md §7).
+One `SessionPool` per Houdini process (the module-level singleton `pool()`)
+— a second panel tab must see the same session list and the same live agent
+process: two tabs, one `AcpClient`, one agent process, different `current`
+(see docs/architecture.md §7).
 """
 
 from __future__ import annotations
@@ -38,24 +38,24 @@ class Usage:
 @dataclass
 class SessionState:
     session_id: str
-    title: str  # первая строка первого промпта, иначе «Новый разговор»
+    title: str  # the first line of the first prompt, otherwise "New conversation"
     cwd: str
     created_at: float
     current_mode_id: str | None = None
     available_modes: list[SessionMode] = field(default_factory=list)
     available_commands: list[AvailableCommand] = field(default_factory=list)
-    entries: list[Entry] = field(default_factory=list)  # лента, см. §8
+    entries: list[Entry] = field(default_factory=list)  # the feed, see §8
     usage: Usage | None = None
     busy: bool = False
 
 
 class SessionPool(QtCore.QObject):
-    """Живёт на главном потоке, хранит состояния всех открытых сессий.
+    """Lives on the main thread, holds the state of every open session.
 
-    Сам по себе ничего не знает про ACP — `AcpClient` наполняет его через
-    сигналы (`session_started`, `message_chunk`, ...), панель читает через
-    `get`/`all`/`current`. Разделение так же, как `transcript_model.py`:
-    здесь только состояние, отрисовка — в `ui/`.
+    Knows nothing about ACP by itself — `AcpClient` fills it in via signals
+    (`session_started`, `message_chunk`, ...), the panel reads through
+    `get`/`all`/`current`. The split is the same as `transcript_model.py`:
+    only state lives here, rendering lives in `ui/`.
     """
 
     added = Signal(str)
@@ -66,9 +66,10 @@ class SessionPool(QtCore.QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._states: dict[str, SessionState] = {}
-        # Порядок вставки важен для UI (список сессий сверху) — обычный dict
-        # в Python 3.7+ его и так хранит, но полагаться на это неявно не
-        # хочется, поэтому дублируем явным списком id.
+        # Insertion order matters for the UI (session list on top) — a
+        # plain dict in Python 3.7+ preserves it anyway, but we don't want
+        # to rely on that implicitly, so we duplicate it with an explicit
+        # id list.
         self._order: list[str] = []
         self._current_id: str | None = None
 
@@ -113,7 +114,7 @@ class SessionPool(QtCore.QObject):
             self.current_changed.emit(self._current_id)
 
     def mark_changed(self, session_id: str) -> None:
-        """Состояние сессии поменяли снаружи (та же ссылка) — просто уведомить."""
+        """The session's state was changed externally (same reference) — just notify."""
         if session_id in self._states:
             self.changed.emit(session_id)
 
@@ -122,10 +123,10 @@ _pool: SessionPool | None = None
 
 
 def pool() -> SessionPool:
-    """Синглтон на процесс Houdini.
+    """Singleton per Houdini process.
 
-    Не потокобезопасно намеренно: `SessionPool` — `QObject`, живёт и
-    создаётся на главном потоке, как и весь остальной UI-код панели.
+    Deliberately not thread-safe: `SessionPool` is a `QObject`, created and
+    living on the main thread, like the rest of the panel's UI code.
     """
     global _pool
     if _pool is None:
@@ -134,6 +135,6 @@ def pool() -> SessionPool:
 
 
 def reset_pool_for_tests() -> None:
-    """Только для тестов: синглтон переживает между тестами иначе."""
+    """Tests only: the singleton would otherwise survive between tests."""
     global _pool
     _pool = None

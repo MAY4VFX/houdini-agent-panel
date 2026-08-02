@@ -1,52 +1,54 @@
-# Телеметрия — политика
+# Telemetry — policy
 
-Houdini Agent Panel умеет присылать анонимную статистику использования. По
-умолчанию это выключено, и никакая настройка не подскажет вам залогиниться,
-чтобы это включить — только тумблер в настройках панели.
+Houdini Agent Panel can send anonymous usage statistics. This is off by
+default, and no setting will ask you to log in to turn it on — only the
+toggle in the panel's settings.
 
-## Что собирается
+## What is collected
 
-Только при включённой телеметрии и только если у вашей установки панели
-задан адрес приёмника (`HAP_TELEMETRY_URL` — студийная/дистрибутивная
-настройка, не то, что правит художник):
+Only with telemetry turned on, and only if your panel install has a
+receiver address configured (`HAP_TELEMETRY_URL` — a studio/distribution
+setting, not something an artist edits):
 
-- версия панели, версия `fxhoudinimcp`, версия используемого ACP-агента;
-- версия Houdini и операционной системы;
-- имя события (например, "панель открыта", "агент подключился") и, при
-  падении, — тип исключения (например `ConnectionError`), без текста
-  сообщения и без стектрейса.
+- the panel's version, the `fxhoudinimcp` version, the version of the ACP
+  agent in use;
+- the Houdini version and operating system;
+- the event name (e.g. "panel opened", "agent connected") and, on a
+  crash, the exception type (e.g. `ConnectionError`), with no message text
+  and no stack trace.
 
-## Что не собирается никогда
+## What is never collected
 
-- Пути к файлам и папкам — ни `$HIP`, ни путь к сцене, ни путь к панели.
-- Содержимое сцены Houdini: имена нод, геометрия, параметры.
-- Текст промптов и ответов агента, содержимое переписки.
-- Идентификаторы сессий агента, идентификаторы пользователя, имя студии.
+- File and folder paths — not `$HIP`, not the scene path, not the panel's path.
+- The contents of the Houdini scene: node names, geometry, parameters.
+- The text of prompts and the agent's replies, or any conversation content.
+- Agent session ids, user identifiers, the studio's name.
 
-Список того, что вообще разрешено положить в событие, зашит в коде
-(`telemetry.build_payload`) как жёсткий allowlist — событие с незнакомым
-полем не "почти безопасно записывается", а полем без разбора отбрасывается
-целиком. Это проверяется автоматическим тестом, который сверяет каждое
-собранное событие на отсутствие путей и запрещённых ключей.
+The list of what's even allowed into an event is hardcoded
+(`telemetry.build_payload`) as a strict allowlist — an event with an
+unfamiliar field isn't "written more or less safely," the unrecognized
+field is dropped entirely. This is checked by an automated test that
+verifies every collected event for the absence of paths and forbidden
+keys.
 
-## Где включается и выключается
+## Where it's turned on and off
 
-Настройки панели → тумблер «Телеметрия». Выключено по умолчанию. Изменение
-применяется сразу, без перезапуска Houdini.
+Panel Settings → "Telemetry" toggle. Off by default. The change takes
+effect immediately, no Houdini restart needed.
 
-## Куда уходит
+## Where it goes
 
-На адрес, заданный переменной окружения `HAP_TELEMETRY_URL`. Если она не
-задана, включённый тумблер ничего не отправляет: панель работает точно так
-же, как если бы телеметрия была выключена — сетевых запросов нет вовсе, а не
-"запросы уходят в никуда".
+To the address set by the `HAP_TELEMETRY_URL` environment variable. If it
+isn't set, a turned-on toggle sends nothing: the panel behaves exactly as
+if telemetry were off — there are no network requests at all, not
+"requests that go nowhere."
 
-Любая сетевая ошибка при отправке молча игнорируется: телеметрия не имеет
-права замедлить панель или показать художнику ошибку.
+Any network error while sending is silently ignored: telemetry is not
+allowed to slow down the panel or show an artist an error.
 
-## Как удалить уже отправленное
+## How to delete what's already been sent
 
-Данные анонимны и не содержат идентификатора, по которому можно было бы
-выделить конкретную установку панели среди прочих — удалить точечно нечего.
-Чтобы прекратить дальнейший сбор, выключите тумблер «Телеметрия» в настройках
-панели.
+The data is anonymous and carries no identifier that could single out a
+specific panel install among others — there's nothing to delete on a
+per-install basis. To stop further collection, turn off the "Telemetry"
+toggle in the panel's settings.

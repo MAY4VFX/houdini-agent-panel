@@ -85,10 +85,10 @@ def test_oncreate_and_ondestroy_are_defined(panel_namespace):
 
 
 def test_shutdown_is_not_wired_to_ondeactivate(panel_namespace):
-    """onDeactivateInterface срабатывает на каждое переключение таба — если бы
-    shutdown() был повешен на него, панель гасила бы соединение с агентом
-    просто от того, что художник посмотрел в соседнюю вкладку. Правильное
-    место — onDestroyInterface (реальное закрытие таба)."""
+    """onDeactivateInterface fires on every tab switch — if shutdown() were
+    hooked to it, the panel would kill the agent's connection just because
+    the artist glanced at a neighboring tab. The right place for it is
+    onDestroyInterface (the tab actually closing)."""
     assert "onDeactivateInterface" not in panel_namespace
 
 
@@ -100,9 +100,9 @@ def test_oncreate_returns_widget_backed_by_agent_panel(panel_namespace, fake_age
 
 
 def test_ondestroy_shuts_down_only_the_closed_tab(panel_namespace, fake_agent_panel_module):
-    """Два таба одной панели — два разных paneTab, два разных виджета.
-    Закрытие одного не должно трогать другой (см. LightLinker.pypanel:
-    kwargs['paneTab'] — штатный способ различить, какой таб сейчас в игре)."""
+    """Two tabs of the same panel — two different paneTabs, two different
+    widgets. Closing one must not touch the other (see LightLinker.pypanel:
+    kwargs['paneTab'] is the standard way to tell which tab is in play)."""
 
     tab_a = object()
     tab_b = object()
@@ -123,19 +123,20 @@ def test_ondestroy_shuts_down_only_the_closed_tab(panel_namespace, fake_agent_pa
 
 
 def test_oncreate_survives_missing_kwargs_global(panel_namespace, fake_agent_panel_module):
-    """`kwargs` — не всегда в globals (например ручной вызов вне Houdini).
-    Обращение к нему напрямую по имени уронило бы NameError; здесь этого
-    не должно происходить."""
+    """`kwargs` isn't always in globals (e.g. a manual call outside
+    Houdini). Referencing it directly by name would raise NameError; that
+    must not happen here."""
     assert "kwargs" not in panel_namespace
     widget = panel_namespace["onCreateInterface"]()
     assert widget is not None
 
 
 def test_oncreate_falls_back_to_error_widget_when_import_fails(qapp, monkeypatch):
-    """Если houdini_agent_panel.ui.panel вообще не импортируется (сорванная
-    установка зависимостей) — onCreateInterface обязан вернуть виджет с
-    читаемым текстом, а не уронить исключение наружу в Houdini."""
-    monkeypatch.setitem(sys.modules, "houdini_agent_panel.ui.panel", None)  # форсируем ImportError
+    """If houdini_agent_panel.ui.panel fails to import at all (an
+    interrupted dependency install) — onCreateInterface must return a
+    widget with readable text, not let an exception fall through into
+    Houdini."""
+    monkeypatch.setitem(sys.modules, "houdini_agent_panel.ui.panel", None)  # force an ImportError
 
     from houdini_agent_panel.ui.qt import QtWidgets
 
@@ -150,6 +151,6 @@ def test_oncreate_falls_back_to_error_widget_when_import_fails(qapp, monkeypatch
     text = labels[0].text()
     assert "doctor" in text
     assert "terminal" in text.lower()
-    # Раньше текст советовал открыть Python Shell и там же выполнить shell-
-    # команду — гарантированный SyntaxError в Python-консоли.
+    # The text used to suggest opening the Python Shell and running a shell
+    # command there — a guaranteed SyntaxError in a Python console.
     assert "python shell" not in text.lower()

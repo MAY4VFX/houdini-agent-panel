@@ -1,4 +1,4 @@
-"""Панель-чат с ACP-агентом внутри SideFX Houdini поверх fxhoudinimcp."""
+"""Chat panel for an ACP agent inside SideFX Houdini, on top of fxhoudinimcp."""
 
 __version__ = "0.1.3"
 

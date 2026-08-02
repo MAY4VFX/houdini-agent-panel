@@ -1,15 +1,16 @@
-"""Фид оповещений — канал связи со студией в обход апдейта пакета.
+"""The announcements feed — a communication channel to the studio that bypasses package updates.
 
-Источник — статический JSON по фиксированному адресу в этом же репозитории
-(``feed/announcements.json``), но с точки зрения кода это чужой ответ из
-интернета: правит его человек руками, значит там будут опечатки, отсутствующие
-поля и значения не того типа. Битая ЗАПИСЬ пропускается — весь фид из-за неё
-не теряется (см. ``_parse_one``).
+The source is a static JSON file at a fixed address in this same
+repository (``feed/announcements.json``), but from the code's point of
+view it's someone else's response from the internet: a human edits it by
+hand, so it will have typos, missing fields, and values of the wrong type.
+A broken ENTRY is skipped — the whole feed isn't lost because of it (see
+``_parse_one``).
 
-Важность (`severity`) решает про UI (тихая плашка vs блокирующий попап над
-полем ввода, см. design.md), но это не наша забота: этот модуль только
-отдаёт список применимых оповещений, а какой виджет их рисует — дело
-``ui/announcement.py``.
+Severity (`severity`) decides the UI (a quiet banner vs a blocking popup
+over the input field, see design.md), but that's not this module's
+concern: this module only hands back the list of applicable announcements
+— which widget draws them is ``ui/announcement.py``'s business.
 """
 
 from __future__ import annotations
@@ -27,19 +28,19 @@ from .network import Fetcher, fetch_json
 from .settings import Settings
 from .updates import compare_versions
 
-#: Адрес фида по умолчанию.
+#: The default feed address.
 #:
-#: Работает только пока репозиторий публичный: `raw.githubusercontent.com`
-#: анонимным запросам отдаёт 404 на приватные репозитории, а панель ходит
-#: сюда без токена и не должна его иметь. Проверено запросом — на приватном
-#: репозитории это ровно 404, а не ошибка доступа, так что и диагностировать
-#: со стороны панели нечего.
+#: This only works while the repository is public: `raw.githubusercontent.com`
+#: returns 404 to anonymous requests on private repositories, and the panel
+#: reaches it without a token and shouldn't have one. Verified by an actual
+#: request — on a private repository this is exactly a 404, not an access
+#: error, so there's nothing for the panel to diagnose either.
 DEFAULT_FEED_URL = (
     "https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/feed/announcements.json"
 )
 
-#: Чем студия (или сам разработчик до публикации репозитория) переопределяет
-#: адрес фида, не пересобирая пакет.
+#: How a studio (or the developer themself, before the repository goes
+#: public) overrides the feed address without rebuilding the package.
 FEED_URL_ENV = "HAP_FEED_URL"
 
 
@@ -47,7 +48,7 @@ def feed_url() -> str:
     return os.environ.get(FEED_URL_ENV) or DEFAULT_FEED_URL
 
 
-#: Оставлено для обратной совместимости с кодом и тестами, читавшими константу.
+#: Kept for backward compatibility with code and tests that read the constant.
 FEED_URL = DEFAULT_FEED_URL
 
 _KNOWN_SEVERITIES = ("info", "blocking")
@@ -68,11 +69,11 @@ class Announcement:
     title: str
     body: str = ""
     buttons: tuple[Button, ...] = ()
-    panel_versions: str = ""  # спецификатор версий, "" — всем
-    expires: str = ""  # ISO 8601, "" — бессрочно
+    panel_versions: str = ""  # a version specifier, "" — everyone
+    expires: str = ""  # ISO 8601, "" — never expires
 
 
-# --- разбор фида -------------------------------------------------------
+# --- parsing the feed -------------------------------------------------
 
 
 def parse_feed(payload: Any) -> list[Announcement]:
@@ -94,17 +95,19 @@ def _parse_one(raw: Any) -> Announcement | None:
         return None
     ann_id = raw.get("id")
     title = raw.get("title")
-    # id и title — единственное, без чего показывать оповещение нечем и
-    # незачем (без id некуда положить факт "уже видел").
+    # id and title are the only things without which there's nothing to
+    # show and no point showing it (without an id there's nowhere to
+    # record the fact "already seen").
     if not isinstance(ann_id, str) or not ann_id:
         return None
     if not isinstance(title, str) or not title:
         return None
 
     severity = raw.get("severity")
-    # Неизвестная будущая важность (например студия придумает "critical" в
-    # новой версии панели, а у художника ещё старая) не должна ПО УМОЛЧАНИЮ
-    # заблокировать ввод — тихая плашка безопаснее ошибочной блокировки.
+    # An unknown future severity (e.g. the studio invents "critical" in a
+    # newer panel version, while an artist still has an old one) must NOT
+    # block input BY DEFAULT — a quiet banner is safer than an erroneous
+    # block.
     if severity not in _KNOWN_SEVERITIES:
         severity = "info"
 
@@ -140,20 +143,20 @@ def _parse_one(raw: Any) -> Announcement | None:
     )
 
 
-# --- таргетинг по версии панели -----------------------------------------
+# --- targeting by panel version -----------------------------------------
 
 _CLAUSE_RE = re.compile(r"^(>=|<=|==|!=|>|<)\s*(.+)$")
 
 
 def _panel_version_matches(specifier: str, panel_version: str) -> bool:
-    """Спецификатор вида ``">=0.2,<0.4"``; условия через запятую — все обязаны сойтись.
+    """A specifier like ``">=0.2,<0.4"``; comma-separated conditions must all match.
 
-    Пустая строка — оповещение для всех версий. Любая нечитаемая часть
-    (незнакомый оператор, версия не по PEP 440, наша собственная версия не
-    разобралась) исключает оповещение, а не показывает его всем: ошибка в
-    таргетинге чужого фида не должна ПОКАЗАТЬ то, что предназначалось для
-    другой версии панели — тот же принцип "молчание лучше", что и в
-    ``updates.is_newer``.
+    An empty string means the announcement is for every version. Any
+    unreadable part (an unfamiliar operator, a version that isn't PEP 440,
+    our own version failing to parse) excludes the announcement rather than
+    showing it to everyone: an error in someone else's feed's targeting
+    must not SHOW something that was meant for a different panel version —
+    the same "silence is better" principle as in ``updates.is_newer``.
     """
     if not specifier.strip():
         return True
@@ -187,8 +190,9 @@ def _parse_iso(text: str) -> datetime | None:
     if not text:
         return None
     try:
-        # datetime.fromisoformat не понимает суффикс "Z" до Python 3.11, а мы
-        # обязаны работать с 3.10 (нижняя поддерживаемая версия, см. CLAUDE.md).
+        # datetime.fromisoformat doesn't understand the "Z" suffix before
+        # Python 3.11, and we have to work on 3.10 (the lowest supported
+        # version, see CLAUDE.md).
         value = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
@@ -200,9 +204,10 @@ def _parse_iso(text: str) -> datetime | None:
 def _is_expired(expires: str, now: datetime) -> bool:
     parsed = _parse_iso(expires)
     if parsed is None:
-        # Пустой "expires" — бессрочно осознанно; нечитаемая дата — тоже
-        # бессрочно, но уже по необходимости: лучше показать лишний день,
-        # чем молча похоронить важное сообщение из-за опечатки в дате.
+        # An empty "expires" means never-expiring on purpose; an unreadable
+        # date also means never-expiring, but out of necessity: better to
+        # show it for one extra day than to silently bury an important
+        # message over a typo in a date.
         return False
     return parsed < now
 
@@ -214,7 +219,7 @@ def applicable(
     seen: Collection[str],
     now: datetime | None = None,
 ) -> list[Announcement]:
-    """Оповещения, которые стоит показать: не показанные, не истёкшие, свои по версии."""
+    """Announcements worth showing: not yet seen, not expired, targeted at this version."""
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -231,7 +236,7 @@ def applicable(
     return result
 
 
-# --- сетевой поход + суточный кеш --------------------------------------
+# --- network trip + once-a-day cache --------------------------------------
 
 
 def _cache_path() -> Path:
@@ -239,8 +244,9 @@ def _cache_path() -> Path:
 
 
 def _feed_from_items(items: list[Announcement]) -> dict:
-    """Обратно в форму фида — чтобы читать кеш тем же ``parse_feed``,
-    не заводя для Announcement отдельный (де)сериализатор."""
+    """Back into the feed shape — so the cache can be read with the same
+    ``parse_feed`` instead of having a separate (de)serializer for
+    Announcement."""
     return {
         "version": 1,
         "announcements": [
@@ -291,12 +297,13 @@ def check(
     fetch: Fetcher | None = None,
     now: datetime | None = None,
 ) -> list[Announcement]:
-    """Применимые сейчас оповещения. ``show_announcements=False`` — ``[]``, без сети.
+    """Announcements applicable right now. ``show_announcements=False`` returns ``[]``, no network.
 
-    Как и ``updates.check`` — свой суточный кеш (весь разобранный фид, не
-    список уже отфильтрованных), потому что фильтр по ``seen``/``now``
-    обязан пересчитываться на каждый вызов даже если сам фид не обновлялся:
-    иначе закрытая вчера плашка могла бы всплыть снова из кеша.
+    Just like ``updates.check`` — has its own once-a-day cache (the whole
+    parsed feed, not the already-filtered list), because the
+    ``seen``/``now`` filter must be recomputed on every call even when the
+    feed itself hasn't been refreshed: otherwise a banner dismissed
+    yesterday could resurface from the cache.
     """
     if not settings.show_announcements:
         return []

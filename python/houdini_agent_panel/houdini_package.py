@@ -1,11 +1,12 @@
-"""Генерация package json плагина и поиск директорий Houdini на диске.
+"""Generating the plugin's package json and locating Houdini directories on disk.
 
-Паттерн подсмотрен у `fxhoudinimcp/houdini_package.py` (см.
-`docs/facts/fxhoudinimcp.md` §2): искать только уже существующие директории,
-писать без BOM, не гадать про несколько установленных версий Houdini разом.
-Сама логика своя — в отличие от fxhoudinimcp мы не требуем существования
-``packages/`` заранее (её можно создать), а состав ОС-путей другой, потому что
-нам ещё нужно вытащить версию Houdini из имени директории (для `deps.py`).
+The pattern was borrowed from `fxhoudinimcp/houdini_package.py` (see
+`docs/facts/fxhoudinimcp.md` §2): only look at directories that already
+exist, write without a BOM, don't guess about several installed Houdini
+versions at once. The logic itself is our own — unlike fxhoudinimcp we
+don't require ``packages/`` to already exist (it can be created), and the
+set of OS paths differs, because we also need to pull the Houdini version
+out of the directory name (for `deps.py`).
 """
 
 from __future__ import annotations
@@ -15,15 +16,15 @@ import platform
 import re
 from pathlib import Path
 
-#: Имя файла, которое Houdini ищет в ``<prefs>/packages/``.
+#: The filename Houdini looks for in ``<prefs>/packages/``.
 PACKAGE_NAME = "houdini_agent_panel.json"
 
-#: "20.5" из "20.5" (macOS) или "houdini20.5" (Linux/Windows).
+#: "20.5" out of "20.5" (macOS) or "houdini20.5" (Linux/Windows).
 _VERSION_RE = re.compile(r"^(?:houdini)?(\d+\.\d+)$")
 
 
 def plugin_path() -> Path:
-    """Дерево плагина Houdini, которое едет вместе с пакетом."""
+    """The Houdini plugin tree that ships alongside the package."""
     return Path(__file__).resolve().parent / "houdini"
 
 
@@ -33,18 +34,20 @@ def package_json(
     installer_python: str,
     plugin: Path | None = None,
 ) -> str:
-    """Собрать package json ровно в формате architecture.md §0.
+    """Build the package json in exactly the format from architecture.md §0.
 
-    ``deps`` — куда `install_deps` кладёт зависимости панели (``pip install
-    --target``), ``installer_python`` — интерпретатор, из которого запущен
-    инсталлятор (нужен панели только на одно: собрать ``mcpServers[0].command``
-    для fxhoudinimcp, см. `scene.py`).
+    ``deps`` is where `install_deps` puts the panel's dependencies (``pip
+    install --target``), ``installer_python`` is the interpreter the
+    installer was run from (the panel needs it for exactly one thing:
+    building ``mcpServers[0].command`` for fxhoudinimcp, see `scene.py`).
 
-    ``plugin`` — необязательный override пути к дереву плагина. По умолчанию
-    ``path`` ссылается на ``$HAP_DEPS/houdini_agent_panel/houdini`` — туда сам
-    pip кладёт пакет вместе с его package-data. Явный ``plugin`` нужен для
-    сценариев без пакета в deps (например ``--skip-deps``/dev-запуск прямо из
-    исходников) — тогда путь пишется абсолютным, а не через переменную.
+    ``plugin`` is an optional override for the plugin tree's path. By
+    default, ``path`` points at ``$HAP_DEPS/houdini_agent_panel/houdini``
+    — that's where pip itself puts the package along with its package-data.
+    An explicit ``plugin`` is needed for scenarios with no package in deps
+    (e.g. ``--skip-deps``/a dev run straight from source) — in that case
+    the path is written as an absolute one instead of through the
+    variable.
     """
     path_value = plugin.as_posix() if plugin is not None else "$HAP_DEPS/houdini_agent_panel/houdini"
     payload = {
@@ -59,18 +62,19 @@ def package_json(
 
 
 def houdini_version_of(prefs_dir: Path) -> str | None:
-    """"20.5" из имени prefs-директории, None — если имя не похоже на версию."""
+    """"20.5" out of a prefs directory's name, None if the name doesn't look like a version."""
     match = _VERSION_RE.match(prefs_dir.name)
     return match.group(1) if match else None
 
 
 def candidate_package_dirs() -> list[Path]:
-    """Директории ``packages/`` для каждой найденной на машине Houdini.
+    """The ``packages/`` directory for every Houdini found on the machine.
 
-    Возвращает только те, чья prefs-директория версии реально существует
-    (``~/Library/Preferences/houdini/20.5`` и т.п.) — саму Houdini не гадаем.
-    ``packages/`` внутри неё, наоборот, можно создать: это обычное дело для
-    первого пакета, который ставится в свежий профиль художника.
+    Returns only the ones whose version prefs directory actually exists
+    (``~/Library/Preferences/houdini/20.5`` and the like) — we never guess
+    about Houdini itself. ``packages/`` inside it, on the other hand, can be
+    created: that's the normal case for the first package being installed
+    into a fresh artist profile.
     """
     prefs_dirs = _candidate_prefs_dirs()
     result = []
@@ -99,7 +103,7 @@ def _candidate_prefs_dirs() -> list[Path]:
             return []
         return [p for p in root.glob("houdini*") if p.is_dir()]
 
-    # Linux и всё, что не Darwin/Windows.
+    # Linux, and anything that isn't Darwin/Windows.
     if not home.is_dir():
         return []
     return [p for p in home.glob("houdini*") if p.is_dir()]

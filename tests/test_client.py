@@ -1,9 +1,9 @@
-"""Тесты `AcpClient` против настоящего ACP-агента (`tests/fake_agent.py`).
+"""Tests for `AcpClient` against a real ACP agent (`tests/fake_agent.py`).
 
-Единственный честный способ проверить протокольный слой — реальный
-подпроцесс, говорящий по ACP (см. docs/architecture.md §11). Ожидание
-сигналов — циклом с `processEvents()` и таймаутом: тест обязан падать по
-таймауту, а не висеть вечно, если что-то во взаимодействии сломалось.
+The only honest way to test the protocol layer is a real subprocess speaking
+ACP (see docs/architecture.md §11). Signals are awaited with a
+`processEvents()` loop and a timeout: a test must fail on timeout rather than
+hang forever if something in the interaction broke.
 """
 
 from __future__ import annotations
@@ -22,17 +22,18 @@ from houdini_agent_panel.ui.qt import QtCore
 
 FAKE_AGENT = Path(__file__).parent / "fake_agent.py"
 
-#: Таймаут ожидания сигналов в отдельных проверках. Подпроцесс + JSON-RPC
-#: туда-обратно — не бесплатно, но 5с с большим запасом на любую машину CI.
+#: Timeout for waiting on signals in individual checks. Subprocess + JSON-RPC
+#: round trip isn't free, but 5s gives plenty of headroom on any CI machine.
 _TIMEOUT = 5.0
 
 
 @dataclass
 class _Spec:
-    """Дублирует форму `runtime.LaunchSpec`, не завися от модуля runtime.py.
+    """Mirrors the shape of `runtime.LaunchSpec` without depending on the
+    runtime.py module.
 
-    `client.py` обращается только к `.command`/`.args`/`.env` (duck typing),
-    так что настоящий `LaunchSpec` тестам не нужен.
+    `client.py` only ever touches `.command`/`.args`/`.env` (duck typing),
+    so the tests don't need the real `LaunchSpec`.
     """
 
     command: str
@@ -54,16 +55,16 @@ def _pump_until(qapp, predicate, *, timeout: float = _TIMEOUT) -> None:
         if predicate():
             return
         qapp.processEvents(QtCore.QEventLoop.AllEvents, 50)
-    raise AssertionError(f"условие не выполнилось за {timeout}s")
+    raise AssertionError(f"condition did not become true within {timeout}s")
 
 
 def _pump_for(qapp, duration: float) -> None:
-    """Прокачать события Qt заданное время, ничего не проверяя.
+    """Pump Qt events for a fixed duration without checking anything.
 
-    Нужно там, где нельзя дождаться сигнала (сценарий ещё не прислал
-    ничего наблюдаемого), а просто дать фоновому процессу время дойти до
-    нужной точки — например, до `await event.wait()` в сценарии "slow"
-    перед тем, как отправить cancel.
+    Needed where there's no signal to wait for yet (the scenario hasn't sent
+    anything observable), and we just need to give the background process
+    time to reach a certain point — e.g. `await event.wait()` in the "slow"
+    scenario, before sending cancel.
     """
     deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
@@ -71,8 +72,8 @@ def _pump_for(qapp, duration: float) -> None:
 
 
 class _Recorder:
-    """Копит аргументы каждого вызова сигнала — без QSignalSpy, чтобы не
-    тянуть QtTest поверх `ui/qt.py`."""
+    """Collects the arguments of every signal call — without QSignalSpy, so
+    we don't have to pull QtTest in on top of `ui/qt.py`."""
 
     def __init__(self, signal) -> None:
         self.calls: list[tuple] = []
@@ -102,7 +103,7 @@ def _connect(qapp, client: AcpClient, scenario: str, tmp_path) -> _Recorder:
     failed = _Recorder(client.failed)
     client.start(_spec(scenario), cwd=str(tmp_path))
     _pump_until(qapp, lambda: connected.calls or failed.calls)
-    assert not failed.calls, f"агент не поднялся: {failed.calls}"
+    assert not failed.calls, f"agent failed to come up: {failed.calls}"
     return connected
 
 
@@ -115,7 +116,7 @@ def _new_session(qapp, client: AcpClient, tmp_path) -> str:
     return session_id
 
 
-# --- подключение / AgentInfo ------------------------------------------------
+# --- connect / AgentInfo ------------------------------------------------
 
 
 def test_connect_reports_agent_info_from_initialize(qapp, make_client, tmp_path):
@@ -137,7 +138,7 @@ def test_connect_reports_agent_info_from_initialize(qapp, make_client, tmp_path)
     assert client.agent_info() == info
 
 
-# --- стриминг ответа ---------------------------------------------------------
+# --- reply streaming ---------------------------------------------------------
 
 
 def test_prompt_streams_thought_then_message_and_finishes(qapp, make_client, tmp_path):
@@ -150,21 +151,22 @@ def test_prompt_streams_thought_then_message_and_finishes(qapp, make_client, tmp
     finished = _Recorder(client.turn_finished)
 
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    # ВАЖНО: `turn_finished` — это ответ на JSON-RPC `session/prompt`, а
-    # `session_update`-нотификации (чанки) в `agent-client-protocol` 0.12.0
-    # диспетчеризуются ЧЕРЕЗ ОТДЕЛЬНУЮ очередь и свои задачи (см.
-    # `acp/task/dispatcher.py::_dispatch_notification`), тогда как ответ на
-    # запрос резолвится немедленно и синхронно в приёмном цикле — эти два
-    # пути ничем не сериализованы друг с другом. Значит `turn_finished` может
-    # прийти РАНЬШЕ последнего чанка отчёта: это подтверждённая гонка в самом
-    # SDK, не баг клиента. `docs/facts/acp-sdk.md` этого не документирует —
-    # ждём финального текста, а не порядка относительно `turn_finished`.
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "эхо: hi")
+    # IMPORTANT: `turn_finished` is the reply to the JSON-RPC `session/prompt`
+    # request, while `session_update` notifications (chunks) in
+    # `agent-client-protocol` 0.12.0 are dispatched THROUGH A SEPARATE queue
+    # and their own tasks (see `acp/task/dispatcher.py::_dispatch_notification`),
+    # whereas a request's reply is resolved immediately and synchronously in
+    # the receive loop — these two paths aren't serialized against each
+    # other in any way. That means `turn_finished` can arrive BEFORE the
+    # last chunk of the reply: this is a confirmed race in the SDK itself,
+    # not a client bug. `docs/facts/acp-sdk.md` doesn't document this — we
+    # wait for the final text, not for its order relative to `turn_finished`.
+    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi")
 
-    assert thoughts.calls, "агент должен был прислать agent_thought_chunk"
-    assert "".join(c[2] for c in thoughts.calls) == "думаю..."
+    assert thoughts.calls, "the agent should have sent an agent_thought_chunk"
+    assert "".join(c[2] for c in thoughts.calls) == "thinking..."
 
-    # все чанки одного сообщения делят message_id — как и требует §8 склейки
+    # all chunks of the same message share a message_id — as required by §8 on stitching
     assert len({c[1] for c in messages.calls}) == 1
 
     assert finished.calls[0] == (session_id, "end_turn")
@@ -187,7 +189,7 @@ def test_prompt_before_auth_emits_auth_required_then_succeeds_after(qapp, make_c
     methods = auth_required.calls[0][0]
     assert [m.id for m in methods] == ["apikey"]
 
-    # соединение не должно было упасть из-за auth_required
+    # the connection must not have dropped because of auth_required
     assert client.is_running() is True
 
     client.authenticate("apikey")
@@ -199,50 +201,50 @@ def test_prompt_before_auth_emits_auth_required_then_succeeds_after(qapp, make_c
 
 
 def test_logout_cycle_requires_auth_again(qapp, make_client, tmp_path):
-    """issue #6: вход работает, выход — тоже. Полный цикл «требует вход →
-    вошли → вышли → снова требует вход»."""
+    """issue #6: login works, and so does logout. The full cycle: "login
+    required -> logged in -> logged out -> login required again"."""
     client = make_client()
     connected = _connect(qapp, client, "auth", tmp_path)
     session_id = _new_session(qapp, client, tmp_path)
 
-    # Агент объявил AgentAuthCapabilities(logout=LogoutCapabilities()) —
-    # не None, значит supports_logout обязан быть True (правило UI: агент
-    # не умеет — кнопка выхода не рисуется, а тут умеет).
+    # The agent declared AgentAuthCapabilities(logout=LogoutCapabilities()) —
+    # not None, so supports_logout must be True (UI rule: the agent doesn't
+    # support it -> the logout button isn't drawn; here it does support it).
     assert connected.calls[0][0].supports_logout is True
 
     auth_required = _Recorder(client.auth_required)
     finished = _Recorder(client.turn_finished)
 
-    # 1. Требует вход.
+    # 1. Login required.
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
     _pump_until(qapp, lambda: auth_required.calls)
     methods_before = [m.id for m in auth_required.calls[0][0]]
     assert methods_before == ["apikey"]
 
-    # 2. Вошли.
+    # 2. Logged in.
     client.authenticate("apikey")
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
     _pump_until(qapp, lambda: finished.calls)
     assert finished.calls[0] == (session_id, "end_turn")
 
-    # 3. Вышли — переиспользуем auth_required как сигнал «агент разлогинен»:
-    # экран входа должен показаться снова с теми же authMethods.
+    # 3. Logged out — reuse auth_required as the "agent logged out" signal:
+    # the login screen should appear again with the same authMethods.
     auth_required.calls.clear()
     client.logout()
     _pump_until(qapp, lambda: auth_required.calls)
     assert [m.id for m in auth_required.calls[0][0]] == methods_before
 
-    # соединение не должно было упасть из-за логаута
+    # the connection must not have dropped because of the logout
     assert client.is_running() is True
 
-    # 4. Снова требует вход.
+    # 4. Login required again.
     finished.calls.clear()
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
     _pump_until(qapp, lambda: len(auth_required.calls) >= 2)
-    assert not finished.calls, "prompt не должен пройти без повторного входа"
+    assert not finished.calls, "prompt must not go through without logging in again"
 
 
-# --- разрешения ---------------------------------------------------------------
+# --- permissions ---------------------------------------------------------------
 
 
 def test_permission_request_waits_for_ui_answer(qapp, make_client, tmp_path):
@@ -262,13 +264,14 @@ def test_permission_request_waits_for_ui_answer(qapp, make_client, tmp_path):
     assert tool_call.title == "rm -rf /tmp/x"
     assert [o.option_id for o in options] == ["allow_once", "reject_once"]
 
-    # промпт не должен завершиться, пока панель не ответила
+    # the prompt must not finish until the panel has answered
     assert not finished.calls
 
     client.answer_permission(request_key, "allow_once")
-    # см. комментарий в test_prompt_streams_... — turn_finished и последний
-    # чанк не сериализованы между собой в SDK, ждём оба условия.
-    expected = "разрешение: allow_once"
+    # see the comment in test_prompt_streams_... — turn_finished and the
+    # last chunk aren't serialized with each other in the SDK, wait for both
+    # conditions.
+    expected = "permission: allow_once"
     _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected)
 
 
@@ -286,11 +289,11 @@ def test_permission_cancelled_when_answered_with_none(qapp, make_client, tmp_pat
 
     request_key = requested.calls[0][0]
     client.answer_permission(request_key, None)
-    expected = "разрешение: отменено"
+    expected = "permission: cancelled"
     _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected)
 
 
-# --- режимы --------------------------------------------------------------------
+# --- modes --------------------------------------------------------------------
 
 
 def test_modes_from_new_session_and_set_mode_update(qapp, make_client, tmp_path):
@@ -315,7 +318,7 @@ def test_modes_from_new_session_and_set_mode_update(qapp, make_client, tmp_path)
     assert [m.id for m in mode_state.available_modes] == ["ask", "code"]
 
 
-# --- план и tool_call ------------------------------------------------------
+# --- plan and tool_call ------------------------------------------------------
 
 
 def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
@@ -329,8 +332,9 @@ def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
     finished = _Recorder(client.turn_finished)
 
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    # см. комментарий в test_prompt_streams_... про гонку notification/response
-    # в самом SDK — ждём все ожидаемые сигналы, а не порядок с turn_finished.
+    # see the comment in test_prompt_streams_... about the notification/response
+    # race in the SDK itself — wait for all expected signals, not for their
+    # order relative to turn_finished.
     def _all_arrived() -> bool:
         return bool(
             finished.calls and plan_changed.calls and tool_call.calls and tool_call_update.calls
@@ -340,7 +344,7 @@ def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
 
     plan_session_id, entries = plan_changed.calls[0]
     assert plan_session_id == session_id
-    assert [e.content for e in entries] == ["шаг 1", "шаг 2"]
+    assert [e.content for e in entries] == ["step 1", "step 2"]
 
     assert tool_call.calls[0][1].tool_call_id == "tc1"
     assert tool_call.calls[0][1].status == "in_progress"
@@ -348,7 +352,7 @@ def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
     assert tool_call_update.calls[0][1].status == "completed"
 
 
-# --- отмена --------------------------------------------------------------------
+# --- cancel --------------------------------------------------------------------
 
 
 def test_cancel_stops_slow_prompt(qapp, make_client, tmp_path):
@@ -359,8 +363,8 @@ def test_cancel_stops_slow_prompt(qapp, make_client, tmp_path):
     finished = _Recorder(client.turn_finished)
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
 
-    # даём агенту время реально дойти до ожидания отмены — небольшая пауза
-    # перед cancel через тот же насос событий, не голый time.sleep().
+    # give the agent time to actually reach the cancel wait point — a short
+    # pause before cancel via the same event pump, not a bare time.sleep().
     _pump_for(qapp, 0.2)
     client.cancel(session_id)
 
@@ -368,7 +372,7 @@ def test_cancel_stops_slow_prompt(qapp, make_client, tmp_path):
     assert finished.calls[0] == (session_id, "cancelled")
 
 
-# --- останов -------------------------------------------------------------------
+# --- stop -------------------------------------------------------------------
 
 
 def test_stop_is_clean_and_reports_running_false(qapp, make_client, tmp_path):
@@ -383,22 +387,23 @@ def test_stop_is_clean_and_reports_running_false(qapp, make_client, tmp_path):
     assert disconnected.calls and disconnected.calls[0] == ("",)
 
 
-# --- регрессия: Houdini подменяет asyncio-политику своей `haio` -------------
+# --- regression: Houdini swaps out the asyncio policy with its own `haio` -------------
 #
-# docs/facts/houdini.md §9: внутри Houdini `asyncio.new_event_loop()` (через
-# активную политику) отдаёт `haio.HoudiniEventLoop`, чей `run_forever()`
-# требует главный поток, а `asyncio.create_subprocess_exec` там же валится
-# на `get_child_watcher()` -> NotImplementedError. Вне Houdini политика
-# стоковая, и оба вызова работают — поэтому обычные тесты этого не ловят.
-# Здесь подставляем политику с ровно тем же поведением и гоняем настоящего
-# fake_agent.py под ней: `AcpClient` обязан работать, потому что цикл берётся
-# классом напрямую (в обход политики), а процесс поднимается `subprocess.Popen`
-# (в обход child watcher'а) — см. докстринг client.py.
+# docs/facts/houdini.md §9: inside Houdini, `asyncio.new_event_loop()`
+# (through the active policy) returns `haio.HoudiniEventLoop`, whose
+# `run_forever()` requires the main thread, while `asyncio.create_subprocess_exec`
+# there also blows up on `get_child_watcher()` -> NotImplementedError. Outside
+# Houdini the policy is the stock one, and both calls work — so ordinary
+# tests don't catch this. Here we install a policy with exactly the same
+# behavior and run a real fake_agent.py under it: `AcpClient` must still
+# work, because the loop is taken directly from the class (bypassing the
+# policy), and the process is spawned with `subprocess.Popen` (bypassing the
+# child watcher) — see the client.py module docstring.
 
 
 class _HaioLikeEventLoop(asyncio.SelectorEventLoop):
-    """Имитирует единственное наблюдаемое поведение haio, которое нас касается:
-    `run_forever()` вне главного потока — RuntimeError."""
+    """Imitates the one observable haio behavior that matters to us:
+    `run_forever()` off the main thread raises RuntimeError."""
 
     def run_forever(self) -> None:
         if threading.current_thread() is not threading.main_thread():
@@ -416,9 +421,9 @@ class _HaioLikeEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
 
 @pytest.fixture
 def haio_like_policy():
-    """Подменяет глобальную политику asyncio на время теста и возвращает её
-    обратно — иначе сломаются все тесты, идущие после этого в том же прогоне
-    pytest (политика глобальна на процесс)."""
+    """Swaps out the global asyncio policy for the duration of the test and
+    restores it afterward — otherwise every test running after this one in
+    the same pytest run would break (the policy is global to the process)."""
     original = asyncio.get_event_loop_policy()
     asyncio.set_event_loop_policy(_HaioLikeEventLoopPolicy())
     try:
@@ -430,9 +435,9 @@ def haio_like_policy():
 def test_client_works_under_a_haio_like_event_loop_policy(
     qapp, haio_like_policy, tmp_path, make_client
 ):
-    """Красный без обхода из client.py: `asyncio.new_event_loop()` схлопотал
-    бы `_HaioLikeEventLoop`, чей `run_forever()` падает на рабочем потоке —
-    `connected` никогда бы не пришёл, тест упал бы по таймауту."""
+    """Would fail red without the workaround in client.py: `asyncio.new_event_loop()`
+    would get `_HaioLikeEventLoop`, whose `run_forever()` fails on the worker
+    thread — `connected` would never arrive, and the test would fail on timeout."""
     client = make_client()
     connected = _connect(qapp, client, "stream", tmp_path)
     assert connected.calls[0][0].name == "fake-agent"
@@ -442,6 +447,6 @@ def test_client_works_under_a_haio_like_event_loop_policy(
     finished = _Recorder(client.turn_finished)
     messages = _Recorder(client.message_chunk)
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "эхо: hi")
+    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi")
 
     assert finished.calls[0] == (session_id, "end_turn")

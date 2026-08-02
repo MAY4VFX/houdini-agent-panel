@@ -19,10 +19,11 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-from .sessions import SessionMode, SessionState, Usage
+from .sessions import AvailableCommand, SessionMode, SessionState, Usage
 from .transcript_model import PermissionView, TranscriptModel
 from .ui.chips import HeaderBar
 from .ui.composer import Composer
+from .ui.conversations import ConversationDrawer
 from .ui.permissions import PermissionRow
 from .ui.qt import QtCore, QtGui, QtWidgets
 from .ui.transcript import TranscriptView
@@ -61,9 +62,6 @@ class PreviewPanel(QtWidgets.QWidget):
         self.header = HeaderBar(self)
         self.header.set_agent("Codex", None)
         self.header.set_cwd("$HIP / hero_shot")
-        self.header.set_sessions(
-            [SessionState("preview", "Session 3", "/tmp/hero_shot", 0.0)], "preview"
-        )
         layout.addWidget(self.header)
 
         self.transcript = TranscriptView(self)
@@ -86,6 +84,15 @@ class PreviewPanel(QtWidgets.QWidget):
         )
         self.composer.enable_preview_microphone()
         self.composer.set_buddy("crag")
+        self.composer.set_commands(
+            [
+                AvailableCommand("compact", "Compact this chat context"),
+                AvailableCommand("new", "Continue in a new conversation"),
+                AvailableCommand("model", "Choose the agent model"),
+                AvailableCommand("reasoning", "Set reasoning effort"),
+                AvailableCommand("clear", "Clear the current conversation"),
+            ]
+        )
         self.composer.submitted.connect(self._submit)
         self.composer.cancelled.connect(self._finish_preview_turn)
         layout.addWidget(self.composer)
@@ -93,25 +100,35 @@ class PreviewPanel(QtWidgets.QWidget):
         self.permission.answered.connect(self._resolve_permission)
         self.permission.show()
         self.permission.raise_()
+        self.conversations = ConversationDrawer(self)
+        self.conversations.set_sessions(
+            [
+                SessionState("lighting", "Build a soft rim light", "/tmp/hero_shot", 1.0),
+                SessionState("materials", "Fix the wet rock material", "/tmp/hero_shot", 2.0),
+                SessionState("preview", "Current Houdini scene", "/tmp/hero_shot", 3.0),
+            ],
+            "preview",
+        )
+        self.header.conversations_clicked.connect(self.conversations.toggle)
         QtCore.QTimer.singleShot(0, self._position_permission)
         QtCore.QTimer.singleShot(0, self._start_visible_activity)
 
     def _seed_transcript(self) -> None:
         self._model.append_user(
-            "Собери мягкий контровой свет и вынеси intensity в один контроллер."
+            "Set up a soft rim light and expose its intensity through a single controller."
         )
         activity = self._model.start_activity()
         activity.activity.started_at -= 42
         self._model.finish_activity()
         self._model.apply_chunk(
             "intro",
-            "Готово. Добавил мягкий Area Light и связал его интенсивность "
-            "с единым контроллером.",
+            "Done. Added a soft Area Light and wired its intensity "
+            "to a single controller.",
         )
         self._model.apply_tool_call(
             SimpleNamespace(
                 tool_call_id="preview-tool",
-                title="Создать Area Light",
+                title="Create Area Light",
                 kind="edit",
                 status="pending",
                 content=None,
@@ -120,10 +137,10 @@ class PreviewPanel(QtWidgets.QWidget):
         )
         self._preview_permission = PermissionView(
             "preview-permission",
-            "Разрешить изменить сцену?",
+            "Allow changing the scene?",
             [
-                ("reject_once", "Отклонить", "reject_once"),
-                ("allow_once", "Разрешить один раз", "allow_once"),
+                ("reject_once", "Reject", "reject_once"),
+                ("allow_once", "Allow once", "allow_once"),
             ],
         )
         self._model.apply_permission(self._preview_permission)
@@ -153,7 +170,7 @@ class PreviewPanel(QtWidgets.QWidget):
         entry = self._model.apply_tool_call(
             SimpleNamespace(
                 tool_call_id=call_id,
-                title="Обновить Houdini scene",
+                title="Update Houdini scene",
                 kind="edit",
                 status="in_progress",
                 content=None,
@@ -170,7 +187,7 @@ class PreviewPanel(QtWidgets.QWidget):
         self.transcript.refresh(activity.id)
         answer = self._model.apply_chunk(
             f"preview-answer-{uuid.uuid4()}",
-            "Preview-turn завершён. Здесь будет потоковый ответ агента.",
+            "Preview turn finished. This is where the agent's streamed reply would go.",
         )
         self.transcript.refresh(answer.id)
         self.composer.set_busy(False)
@@ -196,6 +213,10 @@ class PreviewPanel(QtWidgets.QWidget):
         super().resizeEvent(event)
         if hasattr(self, "permission"):
             self._position_permission()
+        if hasattr(self, "conversations"):
+            self.conversations.sync_parent_geometry()
+            if self.conversations.isVisible():
+                self.conversations.raise_()
 
 
 def _run_window() -> int:

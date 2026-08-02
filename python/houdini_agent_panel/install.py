@@ -1,10 +1,10 @@
-"""Оркестрация установки панели в Houdini.
+"""Orchestrates installing the panel into Houdini.
 
-Один проход: найти Houdini на машине → для каждой найти её `hython` и версию
-Python → поставить зависимости панели в привязанное к этой версии дерево →
-записать package json. Ни один шаг не проходит молча — художник, чинящий
-установку по логу, должен видеть, что именно произошло на каждой Houdini,
-если их на машине несколько.
+One pass: find every Houdini on the machine -> for each, find its `hython`
+and Python version -> install the panel's dependencies into the tree bound to
+that version -> write the package json. No step happens silently — an artist
+fixing their install by reading the log needs to see exactly what happened
+for each Houdini, if there's more than one on the machine.
 """
 
 from __future__ import annotations
@@ -26,27 +26,28 @@ def _panel_version() -> str:
         from importlib.metadata import version
 
         return version("houdini-agent-panel")
-    except Exception:  # noqa: BLE001 - из --target-дерева метаданных может не быть
+    except Exception:  # noqa: BLE001 - metadata may be missing when run from a --target tree
         from . import __version__
 
         return __version__
 
 
 def _resolve_package_dirs(explicit: str | None) -> tuple[list[Path], str]:
-    """Тот же паттерн, что `resolve_houdini_dirs` у fxhoudinimcp (install.py:121-152):
-    явный путь побеждает без вопросов, иначе — автопоиск с причиной для лога.
-    Список кандидатов свой (`houdini_package.candidate_package_dirs`), потому
-    что нам, в отличие от fxhoudinimcp, ещё нужно узнавать версию Houdini по
-    имени prefs-директории (для выбора `hython`).
+    """Same pattern as fxhoudinimcp's `resolve_houdini_dirs` (install.py:121-152):
+    an explicit path wins unconditionally, otherwise fall back to auto-detection
+    with a reason to log. Our candidate list is our own
+    (`houdini_package.candidate_package_dirs`) because, unlike fxhoudinimcp, we
+    also need to figure out the Houdini version from the prefs directory name
+    (to pick the right `hython`).
     """
     if explicit:
-        return [Path(explicit).expanduser()], "указано явно через --houdini-dir"
+        return [Path(explicit).expanduser()], "explicitly given via --houdini-dir"
     candidates = houdini_package.candidate_package_dirs()
     if not candidates:
-        return [], "на машине не найдено ни одной директории Houdini"
+        return [], "no Houdini directory found on this machine"
     if len(candidates) == 1:
-        return candidates, "единственная найденная на машине"
-    return candidates, f"все найденные на машине ({len(candidates)})"
+        return candidates, "the only one found on this machine"
+    return candidates, f"all found on this machine ({len(candidates)})"
 
 
 def install(
@@ -63,13 +64,13 @@ def install(
     package_dirs, reason = _resolve_package_dirs(houdini_dir)
     if not package_dirs:
         out(
-            "Houdini на машине не найдена: ни --houdini-dir, ни известные пути "
-            "prefs (~/Library/Preferences/houdini/*, ~/houdiniX.Y, "
-            "~/Documents/houdiniX.Y) не существуют."
+            "No Houdini found on this machine: neither --houdini-dir nor the known "
+            "prefs paths (~/Library/Preferences/houdini/*, ~/houdiniX.Y, "
+            "~/Documents/houdiniX.Y) exist."
         )
         return 1
 
-    out(f"Каталоги packages Houdini ({reason}):")
+    out(f"Houdini packages directories ({reason}):")
     for package_dir in package_dirs:
         out(f"  {package_dir}")
 
@@ -84,17 +85,17 @@ def install(
 
         hython = deps_mod.find_hython(version)
         if hython is None:
-            out("  hython не найден на диске — пропускаю эту Houdini")
+            out("  hython not found on disk — skipping this Houdini")
             continue
         out(f"  hython: {hython}")
 
         try:
             pyver = deps_mod.python_version_of(hython)
         except deps_mod.DepsError as exc:
-            out(f"  hython не отвечает: {exc}")
+            out(f"  hython did not respond: {exc}")
             continue
         if pyver is None:
-            out("  не удалось разобрать версию Python у hython — пропускаю")
+            out("  could not parse hython's Python version — skipping")
             continue
 
         tag = paths.python_tag(pyver)
@@ -102,7 +103,7 @@ def install(
         target = paths.deps_dir(tag)
 
         if skip_deps:
-            out("  --skip-deps: зависимости не трогаю")
+            out("  --skip-deps: not touching dependencies")
         else:
             try:
                 deps_mod.install_deps(
@@ -115,13 +116,13 @@ def install(
                     out=out,
                 )
             except deps_mod.DepsError as exc:
-                out(f"  установка зависимостей не удалась: {exc}")
+                out(f"  dependency install failed: {exc}")
                 continue
 
         payload = houdini_package.package_json(deps=target, installer_python=installer_python)
         package_path = package_dir / houdini_package.PACKAGE_NAME
         if dry_run:
-            out(f"  [dry-run] записал бы {package_path}")
+            out(f"  [dry-run] would write {package_path}")
         else:
             package_dir.mkdir(parents=True, exist_ok=True)
             package_path.write_text(payload, encoding="utf-8", newline="\n")
@@ -139,14 +140,15 @@ def install(
 
 
 def _load_agent_modules():
-    """Импорт `registry`/`runtime`, вынесенный в отдельную функцию.
+    """Import of `registry`/`runtime`, pulled out into its own function.
 
-    Не потому, что импорт сам по себе сложный, а ради тестируемости: `_install_agents`
-    обязана понятно сообщать об ошибке, если этих модулей ещё нет (на момент
-    написания install.py их не было — их пишут другие люди параллельно). Тест на
-    этот сценарий не должен зависеть от того, лежит ли `runtime.py` на диске
-    прямо сейчас — а зависеть он будет, если проверять голый `ImportError` по
-    реальному отсутствию файла. Поэтому тест подменяет ровно эту функцию.
+    Not because the import itself is complicated, but for testability:
+    `_install_agents` must report a clear error if these modules don't exist
+    yet (at the time install.py was written, they didn't — other people were
+    writing them in parallel). The test for this scenario shouldn't depend on
+    whether `runtime.py` actually exists on disk right now — but it would, if
+    we checked for a bare `ImportError` against the real absence of the file.
+    So the test patches this exact function instead.
     """
     from . import registry
     from . import runtime
@@ -157,44 +159,45 @@ def _load_agent_modules():
 def _install_agents(
     agent_ids: Sequence[str], *, dry_run: bool, fetch: Fetcher | None, out
 ) -> int:
-    """Поставить агентов из реестра ACP через `runtime.install_agent`.
+    """Install agents from the ACP registry via `runtime.install_agent`.
 
-    В `--dry-run` модули вообще не трогаем: план печатается без единого
-    импорта, чтобы дефолтный dry-run install работал уже сейчас, даже если
-    `registry`/`runtime` временно недоступны или ломаются независимо от нас.
+    In `--dry-run` we don't touch the modules at all: the plan is printed
+    without a single import, so that the default dry-run install already
+    works today even if `registry`/`runtime` are temporarily unavailable or
+    broken independently of this code.
     """
     if not agent_ids:
         return 0
 
     if dry_run:
         for agent_id in agent_ids:
-            out(f"[dry-run] поставил бы агента {agent_id}")
+            out(f"[dry-run] would install agent {agent_id}")
         return 0
 
     try:
         registry, runtime = _load_agent_modules()
     except ImportError as exc:
-        out(f"Не могу поставить агентов: модуль registry/runtime ещё не готов ({exc})")
+        out(f"Cannot install agents: registry/runtime module isn't ready yet ({exc})")
         return 1
 
     try:
         entries = {entry.id: entry for entry in registry.fetch_registry(fetch=fetch)}
-    except Exception as exc:  # noqa: BLE001 - реестр недоступен, не роняем весь install
-        out(f"Не удалось получить реестр агентов: {exc}")
+    except Exception as exc:  # noqa: BLE001 - registry unavailable shouldn't sink the whole install
+        out(f"Failed to fetch the agent registry: {exc}")
         return 1
 
     ok = True
     for agent_id in agent_ids:
         entry = entries.get(agent_id)
         if entry is None:
-            out(f"Агент {agent_id!r} не найден в реестре ACP")
+            out(f"Agent {agent_id!r} not found in the ACP registry")
             ok = False
             continue
-        out(f"Ставлю агента {agent_id}...")
+        out(f"Installing agent {agent_id}...")
         try:
             runtime.install_agent(entry, fetch=fetch)
-        except Exception as exc:  # noqa: BLE001 - один сломанный агент не должен рушить остальных
-            out(f"  не удалось поставить {agent_id}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - one broken agent shouldn't take down the rest
+            out(f"  failed to install {agent_id}: {exc}")
             ok = False
     return 0 if ok else 1
 
@@ -208,30 +211,30 @@ def uninstall(
 ) -> int:
     package_dirs, reason = _resolve_package_dirs(houdini_dir)
     if not package_dirs:
-        out("Houdini на машине не найдена — package json удалять неоткуда.")
+        out("No Houdini found on this machine — nothing to remove the package json from.")
     else:
-        out(f"Каталоги packages Houdini ({reason}):")
+        out(f"Houdini packages directories ({reason}):")
         removed_any = False
         for package_dir in package_dirs:
             target = package_dir / houdini_package.PACKAGE_NAME
             if not target.exists():
                 continue
             if dry_run:
-                out(f"[dry-run] удалил бы {target}")
+                out(f"[dry-run] would remove {target}")
             else:
                 target.unlink()
-                out(f"Удалён {target}")
+                out(f"Removed {target}")
             removed_any = True
         if not removed_any:
-            out("Package json нигде не найден — панель уже отключена от Houdini.")
+            out("No package json found anywhere — the panel is already disconnected from Houdini.")
 
     if purge:
         data_root = paths.data_dir()
         if dry_run:
-            out(f"[dry-run] снёс бы папку данных {data_root}")
+            out(f"[dry-run] would wipe the data directory {data_root}")
         else:
             shutil.rmtree(data_root, ignore_errors=True)
-            out(f"Папка данных удалена: {data_root}")
+            out(f"Data directory removed: {data_root}")
 
     return 0
 
@@ -248,15 +251,15 @@ def _read_hap_python(package_path: Path) -> str | None:
 
 
 def doctor(out=print) -> int:
-    """Печатает всё, чем можно чинить установку руками."""
+    """Prints everything needed to fix the install by hand."""
     out(f"houdini-agent-panel {_panel_version()}")
 
     package_dirs, reason = _resolve_package_dirs(None)
     if not package_dirs:
-        out("Houdini на машине не найдена (prefs-директорий с распознанной версией нет).")
+        out("No Houdini found on this machine (no prefs directories with a recognized version).")
         return 0
 
-    out(f"Каталоги packages Houdini ({reason}):")
+    out(f"Houdini packages directories ({reason}):")
     for package_dir in package_dirs:
         prefs_dir = package_dir.parent
         version = houdini_package.houdini_version_of(prefs_dir)
@@ -264,17 +267,17 @@ def doctor(out=print) -> int:
 
         hython = deps_mod.find_hython(version) if version else None
         if hython is None:
-            out("  hython не найден")
+            out("  hython not found")
             continue
         out(f"  hython: {hython}")
 
         try:
             pyver = deps_mod.python_version_of(hython)
         except deps_mod.DepsError as exc:
-            out(f"  hython не отвечает: {exc}")
+            out(f"  hython did not respond: {exc}")
             continue
         if pyver is None:
-            out("  не удалось разобрать версию Python у hython")
+            out("  could not parse hython's Python version")
             continue
 
         tag = paths.python_tag(pyver)
@@ -282,14 +285,14 @@ def doctor(out=print) -> int:
 
         target = paths.deps_dir(tag)
         ready = deps_mod.deps_ready(target)
-        out(f"  зависимости в {target}: {'готовы' if ready else 'НЕ поставлены'}")
+        out(f"  dependencies in {target}: {'ready' if ready else 'NOT installed'}")
 
         package_path = package_dir / houdini_package.PACKAGE_NAME
         if package_path.exists():
-            out(f"  package json: есть ({package_path})")
+            out(f"  package json: present ({package_path})")
             hap_python = _read_hap_python(package_path)
             out(f"  HAP_PYTHON: {hap_python or '?'}")
         else:
-            out(f"  package json: нет ({package_path})")
+            out(f"  package json: missing ({package_path})")
 
     return 0

@@ -1,14 +1,16 @@
-"""Единственная дверь панели в сеть.
+"""The panel's single door to the network.
 
-Всё, что ходит наружу — реестр, PyPI, фид оповещений, nodejs.org, архивы
-агентов — обязано принимать параметр ``fetch`` этого типа. Причины две.
+Everything that reaches outward — the registry, PyPI, the announcements
+feed, nodejs.org, agent archives — must accept a ``fetch`` parameter of
+this type. Two reasons.
 
-Первая: тест не должен зависеть от интернета, а мок одного протокола дешевле
-патчинга ``urllib`` в шести модулях.
+First: a test shouldn't depend on the internet, and mocking one protocol is
+cheaper than patching ``urllib`` in six modules.
 
-Вторая, важнее: в design.md записано обещание, что с выключенными оповещениями
-и телеметрией панель не делает ни одного запроса. Обещание проверяемо только
-если запросы физически идут через одну функцию, которую тест может посчитать.
+Second, more importantly: design.md records a promise that with
+announcements and telemetry turned off, the panel makes zero requests. That
+promise is only checkable if requests physically go through a single
+function a test can count.
 """
 
 from __future__ import annotations
@@ -19,31 +21,32 @@ import urllib.error
 import urllib.request
 from typing import Callable, Protocol
 
-#: Панель представляется честно: администратору студии, увидевшему это в логах
-#: прокси, должно быть понятно, что за софт стучится наружу.
+#: The panel identifies itself honestly: a studio admin who spots this in
+#: proxy logs should be able to tell what software is reaching out.
 USER_AGENT = "houdini-agent-panel"
 
 DEFAULT_TIMEOUT = 30.0
 
-#: Своя связка корневых сертификатов для студий с перехватывающим прокси.
+#: Custom root CA bundle for studios with an intercepting proxy.
 CA_BUNDLE_ENV = "HAP_CA_BUNDLE"
 
 _ssl_context: ssl.SSLContext | None = None
 
 
 def ssl_context() -> ssl.SSLContext:
-    """Контекст TLS, который работает и внутри Houdini.
+    """A TLS context that also works inside Houdini.
 
-    Python, который приносит с собой Houdini, собран без связки корневых
-    сертификатов: любой HTTPS оттуда падает с
+    The Python that ships with Houdini is built without a root CA bundle:
+    any HTTPS request from it fails with
     ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate``
-    (проверено запуском в Houdini 22.0.368). А панель ходит в сеть именно
-    оттуда — за реестром, агентами, Node, версиями и оповещениями. Без этого
-    у неё не работает ни одна сетевая функция.
+    (verified by running inside Houdini 22.0.368). And the panel reaches
+    the network from exactly there — for the registry, agents, Node,
+    versions, and announcements. Without this, none of its network
+    functions work.
 
-    Поэтому связку берём у ``certifi``: он и так приезжает вместе с
-    зависимостями. Отключать проверку сертификатов — не вариант: мы по этим
-    соединениям качаем исполняемые файлы.
+    So we take the bundle from ``certifi``: it already ships alongside our
+    dependencies anyway. Disabling certificate verification isn't an
+    option: we download executable files over these connections.
     """
     global _ssl_context
     if _ssl_context is not None:
@@ -58,26 +61,26 @@ def ssl_context() -> ssl.SSLContext:
         import certifi
 
         _ssl_context = ssl.create_default_context(cafile=certifi.where())
-    except Exception:  # noqa: BLE001 - вне Houdini системная связка обычно есть
+    except Exception:  # noqa: BLE001 - outside Houdini there's usually a system bundle
         _ssl_context = ssl.create_default_context()
     return _ssl_context
 
 
 class NetworkError(RuntimeError):
-    """Что угодно, что помешало получить ответ. Причина — в тексте."""
+    """Anything that prevented getting a response. The reason is in the text."""
 
 
 class Fetcher(Protocol):
     def __call__(self, url: str, *, timeout: float = DEFAULT_TIMEOUT) -> bytes: ...
 
 
-#: Колбэк прогресса для длинных скачиваний. ``total`` — None, если сервер не
-#: прислал Content-Length.
+#: Progress callback for long downloads. ``total`` is None if the server
+#: didn't send a Content-Length.
 Progress = Callable[[int, "int | None", str], None]
 
 
 def urlopen_fetch(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> bytes:
-    """Забрать URL целиком. Годится для JSON, не годится для архивов."""
+    """Fetch a URL in full. Fine for JSON, not for archives."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as response:
@@ -96,11 +99,12 @@ def stream_fetch(
     progress: Progress | None = None,
     chunk_size: int = 1 << 16,
 ) -> int:
-    """Скачать URL в открытый бинарный файл, отдавая прогресс.
+    """Download a URL into an open binary file, reporting progress.
 
-    Архивы агентов и Node — десятки мегабайт. Читать их в память целиком, чтобы
-    потом записать, незачем, а прогресс-бар без потоковой загрузки нарисовать
-    нечем. Возвращает число записанных байт.
+    Agent and Node archives are tens of megabytes. There's no reason to
+    read them into memory whole just to write them back out, and there's
+    nothing to draw a progress bar from without a streamed download.
+    Returns the number of bytes written.
     """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
@@ -124,11 +128,11 @@ def stream_fetch(
 
 
 def fetch_json(url: str, *, fetch: Fetcher | None = None, timeout: float = DEFAULT_TIMEOUT):
-    """Забрать и разобрать JSON. Мусор в ответе — тоже ``NetworkError``."""
+    """Fetch and parse JSON. Garbage in the response is also a ``NetworkError``."""
     import json
 
     payload = (fetch or urlopen_fetch)(url, timeout=timeout)
     try:
         return json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise NetworkError(f"{url}: ответ не разобрался как JSON: {exc}") from exc
+        raise NetworkError(f"{url}: response did not parse as JSON: {exc}") from exc

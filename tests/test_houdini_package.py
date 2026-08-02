@@ -1,4 +1,4 @@
-"""Тесты на генерацию package json и поиск директорий Houdini на диске."""
+"""Tests for generating the package json and locating Houdini directories on disk."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def test_plugin_path_is_houdini_subdir_next_to_module():
 
 
 def test_package_json_matches_architecture_format():
-    """Структура должна совпадать со §0 architecture.md буква в букву."""
+    """The structure must match architecture.md §0 letter for letter."""
     deps = Path("/Users/x/Library/Application Support/HoudiniAgentPanel/deps/py3.11")
     payload = json.loads(
         houdini_package.package_json(deps=deps, installer_python="/opt/homebrew/bin/python3.12")
@@ -84,7 +84,7 @@ def test_candidate_package_dirs_macos_only_existing_prefs(tmp_path, monkeypatch)
     assert sorted(p.parent.name for p in found) == ["20.5", "22.0"]
     for packages in found:
         assert packages.name == "packages"
-        assert packages.is_dir()  # candidate_package_dirs может создать её сама
+        assert packages.is_dir()  # candidate_package_dirs may create it itself
 
 
 def test_candidate_package_dirs_macos_no_root_returns_empty(tmp_path, monkeypatch):

@@ -1,14 +1,15 @@
-"""Один суточный поход в сеть, обслуживающий и обновления, и оповещения.
+"""One daily network trip that serves both updates and announcements.
 
-``updates.check`` и ``announcements.check`` уже сами держат по своему
-кешу-на-сутки и по своему тумблеру в настройках (см. их докстринги) —
-поэтому вызывать обе функции безусловно при каждом открытии панели безопасно:
-если тумблер выключен или кеш ещё свежий, они и так не пойдут в сеть.
-``daily_refresh`` не заводит третий, отдельный таймер поверх этих двух — это
-была бы третья точка, которую пришлось бы держать в согласии с первыми
-двумя. Вместо этого он оборачивает переданный ``fetch`` счётчиком и
-по нему же выставляет ``checked``: реально ли в ЭТОТ вызов ушёл хоть один
-байт наружу, а не гадает по возрасту чужих файлов кеша.
+``updates.check`` and ``announcements.check`` already keep their own
+once-a-day cache and their own settings toggle each (see their docstrings)
+— so calling both functions unconditionally on every panel open is safe:
+if a toggle is off or the cache is still fresh, they won't reach the
+network anyway. ``daily_refresh`` doesn't set up a third, separate timer on
+top of these two — that would be a third moving part that would need to be
+kept in sync with the first two. Instead it wraps the passed-in ``fetch``
+with a counter and uses that to set ``checked``: whether even a single byte
+actually went out on THIS call, rather than guessing from the age of
+someone else's cache files.
 """
 
 from __future__ import annotations
@@ -44,16 +45,17 @@ def daily_refresh(
     entries: Sequence[AgentEntry] = (),
     now: datetime | None = None,
 ) -> RefreshResult:
-    """Обновления + оповещения одним заходом. Никогда не бросает исключение.
+    """Updates + announcements in a single pass. Never raises.
 
-    Оба тумблера (``check_updates``, ``show_announcements``) выключены — ни
-    одного сетевого вызова: сами ``check()`` внутри решают это раньше, чем
-    коснутся ``fetch``, здесь просто нечего считать. Сетевая ошибка на любом
-    из двух шагов не выходит наружу — панель обязана открыться и работать
-    без интернета; она просто останется без этой конкретной части (список
-    обновлений/оповещений за неудавшийся шаг будет пустым в этом вызове,
-    из кеша прошлого удачного захода их всё равно не вытащить синтетически,
-    не соврав про их актуальность).
+    With both toggles (``check_updates``, ``show_announcements``) off —
+    zero network calls: the ``check()`` functions themselves decide this
+    before ever touching ``fetch``, there's simply nothing to count here. A
+    network error on either of the two steps doesn't propagate outward —
+    the panel must open and work without internet access; it just ends up
+    without that particular piece (the list of updates/announcements for
+    the failed step will be empty for this call — there's no way to
+    synthetically pull them from a past successful cache without lying
+    about how current they are).
     """
     base_fetch = fetch or urlopen_fetch
     call_count = 0
@@ -65,11 +67,12 @@ def daily_refresh(
 
     found_updates: list[Update] = []
     try:
-        # panel_version прокидывается явно: раз вызывающая сторона уже знает
-        # текущую версию панели (она обязана передать её и для таргетинга
-        # оповещений ниже), `updates.check` не должен ещё раз угадывать её
-        # через importlib.metadata — это тот же самый факт, посчитанный дважды
-        # разными путями с риском разойтись.
+        # panel_version is passed in explicitly: since the caller already
+        # knows the panel's current version (it must pass it for
+        # announcement targeting below too), `updates.check` shouldn't have
+        # to guess it again via importlib.metadata — that would be the same
+        # fact computed twice through different paths, with a risk of them
+        # disagreeing.
         found_updates = updates_mod.check(
             settings=settings,
             entries=entries,

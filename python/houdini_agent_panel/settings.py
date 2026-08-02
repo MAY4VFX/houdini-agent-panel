@@ -1,8 +1,9 @@
-"""Настройки панели — один маленький JSON.
+"""Panel settings — one small JSON file.
 
-Читается целиком, пишется атомарно. Частичных мержей нет намеренно: файл на
-десяток ключей, а `os.replace` поверх временного файла гарантирует, что упавшая
-посреди записи Houdini не оставит человека с обрезанным JSON и без панели.
+Read whole, written atomically. There are deliberately no partial merges:
+the file has a dozen keys, and `os.replace` over a temp file guarantees
+that a Houdini crash mid-write never leaves someone with a truncated JSON
+file and no panel.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ SETTINGS_VERSION = 1
 
 @dataclass
 class CustomAgent:
-    """«Свой агент» — произвольная команда, говорящая по ACP.
+    """"Custom Agent" — an arbitrary command that speaks ACP.
 
-    Ни версии, ни скачивания: человек уже поставил это сам, наше дело —
-    запустить и не мешать.
+    No version, no download: the human already installed this themselves,
+    our job is just to launch it and stay out of the way.
     """
 
     id: str
@@ -61,7 +62,7 @@ class Settings:
     installed_agents: dict[str, InstalledAgent] = field(default_factory=dict)
     seen_announcements: list[str] = field(default_factory=list)
 
-    # --- сериализация
+    # --- serialization
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -70,11 +71,12 @@ class Settings:
 
     @classmethod
     def from_dict(cls, payload: Any) -> "Settings":
-        """Собрать настройки из чего угодно, не падая.
+        """Build settings out of whatever's given, without raising.
 
-        Неизвестные ключи игнорируются, отсутствующие берутся из дефолтов, а
-        ключ неправильного типа откатывается на дефолт. Файл настроек правят
-        руками, и опечатка в нём не должна стоить человеку рабочего дня.
+        Unknown keys are ignored, missing ones fall back to their defaults,
+        and a key of the wrong type falls back to its default too. The
+        settings file gets edited by hand, and a typo in it shouldn't cost
+        someone their workday.
         """
         settings = cls()
         if not isinstance(payload, dict):
@@ -126,10 +128,11 @@ class Settings:
 
 
 def load(path: Path | None = None) -> Settings:
-    """Прочитать настройки.
+    """Read the settings.
 
-    Битый файл — не ошибка: он отъезжает в ``settings.json.broken``, а человек
-    получает панель с дефолтами вместо стектрейса при открытии.
+    A corrupted file isn't an error: it gets moved aside to
+    ``settings.json.broken``, and the human gets a panel with defaults
+    instead of a stack trace on open.
     """
     target = path or paths.settings_path()
     if not target.exists():
@@ -154,10 +157,10 @@ def save(settings: Settings, path: Path | None = None) -> None:
 
 
 def diagnostics(settings: Settings) -> str:
-    """Текст для кнопки «Скопировать диагностику».
+    """Text for the "Copy diagnostics" button.
 
-    Всё, что нужно для баг-репорта, и ничего, что человек не захотел бы
-    отправлять: ни путей к сценам, ни имён проектов, ни содержимого настроек.
+    Everything needed for a bug report, and nothing a human wouldn't want
+    to send: no scene paths, no project names, no settings contents.
     """
     import platform
     import sys
@@ -172,8 +175,8 @@ def diagnostics(settings: Settings) -> str:
         from .ui.qt import QT_SOURCE, QT_VERSION
 
         lines.append(f"qt {QT_VERSION} via {QT_SOURCE}")
-    except Exception as exc:  # noqa: BLE001 - диагностика не имеет права падать
-        lines.append(f"qt недоступен: {exc!r}")
+    except Exception as exc:  # noqa: BLE001 - diagnostics is not allowed to raise
+        lines.append(f"qt unavailable: {exc!r}")
 
     try:
         from . import scene
@@ -181,20 +184,20 @@ def diagnostics(settings: Settings) -> str:
         lines.append(f"houdini {scene.houdini_version()}")
         lines.append(f"fx port {scene.fx_port()}")
     except Exception as exc:  # noqa: BLE001
-        lines.append(f"houdini недоступна: {exc!r}")
+        lines.append(f"houdini unavailable: {exc!r}")
 
     try:
         import fxhoudinimcp
 
         lines.append(f"fxhoudinimcp {getattr(fxhoudinimcp, '__version__', 'unknown')}")
     except Exception:  # noqa: BLE001
-        lines.append("fxhoudinimcp не импортируется")
+        lines.append("fxhoudinimcp is not importable")
 
-    lines.append(f"агент по умолчанию: {settings.default_agent or '—'}")
+    lines.append(f"default agent: {settings.default_agent or '—'}")
     for agent_id, installed in sorted(settings.installed_agents.items()):
-        lines.append(f"агент {agent_id} {installed.version} ({installed.kind})")
-    lines.append(f"обновления: {settings.check_updates}, оповещения: {settings.show_announcements}")
-    lines.append(f"телеметрия: {settings.telemetry}")
+        lines.append(f"agent {agent_id} {installed.version} ({installed.kind})")
+    lines.append(f"updates: {settings.check_updates}, announcements: {settings.show_announcements}")
+    lines.append(f"telemetry: {settings.telemetry}")
     return "\n".join(lines)
 
 
@@ -203,7 +206,7 @@ def _panel_version() -> str:
         from importlib.metadata import version
 
         return version("houdini-agent-panel")
-    except Exception:  # noqa: BLE001 - из --target-дерева метаданных может не быть
+    except Exception:  # noqa: BLE001 - metadata may be missing when run from a --target tree
         from . import __version__
 
         return __version__

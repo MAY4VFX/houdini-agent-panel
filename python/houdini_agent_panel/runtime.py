@@ -1,10 +1,10 @@
-"""Установка, запуск и удаление агентов: скачать, проверить sha256, распаковать.
+"""Installing, launching, and removing agents: download, verify sha256, extract.
 
-Самый рискованный код в проекте по одной причине — он пишет на диск то, что
-пришло из интернета. Два правила держат это безопасным: контрольная сумма
-проверяется ДО того, как что-либо занимает постоянное место (`download_and_verify`),
-и распаковка отклоняет любой путь внутри архива, целящий наружу целевой
-директории (`extract_archive`, Zip Slip).
+The riskiest code in the project, for one reason — it writes to disk
+whatever came in from the internet. Two rules keep this safe: the checksum
+is verified BEFORE anything takes up a permanent spot
+(`download_and_verify`), and extraction rejects any path inside the archive
+that points outside the target directory (`extract_archive`, Zip Slip).
 """
 
 from __future__ import annotations
@@ -37,32 +37,33 @@ class Progress(Protocol):
 class LaunchSpec:
     command: str
     args: list[str]
-    env: dict[str, str]  # добавка к окружению процесса, не замена
+    env: dict[str, str]  # added to the process environment, not a replacement for it
 
 
 class InstallError(RuntimeError):
-    """Что угодно, что помешало поставить агента или Node. Причина — в тексте."""
+    """Anything that prevented installing an agent or Node. The reason is in the text."""
 
 
 class ChecksumError(InstallError):
-    """sha256 скачанного не совпал с ожидаемым.
+    """The downloaded file's sha256 didn't match what was expected.
 
-    `download_and_verify` в этом случае не оставляет на диске ничего — ни
-    промежуточного файла, ни тем более итогового.
+    In this case `download_and_verify` leaves nothing on disk — no
+    intermediate file, and certainly no final one.
     """
 
 
-# --- манифест на диске: чем `is_installed`/`installed_version` проверяют,
-# что уже стоит, не трогая ни сеть, ни глобальные настройки панели -----------
+# --- on-disk manifest: how `is_installed`/`installed_version` check what's
+# already installed without touching the network or the panel's global settings -----------
 
 
 def _manifest_path_readonly(agent_id: str) -> Path:
-    """Путь к манифесту для ЧТЕНИЯ — без побочного создания папки агента.
+    """Path to the manifest for READING — without the side effect of creating the agent's folder.
 
-    `paths.agent_dir()` делает `mkdir` при каждом обращении (`paths._sub`).
-    `is_installed`/`installed_version` дергаются для КАЖДОГО агента реестра
-    при отрисовке экрана "Агенты" — через `paths.agent_dir()` это заводило бы
-    пустую папку на диске для каждого ещё не установленного агента.
+    `paths.agent_dir()` does a `mkdir` on every access (`paths._sub`).
+    `is_installed`/`installed_version` are called for EVERY agent in the
+    registry when rendering the "Agents" screen — going through
+    `paths.agent_dir()` there would create an empty folder on disk for
+    every agent that isn't installed yet.
     """
     return paths.agents_dir() / agent_id / _MANIFEST_NAME
 
@@ -74,7 +75,7 @@ def _write_manifest(entry: AgentEntry, *, kind: str) -> None:
         "kind": kind,
         "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    manifest = paths.agent_dir(entry.id) / _MANIFEST_NAME  # тут mkdir нужен по делу — мы пишем
+    manifest = paths.agent_dir(entry.id) / _MANIFEST_NAME  # mkdir is warranted here — we're writing
     manifest.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
 
 
@@ -93,19 +94,19 @@ def installed_version(agent_id: str) -> str | None:
 
 
 def is_installed(entry: AgentEntry) -> bool:
-    """Идемпотентность установки: та же версия уже стоит — не качаем заново."""
+    """Install idempotency: the same version is already there — don't download it again."""
     return installed_version(entry.id) == entry.version
 
 
-# --- скачивание с проверкой sha256 ------------------------------------------
+# --- downloading with sha256 verification ------------------------------------
 
 
 class _HashingWriter:
-    """Прокси файлового объекта: пишет на диск и считает sha256 по потоку.
+    """A file-object proxy: writes to disk and computes sha256 over the stream.
 
-    Так `download_and_verify` не читает архив дважды (один раз для записи,
-    второй для хеша) — sha256 копится по мере поступления чанков от
-    `network.stream_fetch`.
+    This way `download_and_verify` doesn't read the archive twice (once to
+    write it, once to hash it) — the sha256 accumulates as chunks arrive
+    from `network.stream_fetch`.
     """
 
     def __init__(self, raw, hasher: "hashlib._Hash") -> None:
@@ -118,14 +119,15 @@ class _HashingWriter:
 
 
 def _stream_to_file(url: str, dest_file, *, fetch: Fetcher | None, progress: Progress | None) -> int:
-    """Скачать `url` в открытый файловый объект `dest_file`.
+    """Download `url` into the open file object `dest_file`.
 
-    С переданным `fetch` (тесты) — тело целиком через `Fetcher`, это ОК для
-    маленьких тестовых фикстур и, важнее, единственный способ, которым тест
-    вообще может подменить сеть (`network.py`: "мок одного протокола дешевле
-    патчинга urllib в шести модулях" — это верно и для потоковых архивов).
-    Без `fetch` (продакшен) — настоящий `network.stream_fetch`, чтобы не
-    таскать десятки мегабайт архива агента/Node в память целиком.
+    With a `fetch` passed in (tests) — the whole body via `Fetcher`, which
+    is fine for small test fixtures and, more importantly, the only way a
+    test can substitute the network at all (`network.py`: "mocking one
+    protocol is cheaper than patching urllib across six modules" — true for
+    streamed archives too). Without `fetch` (production) — the real
+    `network.stream_fetch`, so we don't have to hold tens of megabytes of an
+    agent/Node archive in memory all at once.
     """
     if fetch is not None:
         payload = fetch(url)
@@ -144,12 +146,13 @@ def download_and_verify(
     progress: Progress | None = None,
     fetch: Fetcher | None = None,
 ) -> Path:
-    """Скачать `url` в `dest`, проверив sha256, атомарно.
+    """Download `url` into `dest`, verifying sha256, atomically.
 
-    Пишем во временный файл РЯДОМ с `dest` (`<dest>.part`) и переименовываем
-    на место только после совпадения контрольной суммы. Прерванная закачка
-    или несовпавший хеш не оставляют на диске ни `dest`, ни `.part`-файла —
-    иначе панель считала бы половину архива "установленным" агентом.
+    We write to a temp file NEXT TO `dest` (`<dest>.part`) and rename it
+    into place only once the checksum matches. An interrupted download or a
+    mismatched hash leaves neither `dest` nor the `.part` file on disk —
+    otherwise the panel would consider half an archive an "installed"
+    agent.
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -161,7 +164,7 @@ def download_and_verify(
             _stream_to_file(url, writer, fetch=fetch, progress=progress)
         digest = hasher.hexdigest()
         if digest.lower() != sha256.lower():
-            raise ChecksumError(f"{url}: sha256 {digest} не совпал с ожидаемым {sha256}")
+            raise ChecksumError(f"{url}: sha256 {digest} did not match expected {sha256}")
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -169,20 +172,21 @@ def download_and_verify(
     return dest
 
 
-# --- безопасная распаковка (Zip Slip) ---------------------------------------
+# --- safe extraction (Zip Slip) ---------------------------------------
 
 
 def _safe_member_path(dest: Path, member_name: str) -> Path:
-    """Резолвит путь члена архива внутри `dest`, отклоняя выход за границу.
+    """Resolves an archive member's path inside `dest`, rejecting anything outside it.
 
-    `Path.joinpath` сам "телепортирует" результат на абсолютный путь, если
-    один из компонентов абсолютный (`Path("/a") / "/etc/passwd" == Path("/etc/passwd")`) —
-    поэтому проверка "результат лежит внутри dest" после `resolve()` ловит
-    и `..`-обход, и абсолютные пути членов одним и тем же кодом.
+    `Path.joinpath` itself "teleports" the result to an absolute path if one
+    of the components is absolute
+    (`Path("/a") / "/etc/passwd" == Path("/etc/passwd")`) — so checking
+    "the result lives inside dest" after `resolve()` catches both `..`
+    traversal and absolute member paths with the same piece of code.
     """
     member_path = (dest / member_name).resolve()
     if member_path != dest and dest not in member_path.parents:
-        raise InstallError(f"архив содержит небезопасный путь: {member_name!r}")
+        raise InstallError(f"archive contains an unsafe path: {member_name!r}")
     return member_path
 
 
@@ -212,18 +216,19 @@ def _extract_tar(archive: Path, dest: Path) -> None:
     with tarfile.open(archive, "r:*") as tf:
         for member in tf.getmembers():
             if member.issym() or member.islnk():
-                # Симлинки внутри архива не создаём и не следуем по ним — самый
-                # простой способ закрыть Zip Slip через ссылки: цель снаружи
-                # dest никогда не появляется на диске. Наши агенты/Node этого
-                # не требуют: npx_argv() зовёт npx-cli.js напрямую, минуя
-                # симлинк-шимы bin/npx, которые несёт архив nodejs.org.
+                # We don't create or follow symlinks inside the archive —
+                # the simplest way to close off Zip Slip via links: a
+                # target outside dest never ends up on disk at all. Our
+                # agents/Node don't need this: npx_argv() calls npx-cli.js
+                # directly, bypassing the bin/npx symlink shims that the
+                # nodejs.org archive carries.
                 continue
             target = _safe_member_path(dest, member.name)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             if not member.isfile():
-                continue  # устройства/fifo из архива нам не нужны
+                continue  # we don't need devices/fifos from the archive
             target.parent.mkdir(parents=True, exist_ok=True)
             extracted = tf.extractfile(member)
             if extracted is None:
@@ -238,7 +243,7 @@ def _extract_tar(archive: Path, dest: Path) -> None:
 
 
 def extract_archive(archive: Path, dest: Path) -> None:
-    """tar.gz/tgz/zip. Пути с `..` и абсолютные — отклоняются (Zip Slip)."""
+    """tar.gz/tgz/zip. Paths with `..` or absolute ones are rejected (Zip Slip)."""
     archive = Path(archive)
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -248,16 +253,16 @@ def extract_archive(archive: Path, dest: Path) -> None:
     elif name.endswith((".tar.gz", ".tgz", ".tar")):
         _extract_tar(archive, dest)
     else:
-        raise InstallError(f"{archive}: неизвестный формат архива")
+        raise InstallError(f"{archive}: unknown archive format")
 
 
-# --- установка/удаление/запуск агентов --------------------------------------
+# --- installing/removing/launching agents --------------------------------------
 
 
 def _resolve_cmd(root: Path, cmd: str) -> Path:
-    """`"./opencode"` — относительно корня распакованного архива."""
+    """`"./opencode"` — relative to the root of the extracted archive."""
     cleaned = cmd[2:] if cmd.startswith("./") else cmd
-    cleaned = cleaned.replace("\\", "/")  # часть записей реестра — под Windows
+    cleaned = cleaned.replace("\\", "/")  # some registry entries are Windows-flavored
     return root / cleaned
 
 
@@ -272,15 +277,17 @@ def _make_executable(path: Path) -> None:
 
 
 def _npx_launch_spec(node_bin: Path, dist: NpxDistribution) -> LaunchSpec:
-    """Команда запуска npx-агента вместе с PATH до нашего Node.
+    """The launch command for an npx agent, together with a PATH to our Node.
 
-    Звать `npx-cli.js` нашим `node` недостаточно, хотя выглядит достаточным:
-    `npx-cli.js` сам порождает дочерние процессы командой `node`, то есть
-    ищет его в PATH. На машине без Node это падает мгновенно и молча —
-    процесс агента умирает до первого байта, а клиент видит только
-    `ConnectionError: Connection closed` (проверено запуском с урезанным
-    PATH). Поэтому каталог нашего Node уезжает в PATH процесса агента —
-    и только его: система не трогается, это ровно то, что обещано в дизайне.
+    Calling `npx-cli.js` with our own `node` isn't enough, even though it
+    looks like it should be: `npx-cli.js` itself spawns child processes with
+    the `node` command, meaning it looks for it on PATH. On a machine
+    without Node this fails instantly and silently — the agent process dies
+    before its first byte, and the client only sees
+    `ConnectionError: Connection closed` (verified by running with a
+    stripped-down PATH). So our Node's directory gets added to the agent
+    process's PATH — and only that: the system is never touched, exactly as
+    the design promises.
     """
     from . import node as node_module
 
@@ -297,12 +304,13 @@ def _binary_launch_spec(version_dir: Path, dist: BinaryDistribution) -> LaunchSp
 def install_agent(
     entry: AgentEntry, *, progress: Progress | None = None, fetch: Fetcher | None = None
 ) -> LaunchSpec:
-    """Поставить агента и вернуть готовую команду запуска.
+    """Install an agent and return a ready-to-use launch command.
 
-    Идемпотентно: версия из `entry` уже стоит — ни сети, ни диска, сразу
-    `launch_spec`. npx-агент — только `ensure_node()` и манифест, сам пакет
-    качает `npx` при первом запуске. Бинарный — качает архив, сверяет
-    sha256, распаковывает в `<data>/agents/<id>/<version>`, ставит +x.
+    Idempotent: if the version in `entry` is already installed, there's no
+    network, no disk, just `launch_spec` right away. An npx agent only
+    needs `ensure_node()` and a manifest — the package itself is downloaded
+    by `npx` on first launch. A binary one downloads the archive, verifies
+    its sha256, extracts it into `<data>/agents/<id>/<version>`, and sets +x.
     """
     if is_installed(entry):
         return launch_spec(entry)
@@ -310,10 +318,11 @@ def install_agent(
     key = platform_key()
     dist = entry.distribution_for(key)
     if dist is None:
-        # Ключ передаём явно тем же вызовом platform_key(), что и выше: свой
-        # (не registry-модульный) platform_key переопределён в тестах через
-        # runtime.platform_key, и unavailable_reason() обязана согласиться с
-        # тем же значением, а не читать реальную платформу заново.
+        # We pass the key explicitly using the same platform_key() call as
+        # above: our own (not the registry module's) platform_key is
+        # overridden in tests via runtime.platform_key, and
+        # unavailable_reason() must agree on the same value rather than
+        # re-reading the real platform.
         raise InstallError(entry.unavailable_reason(key))
 
     if isinstance(dist, NpxDistribution):
@@ -324,11 +333,12 @@ def install_agent(
         return _npx_launch_spec(node_bin, dist)
 
     if not dist.sha256:
-        # В реестре встречаются записи без sha256 (§ registry.py,
-        # BinaryDistribution.sha256). Ставить бинарь, который нечем
-        # проверить, панель отказывается — лучше явная ошибка, чем тихая
-        # брешь в целостности того, что запускается в системе художника.
-        raise InstallError(f"{entry.name}: в реестре нет sha256 для проверки, установка отклонена")
+        # Some registry entries have no sha256 (§ registry.py,
+        # BinaryDistribution.sha256). The panel refuses to install a binary
+        # it has nothing to verify against — an explicit error beats a
+        # silent hole in the integrity of whatever runs on the artist's
+        # machine.
+        raise InstallError(f"{entry.name}: no sha256 in the registry to verify against, install refused")
 
     version_dir = paths.agent_dir(entry.id) / entry.version
     archive_name = dist.archive.rsplit("/", 1)[-1]
@@ -354,13 +364,13 @@ def install_agent(
 
 
 def uninstall_agent(agent_id: str) -> None:
-    """Чистит папку агента целиком. Соседей (других агентов) не трогает.
+    """Wipes the agent's folder entirely. Leaves its neighbors (other agents) alone.
 
-    Путь считаем через `paths.agents_dir() / agent_id`, а не через
-    `paths.agent_dir(agent_id)`: последняя создаёт директорию как побочный
-    эффект (`paths._sub` делает `mkdir` при каждом обращении) — уничтожать то,
-    что сама же перед этим создала, было бы странно и для несуществовавшего
-    агента оставляло бы пустую папку на диске.
+    We compute the path via `paths.agents_dir() / agent_id`, not via
+    `paths.agent_dir(agent_id)`: the latter creates the directory as a side
+    effect (`paths._sub` does a `mkdir` on every access) — destroying
+    something it just created itself would be strange, and for an agent
+    that never existed it would leave an empty folder on disk.
     """
     directory = paths.agents_dir() / agent_id
     if directory.exists():
@@ -368,19 +378,21 @@ def uninstall_agent(agent_id: str) -> None:
 
 
 def launch_spec(entry: AgentEntry) -> LaunchSpec:
-    """Команда запуска уже установленного агента.
+    """The launch command for an already-installed agent.
 
-    Для npx `ensure_node()` здесь дешёвый: агент устанавливался через
-    `install_agent`, который уже развернул Node (системный либо свой) — это
-    просто находит его снова, без сети, если он уже на диске.
+    For npx, `ensure_node()` here is cheap: the agent was installed via
+    `install_agent`, which already provisioned Node (system or our own) —
+    this just finds it again, no network involved, since it's already on
+    disk.
     """
     key = platform_key()
     dist = entry.distribution_for(key)
     if dist is None:
-        # Ключ передаём явно тем же вызовом platform_key(), что и выше: свой
-        # (не registry-модульный) platform_key переопределён в тестах через
-        # runtime.platform_key, и unavailable_reason() обязана согласиться с
-        # тем же значением, а не читать реальную платформу заново.
+        # We pass the key explicitly using the same platform_key() call as
+        # above: our own (not the registry module's) platform_key is
+        # overridden in tests via runtime.platform_key, and
+        # unavailable_reason() must agree on the same value rather than
+        # re-reading the real platform.
         raise InstallError(entry.unavailable_reason(key))
 
     if isinstance(dist, NpxDistribution):
@@ -390,11 +402,11 @@ def launch_spec(entry: AgentEntry) -> LaunchSpec:
         return _npx_launch_spec(node_bin, dist)
 
     if not is_installed(entry):
-        raise InstallError(f"{entry.name} {entry.version}: не установлен")
+        raise InstallError(f"{entry.name} {entry.version}: not installed")
     version_dir = paths.agent_dir(entry.id) / entry.version
     return _binary_launch_spec(version_dir, dist)
 
 
 def custom_launch_spec(agent: CustomAgent) -> LaunchSpec:
-    """«Свой агент» — команда как есть, без установки и версий."""
+    """"Custom Agent" — the command as-is, with no install step or versions."""
     return LaunchSpec(command=agent.command, args=list(agent.args), env=dict(agent.env))

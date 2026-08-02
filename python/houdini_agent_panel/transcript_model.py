@@ -1,11 +1,11 @@
-"""Модель ленты — чистый Python, без Qt.
+"""The feed model — plain Python, no Qt.
 
-Отделено от отрисовки (`ui/transcript.py`), чтобы логику сборки ленты из
-потока `session/update` можно было тестировать без `QApplication` (см.
-docs/architecture.md §8, §11). Ничего отсюда не импортирует ни Qt, ни `acp`:
-входные объекты (чанки, `ToolCall*`, `PlanEntry`) читаются через `getattr`,
-так что модель одинаково работает и с настоящими pydantic-моделями агента, и
-с простыми заглушками в тестах.
+Kept separate from rendering (`ui/transcript.py`) so the logic that
+assembles the feed from the `session/update` stream can be tested without a
+`QApplication` (see docs/architecture.md §8, §11). Nothing here imports
+either Qt or `acp`: input objects (chunks, `ToolCall*`, `PlanEntry`) are
+read via `getattr`, so the model works identically with the agent's real
+pydantic models and with plain stubs in tests.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ EntryKind = Literal[
     "user", "activity", "agent", "thought", "tool", "plan", "permission", "error"
 ]
 
-#: У ленты один план на сессию — протокол шлёт его целиком при каждом
-#: обновлении (`Plan.entries` — полный список, не дельта), так что и у записи
-#: в ленте один и тот же фиксированный id.
+#: The feed has one plan per session — the protocol sends it in full on
+#: every update (`Plan.entries` is the complete list, not a delta), so the
+#: feed entry gets one and the same fixed id.
 _PLAN_ENTRY_ID = "plan"
 
 
@@ -36,7 +36,7 @@ class PlanEntry:
 class ToolCallView:
     tool_call_id: str
     title: str
-    kind: str  # ToolKind, "other" если агент не прислал
+    kind: str  # ToolKind, "other" if the agent didn't send one
     status: str  # pending | in_progress | completed | failed
     content: list[dict] = field(default_factory=list)
     locations: list[dict] = field(default_factory=list)
@@ -68,12 +68,12 @@ class Entry:
 
 
 def _plain(value: Any) -> Any:
-    """Pydantic-модель агента -> dict, всё остальное — как есть.
+    """The agent's pydantic model -> dict, everything else passes through as-is.
 
-    `ToolCallContent`-варианты (`ContentToolCallContent`/`FileEditToolCallContent`/
-    `TerminalToolCallContent`) приходят как pydantic-объекты; ленте достаточно
-    произвольного dict для отрисовки, привязываться к конкретным классам ACP
-    здесь незачем.
+    `ToolCallContent` variants (`ContentToolCallContent`/`FileEditToolCallContent`/
+    `TerminalToolCallContent`) arrive as pydantic objects; a plain dict is
+    enough for the feed to render, there's no reason to tie this to
+    specific ACP classes.
     """
     if value is None:
         return None
@@ -88,26 +88,27 @@ def _plain_list(values: Any) -> list[dict]:
 
 
 class TranscriptModel:
-    """Складывает поток session/update в список Entry.
+    """Folds the session/update stream into a list of Entry.
 
-    Чанки с одним message_id склеиваются в одну запись — иначе лента
-    превращается в сотню однобуквенных абзацев. tool_call_update находит
-    запись по tool_call_id и патчит только пришедшие поля (None = «не
-    менялось»). plan заменяет предыдущий план целиком (протокол шлёт полный
-    список).
+    Chunks sharing a message_id are stitched into a single entry —
+    otherwise the feed turns into a hundred one-letter paragraphs.
+    tool_call_update finds the entry by tool_call_id and patches only the
+    fields that arrived (None = "unchanged"). plan replaces the previous
+    plan wholesale (the protocol sends the full list).
     """
 
     def __init__(self) -> None:
         self._entries: list[Entry] = []
-        # Индексы по id — чтобы стриминг склеивался и обновления находили
-        # свою запись за O(1), не сканируя всю ленту на каждый чанк.
+        # Indexes by id — so streaming stitches together and updates find
+        # their entry in O(1), instead of scanning the whole feed on every
+        # chunk.
         self._by_message_id: dict[str, Entry] = {}
         self._by_tool_call_id: dict[str, Entry] = {}
         self._by_request_key: dict[str, Entry] = {}
         self._plan_entry: Entry | None = None
         self._active_activity: Entry | None = None
 
-    # --- добавление -----------------------------------------------------
+    # --- appending -----------------------------------------------------
 
     def append_user(self, text: str) -> Entry:
         entry = Entry(kind="user", id=str(uuid.uuid4()), text=text)
@@ -140,8 +141,9 @@ class TranscriptModel:
             entry = Entry(kind=kind, id=message_id, text=text)
             self._by_message_id[message_id] = entry
         else:
-            # Без message_id склеивать не с чем — агент прислал одноразовый
-            # чанк, каждый такой становится своей записью.
+            # With no message_id there's nothing to stitch to — the agent
+            # sent a one-off chunk, and every one of those becomes its own
+            # entry.
             entry = Entry(kind=kind, id=str(uuid.uuid4()), text=text)
 
         self._entries.append(entry)
@@ -165,8 +167,8 @@ class TranscriptModel:
     def apply_tool_update(self, update: Any) -> Entry | None:
         entry = self._by_tool_call_id.get(update.tool_call_id)
         if entry is None or entry.tool is None:
-            # Обновление на вызов, которого лента не видела (например, начало
-            # сессии подхватили с середины) — патчить нечего.
+            # An update for a call the feed never saw (e.g. we picked up a
+            # session midway through) — nothing to patch.
             return None
 
         view = entry.tool
@@ -204,8 +206,9 @@ class TranscriptModel:
         entry = self._by_request_key.get(request_key)
         if entry is None or entry.permission is None:
             return None
-        # "" — отменено (тот же контракт, что у ui/transcript.py::permission_answered),
-        # отличимо от None, означающего "ещё не отвечено".
+        # "" means cancelled (the same contract as
+        # ui/transcript.py::permission_answered), distinct from None, which
+        # means "not answered yet".
         entry.permission.answered = option_id if option_id is not None else ""
         return entry
 

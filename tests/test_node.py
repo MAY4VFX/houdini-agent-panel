@@ -1,4 +1,4 @@
-"""Тесты портативного Node.js: системный/свой, скачивание, npx-cli.js."""
+"""Tests for portable Node.js: system/own, downloading, npx-cli.js."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ def _add_file(tf: tarfile.TarFile, arcname: str, content: bytes, mode: int = 0o6
 
 
 def _build_node_tar(dest: Path, root_name: str) -> bytes:
-    """Минимальная, но настоящая раскладка архива nodejs.org: bin/node +
-    lib/node_modules/npm/bin/npx-cli.js — ровно то, что нужно `install_node`
-    и `npx_argv`."""
+    """A minimal but real nodejs.org archive layout: bin/node +
+    lib/node_modules/npm/bin/npx-cli.js — exactly what `install_node` and
+    `npx_argv` need."""
     archive_path = dest / f"{root_name}.tar.gz"
     with tarfile.open(archive_path, "w:gz") as tf:
         _add_file(tf, f"{root_name}/bin/node", b"#!/bin/sh\necho fake-node\n", mode=0o755)
@@ -161,7 +161,7 @@ def test_install_node_is_idempotent(tmp_path, fetcher, monkeypatch):
     calls_after_first = list(fetcher.calls)
 
     result = node.install_node(version=version, fetch=fetcher)
-    assert fetcher.calls == calls_after_first  # второй раз в сеть не ходили
+    assert fetcher.calls == calls_after_first  # didn't hit the network the second time
     assert result.exists()
 
 
@@ -182,7 +182,7 @@ def test_install_node_checksum_mismatch_leaves_nothing_on_disk(tmp_path, fetcher
         node.install_node(version=version, fetch=fetcher)
 
     assert not (paths.node_dir() / version).exists()
-    # временных файлов рядом тоже не осталось
+    # no leftover temp files either
     assert list(paths.node_dir().iterdir()) == []
 
 
@@ -194,8 +194,9 @@ def test_install_node_missing_shasums_entry_raises_without_downloading_archive(
 
     version = "22.14.0"
     fetcher.add_bytes(node.shasums_url(version), b"deadbeef  some-other-file.tar.gz\n")
-    # archive_url намеренно не зарегистрирован — если бы install_node попытался
-    # его скачать, FakeFetcher бросил бы NetworkError, а не наш ChecksumError.
+    # archive_url is deliberately not registered — if install_node tried to
+    # download it, FakeFetcher would raise NetworkError instead of our
+    # ChecksumError.
 
     with pytest.raises(ChecksumError):
         node.install_node(version=version, fetch=fetcher)
@@ -209,7 +210,7 @@ def test_ensure_node_prefers_system_node(monkeypatch):
     monkeypatch.setattr(node, "find_system_node", lambda **k: system_path)
 
     def explode(*a, **k):
-        raise AssertionError("install_node не должен звонить, когда есть системный node")
+        raise AssertionError("install_node must not be called when a system node exists")
 
     monkeypatch.setattr(node, "install_node", explode)
     assert node.ensure_node() == system_path

@@ -1,16 +1,16 @@
 #!/bin/sh
-# Установка панели агента в Houdini — одной командой.
+# Install the agent panel into Houdini — one command.
 #
-#   curl -fsSL <адрес>/install.sh | sh
-#   curl -fsSL <адрес>/install.sh | sh -s -- --agents opencode
+#   curl -fsSL <url>/install.sh | sh
+#   curl -fsSL <url>/install.sh | sh -s -- --agents opencode
 #
-# Скрипт сознательно на /bin/sh, а не на bash: на минимальных образах Linux и
-# в некоторых студийных окружениях bash может отсутствовать, а сообщение
-# «bash: not found» в ответ на «поставь мне панель» — худшее из первых
-# впечатлений.
+# Deliberately /bin/sh, not bash: minimal Linux images and some studio
+# environments may not have bash at all, and "bash: not found" in response
+# to "install my panel" is the worst possible first impression.
 #
-# Что делает: находит способ запустить пакет с PyPI и передаёт ему установку.
-# Сам ничего в систему не кладёт, кроме uv — и то лишь если запускать нечем.
+# What it does: finds a way to run the package from PyPI and hands it the
+# install command. Doesn't put anything into the system itself, except uv —
+# and only if there's nothing else to run it with.
 set -eu
 
 PACKAGE="houdini-agent-panel"
@@ -20,40 +20,40 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
-# uvx и pipx запускают пакет, не устанавливая его в систему — для инсталлятора
-# это ровно то, что нужно: он отработал и ушёл, не оставив за собой ни venv,
-# ни записей в системном Python.
+# uvx and pipx run the package without installing it into the system — for
+# an installer that's exactly what's needed: it does its job and leaves,
+# without a venv or system Python entries left behind.
 if has uvx; then
-    say "Ставлю через uvx…"
+    say "Installing via uvx…"
     exec uvx --from "$PACKAGE" python -m houdini_agent_panel install "$@"
 fi
 
 if has pipx; then
-    say "Ставлю через pipx…"
+    say "Installing via pipx…"
     exec pipx run --spec "$PACKAGE" python -m houdini_agent_panel install "$@"
 fi
 
-# Ни того ни другого нет. Приносим uv — это один статический бинарь в
-# домашней папке пользователя, без прав root и без пакетного менеджера
-# системы. Тот же приём, что и у самой Houdini, приносящей свой Python.
+# Neither is available. Bring in uv — a single static binary in the user's
+# home folder, no root, no system package manager. The same trick Houdini
+# itself uses by shipping its own Python.
 if has curl; then
-    say "Не нашёл uvx и pipx, приношу uv…"
+    say "Couldn't find uvx or pipx, fetching uv…"
     curl -LsSf https://astral.sh/uv/install.sh | sh
 elif has wget; then
-    say "Не нашёл uvx и pipx, приношу uv…"
+    say "Couldn't find uvx or pipx, fetching uv…"
     wget -qO- https://astral.sh/uv/install.sh | sh
 else
-    die "Нужен curl или wget, чтобы что-то скачать. Поставь любой из них и повтори."
+    die "Need curl or wget to download anything. Install either one and try again."
 fi
 
-# Установщик uv кладёт бинарь сюда и просит перезайти в шелл; нам перезаходить
-# некуда, поэтому находим его сами.
+# uv's installer puts the binary here and asks you to reopen your shell; we
+# have nowhere to reopen to, so we find it ourselves.
 for candidate in "${XDG_BIN_HOME:-}/uvx" "$HOME/.local/bin/uvx" "$HOME/.cargo/bin/uvx"; do
     if [ -x "$candidate" ]; then
-        say "Ставлю через $candidate…"
+        say "Installing via $candidate…"
         exec "$candidate" --from "$PACKAGE" python -m houdini_agent_panel install "$@"
     fi
 done
 
-die "uv установился, но uvx не нашёлся. Открой новый терминал и выполни:
+die "uv was installed, but uvx wasn't found. Open a new terminal and run:
     uvx --from $PACKAGE python -m houdini_agent_panel install"

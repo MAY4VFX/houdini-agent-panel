@@ -1,18 +1,19 @@
-"""Телеметрия — по умолчанию выключена, только версии и факт падения.
+"""Telemetry — off by default, only versions and the fact of a crash.
 
-Две независимые задвижки должны совпасть, прежде чем куда-то улетит хоть один
-байт: тумблер в настройках (человек согласился) и переменная окружения
-``HAP_TELEMETRY_URL`` (студия/дистрибутив задала эндпоинт). Нет второй — не
-собираемся спрашивать «а куда слать», молча остаёмся no-op: включённый тумблер
-без настроенного адреса не должен пытаться постучаться в никуда.
+Two independent gates must both be open before a single byte goes
+anywhere: the toggle in settings (the human opted in) and the
+``HAP_TELEMETRY_URL`` environment variable (the studio/distribution set an
+endpoint). Without the second one, we're not going to ask "where do I send
+this" — we silently stay a no-op: a flipped toggle with no configured
+address must not try to knock on nothing.
 
-``build_payload`` — единственное место, где решается, что вообще разрешено
-положить в событие. Список разрешённых ключей жёстко зашит (allowlist, а не
-blacklist): так добавление нового вызывающего кода с новым ``**extra`` не
-может случайно протащить что-то лишнее — незнакомый ключ просто отбрасывается,
-а не сериализуется в надежде, что он okay. Это то, что делает обещание
-"телеметрия не видит сцену" из docs/privacy.md проверяемым тестом, а не
-честным словом.
+``build_payload`` is the single place that decides what's even allowed into
+an event. The list of allowed keys is hardcoded (an allowlist, not a
+blocklist): that way new calling code with a new ``**extra`` can't
+accidentally drag something extra along — an unfamiliar key is simply
+dropped, not serialized on the hope that it's fine. That's what makes the
+promise "telemetry never sees the scene" from docs/privacy.md a checkable
+test rather than just our word for it.
 """
 
 from __future__ import annotations
@@ -24,27 +25,27 @@ from typing import Any
 from .network import Fetcher, NetworkError, urlopen_fetch
 from .settings import Settings
 
-#: Адрес приёмника. Не задан — телеметрия не может быть включена в принципе.
+#: Address of the receiver. Not set — telemetry can't be enabled at all.
 TELEMETRY_URL_ENV = "HAP_TELEMETRY_URL"
 
-#: Единственные ключи, которые build_payload готов записать в событие.
-#: Всё остальное из **extra отбрасывается молча — см. докстринг модуля.
+#: The only keys build_payload is willing to write into an event.
+#: Everything else from **extra is silently dropped — see the module docstring.
 _ALLOWED_EXTRA_KEYS = ("agent_version", "exception_type")
 
 _SEND_TIMEOUT = 5.0
 
 
 def is_enabled(settings: Settings) -> bool:
-    """И тумблер в настройках, и заданный эндпоинт — оба условия сразу."""
+    """Both the toggle in settings and a configured endpoint — both conditions at once."""
     return bool(settings.telemetry) and bool(os.environ.get(TELEMETRY_URL_ENV))
 
 
 def build_payload(settings: Settings, *, event: str, **extra: Any) -> dict[str, Any]:
-    """Собрать тело события. Никогда не бросает исключение.
+    """Build an event's body. Never raises.
 
-    Версии — те, что реально доступны в этом процессе; недоступная версия
-    (fx не установлен, Houdini не отвечает) просто отсутствует в payload,
-    а не заменяется на фиктивное значение.
+    Versions are the ones actually available in this process; an
+    unavailable version (fx not installed, Houdini not responding) is
+    simply absent from the payload, not replaced with a placeholder value.
     """
     payload: dict[str, Any] = {"event": str(event), "os": _os_name()}
 
@@ -69,15 +70,16 @@ def build_payload(settings: Settings, *, event: str, **extra: Any) -> dict[str, 
 
 
 def send(event: str, *, settings: Settings, fetch: Fetcher | None = None, **extra: Any) -> None:
-    """Отправить событие, если телеметрия включена. Никогда не мешает работе.
+    """Send an event if telemetry is enabled. Never interferes with the rest of the app.
 
-    Выключена или эндпоинт не задан — ни одного сетевого вызова. Отправка —
-    простой GET с payload в query string поверх общего ``Fetcher`` (см.
-    network.py): у панели нет причин заводить отдельный POST-транспорт ради
-    события в пару десятков байт, а прогонять его через ``Fetcher`` обязаны
-    все сетевые вызовы панели (тестовая страховка ``no_real_network``
-    иначе не сработает). Любая сетевая ошибка глушится — художник не должен
-    заметить, что телеметрия вообще пыталась куда-то сходить.
+    Disabled or no endpoint set — zero network calls. Sending is a plain
+    GET with the payload in the query string, over the shared ``Fetcher``
+    (see network.py): the panel has no reason to build a separate POST
+    transport for an event that's a couple dozen bytes, and every network
+    call the panel makes must go through ``Fetcher`` (otherwise the test
+    safeguard ``no_real_network`` wouldn't work). Any network error is
+    swallowed — an artist shouldn't notice that telemetry even tried to
+    reach anywhere.
     """
     if not is_enabled(settings):
         return
@@ -96,7 +98,7 @@ def send(event: str, *, settings: Settings, fetch: Fetcher | None = None, **extr
         pass
 
 
-# --- источники значений, каждый обязан не падать -----------------------
+# --- value sources, each one must never raise -----------------------
 
 
 def _os_name() -> str:
@@ -104,7 +106,7 @@ def _os_name() -> str:
 
     try:
         return platform.platform()
-    except Exception:  # noqa: BLE001 - телеметрия не имеет права уронить панель
+    except Exception:  # noqa: BLE001 - telemetry is not allowed to bring down the panel
         return "unknown"
 
 
@@ -113,7 +115,7 @@ def _panel_version() -> str:
         from importlib.metadata import version
 
         return version("houdini-agent-panel")
-    except Exception:  # noqa: BLE001 - метаданных может не быть в --target-дереве
+    except Exception:  # noqa: BLE001 - metadata may be missing in a --target tree
         try:
             from . import __version__
 
@@ -136,5 +138,5 @@ def _houdini_version() -> str:
         from . import scene
 
         return scene.houdini_version()
-    except Exception:  # noqa: BLE001 - scene.py трогает hou, вне Houdini недоступен
+    except Exception:  # noqa: BLE001 - scene.py touches hou, unavailable outside Houdini
         return "unknown"

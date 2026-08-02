@@ -14,9 +14,9 @@ def _item(**overrides) -> dict:
     base = {
         "id": "ann-1",
         "severity": "info",
-        "title": "Заголовок",
-        "body": "Текст",
-        "buttons": [{"label": "Ок", "url": "https://example.com"}],
+        "title": "Title",
+        "body": "Body text",
+        "buttons": [{"label": "OK", "url": "https://example.com"}],
         "panel_versions": "",
         "expires": "",
     }
@@ -24,7 +24,7 @@ def _item(**overrides) -> dict:
     return base
 
 
-# --- parse_feed: терпимость к битым записям --------------------------------
+# --- parse_feed: tolerance for broken records --------------------------------
 
 
 def test_parse_feed_empty():
@@ -38,10 +38,10 @@ def test_parse_feed_not_a_dict():
 
 def test_parse_feed_skips_broken_record_keeps_the_rest():
     payload = _feed(
-        {"id": "", "title": "без id не считается"},  # id пустой - битая запись
-        {"title": "нет id вовсе"},  # нет id
-        {"id": "ok-1"},  # нет title
-        _item(id="ok-2", title="Годная запись"),
+        {"id": "", "title": "doesn't count without an id"},  # empty id - broken record
+        {"title": "no id at all"},  # no id
+        {"id": "ok-1"},  # no title
+        _item(id="ok-2", title="A valid record"),
     )
     result = announcements.parse_feed(payload)
     assert [a.id for a in result] == ["ok-2"]
@@ -70,17 +70,17 @@ def test_parse_feed_buttons_with_bad_entries_are_dropped():
         _item(
             id="a",
             buttons=[
-                {"label": "хорошая", "url": "https://x"},
-                {"url": "https://y"},  # нет label
+                {"label": "good", "url": "https://x"},
+                {"url": "https://y"},  # no label
                 "garbage",
             ],
         )
     )
     result = announcements.parse_feed(payload)
-    assert [b.label for b in result[0].buttons] == ["хорошая"]
+    assert [b.label for b in result[0].buttons] == ["good"]
 
 
-# --- applicable(): срок годности, таргетинг, "уже видел" -------------------
+# --- applicable(): expiration, targeting, "already seen" -------------------
 
 
 def test_applicable_hides_seen():
@@ -122,12 +122,12 @@ def test_applicable_empty_panel_versions_matches_everyone():
 
 
 def test_applicable_broken_specifier_excludes_announcement():
-    # Осознанный выбор: ошибка таргетинга не должна показать сообщение всем.
+    # A deliberate choice: a targeting error must not show the message to everyone.
     items = announcements.parse_feed(_feed(_item(id="a", panel_versions=">= garbage")))
     assert announcements.applicable(items, panel_version="0.3.0", seen=[]) == []
 
 
-# --- check(): тумблер, сеть, кеш --------------------------------------------
+# --- check(): toggle, network, cache --------------------------------------
 
 
 def test_check_disabled_makes_no_network_call(fetcher):
@@ -173,8 +173,9 @@ def test_check_uses_cache_within_a_day(fetcher):
 
 
 def test_check_cache_still_reapplies_seen_filter(fetcher):
-    # Кеш не обновляется, но "уже видел" обязан пересчитываться каждый раз -
-    # иначе закрытая только что плашка снова всплывёт из старого кеша.
+    # The cache isn't refreshed, but "already seen" must be recomputed every
+    # time - otherwise a banner just dismissed would pop back up from the
+    # stale cache.
     fetcher.add_json(announcements.FEED_URL, _feed(_item(id="a")))
     settings = Settings(show_announcements=True)
     now = datetime(2026, 8, 2, tzinfo=timezone.utc)

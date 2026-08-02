@@ -1,7 +1,7 @@
-"""Общие фикстуры.
+"""Shared fixtures.
 
-Два правила, которые здесь и держатся: ни один тест не пишет в настоящую папку
-данных пользователя и ни один тест не ходит в сеть.
+Two rules are enforced here: no test writes to the real user data folder,
+and no test reaches the network.
 """
 
 from __future__ import annotations
@@ -22,10 +22,11 @@ from houdini_agent_panel import paths  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def data_dir(tmp_path, monkeypatch) -> Path:
-    """Уводит всю запись панели в tmp_path — автоматически, для каждого теста.
+    """Redirects all of the panel's writes into tmp_path — automatically, for every test.
 
-    Автоматически, а не по запросу, потому что забытая фикстура здесь означает
-    тест, который молча гадит в ``~/Library/Application Support`` разработчика.
+    Automatic rather than opt-in, because a forgotten fixture here means a
+    test that silently litters the developer's
+    ``~/Library/Application Support``.
     """
     root = tmp_path / "data"
     root.mkdir()
@@ -34,10 +35,10 @@ def data_dir(tmp_path, monkeypatch) -> Path:
 
 
 class FakeFetcher:
-    """Подстановка вместо сети.
+    """A stand-in for the network.
 
-    Считает вызовы: тест «с выключенными тумблерами панель молчит» проверяется
-    именно счётчиком, а не отсутствием исключения.
+    Counts calls: the "panel stays silent with both toggles off" test is
+    verified by exactly this counter, not by the absence of an exception.
     """
 
     def __init__(self, responses: dict[str, bytes] | None = None) -> None:
@@ -57,7 +58,7 @@ class FakeFetcher:
         except KeyError:
             from houdini_agent_panel.network import NetworkError
 
-            raise NetworkError(f"{url}: в FakeFetcher нет ответа на этот адрес") from None
+            raise NetworkError(f"{url}: FakeFetcher has no response registered for this address") from None
 
 
 @pytest.fixture
@@ -67,11 +68,11 @@ def fetcher() -> FakeFetcher:
 
 @pytest.fixture(autouse=True)
 def no_real_network(monkeypatch):
-    """Страховка: настоящий сетевой вызов из теста — падение с внятным текстом."""
+    """Safety net: a real network call from a test fails with a clear message."""
 
     def explode(*args, **kwargs):
         raise AssertionError(
-            "тест попытался выйти в сеть; передай fetch=FakeFetcher() в проверяемую функцию"
+            "a test tried to reach the network; pass fetch=FakeFetcher() into the function under test"
         )
 
     monkeypatch.setattr("houdini_agent_panel.network.urlopen_fetch", explode)
@@ -80,7 +81,7 @@ def no_real_network(monkeypatch):
 
 @pytest.fixture(scope="session")
 def qapp():
-    """Один QApplication на прогон: второй экземпляр Qt не разрешает."""
+    """One QApplication per run: Qt doesn't allow a second instance."""
     from houdini_agent_panel.ui.qt import QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

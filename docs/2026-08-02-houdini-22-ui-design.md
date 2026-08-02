@@ -1,243 +1,242 @@
-# Houdini 22 UI: как нативно встроить Agent Panel
+# Houdini 22 UI: how to embed the Agent Panel natively
 
-**TL;DR:** отдельного публичного SideFX design system / Figma / UI style guide для Houdini 22 не найдено.  
-Публичный дизайн-контракт H22 — новая тема Houdini + стандартные Qt-виджеты + `hou.qt` + масштабирование через `hou.ui`; его достаточно, чтобы панель выглядела штатной во всех темах.  
-Для Agent Panel стоит наследовать host style, брать цвета/иконки/размеры у Houdini и оставить собственный styling только для специфичных сущностей чата.
+**TL;DR:** no separate public SideFX design system / Figma / UI style guide for Houdini 22 was found.  
+The public design contract for H22 is: the new Houdini theme + standard Qt widgets + `hou.qt` + scaling via `hou.ui`; that's enough to make the panel look native across every theme.  
+For the Agent Panel, the right move is to inherit the host style, take colors/icons/sizes from Houdini, and reserve custom styling only for chat-specific entities.
 
-Дата проверки: 2026-08-02. Целевая локальная сборка: Houdini 22.0.368.
+Date verified: 2026-08-02. Target local build: Houdini 22.0.368.
 
-## Короткий ответ
+## Short answer
 
-У SideFX есть не документ с визуальными правилами в духе Material Design, а набор
-исполняемых primitives:
+SideFX doesn't have a document with visual rules in the style of Material Design — instead
+it has a set of executable primitives:
 
-1. Houdini 22 получил новый UI skin и Theme Editor.
-2. Theme Editor выводит всю палитру из трёх смысловых цветов: Base, Accent и
-   Highlight; пользователь может менять тему и контраст.
-3. `hou.qt` отдаёт штатные Houdini widgets, stylesheet, resource colors и SVG icons.
-4. `hou.ui.scaledSize()` / `globalScaleFactor()` синхронизируют размеры с настройкой
-   Global UI Size.
-5. Python Panel — штатный способ встроить PySide6/PyQt6 widget в pane tab.
+1. Houdini 22 got a new UI skin and a Theme Editor.
+2. The Theme Editor derives the whole palette from three semantic colors: Base, Accent, and
+   Highlight; the user can change the theme and contrast.
+3. `hou.qt` hands back Houdini's own widgets, stylesheet, resource colors, and SVG icons.
+4. `hou.ui.scaledSize()` / `globalScaleFactor()` keep sizes in sync with the Global UI Size setting.
+5. Python Panel is the standard way to embed a PySide6/PyQt6 widget in a pane tab.
 
-Поэтому «органично вписаться» означает не воспроизвести один тёмный скриншот H22,
-а оставаться корректным при другой Base/Accent/Highlight-теме, UI scale и платформе.
+So "blending in natively" doesn't mean reproducing one dark screenshot of H22,
+but staying correct under a different Base/Accent/Highlight theme, UI scale, or platform.
 
-Поиск также находит страницу с заголовком `Style guide`, но она относится только
-к info panels внутри viewport Python state HUD, а не к Qt pane tabs: [HUD info
+Search also turns up a page titled `Style guide`, but it applies only to
+info panels inside the viewport's Python state HUD, not to Qt pane tabs: [HUD info
 style guide](https://www.sidefx.com/docs/houdini/hom/hud_info.html).
 
-SideFX staff отдельно поясняет практический предел нативности H22: интерфейс
-смешивает traditional Houdini UI, QML и QtWidgets; их постарались свести визуально,
-но некоторые различия остаются. Поэтому custom Qt panel может быть нативной, но не
-обязана быть pixel-identical QML-панелям ([официальный форум, ответ SideFX
-staff](https://www.sidefx.com/forum/topic/104193/)).
+SideFX staff separately clarify the practical ceiling of "nativeness" in H22: the interface
+mixes traditional Houdini UI, QML, and QtWidgets; they've been visually aligned as far as
+possible, but some differences remain. So a custom Qt panel can be native without having
+to be pixel-identical to QML panels ([official forum, SideFX
+staff reply](https://www.sidefx.com/forum/topic/104193/)).
 
-## Что SideFX действительно документирует
+## What SideFX actually documents
 
-### 1. H22 — новый theme-driven UI
+### 1. H22 — a new theme-driven UI
 
-SideFX прямо пишет, что Houdini 22 вводит новый UI skin, настраиваемый через Theme
-Editor; старый UI deprecated и исчезнет в следующих версиях. Theme Editor строит
-палитру из Base, Accent и Highlight и эвристически поддерживает контраст и
-читаемость. Accent используется для кнопок и цветных частей UI-иконок, Highlight —
-для current/selected state. Светлые темы пока названы experimental, но они уже
-существуют, поэтому код не должен предполагать тёмный фон.
+SideFX states directly that Houdini 22 introduces a new UI skin, configurable through the Theme
+Editor; the old UI is deprecated and will disappear in future versions. The Theme Editor builds
+the palette from Base, Accent, and Highlight and heuristically maintains contrast and
+legibility. Accent is used for buttons and the colored parts of UI icons, Highlight is used
+for the current/selected state. Light themes are currently labeled experimental, but they already
+exist, so code shouldn't assume a dark background.
 
-Источники:
+Sources:
 
 - [What's new: User interface and viewport](https://www.sidefx.com/docs/houdini/news/22/viewport.html)
 - [Theme Editor](https://www.sidefx.com/docs/houdini/ref/windows/theme_editor.html)
 
-### 2. Python Panel — штатный контейнер
+### 2. Python Panel — the standard container
 
-Python Panel встраивает PySide6/PyQt6 interface в pane tab. Корневой widget
-возвращает `onCreateInterface()`. Qt UI и методы `hou.PythonPanel` должны вызываться
-только из main Houdini thread.
+A Python Panel embeds a PySide6/PyQt6 interface into a pane tab. The root widget is
+returned by `onCreateInterface()`. Qt UI and `hou.PythonPanel` methods must be called
+only from Houdini's main thread.
 
-Источники:
+Sources:
 
 - [Python Panel](https://www.sidefx.com/docs/houdini/ref/panes/pythonpanel.html)
 - [Python Panel Editor](https://www.sidefx.com/docs/houdini/ref/windows/pythonpaneleditor.html)
 - [`hou.PythonPanel`](https://www.sidefx.com/docs/houdini/hom/hou/PythonPanel.html)
 - [HOM Qt cookbook](https://www.sidefx.com/docs/houdini/hom/cb/qt.html)
 
-### 2.1. Точный стек H22 и важное расхождение по импорту
+### 2.1. The exact H22 stack, and an important discrepancy about imports
 
-Официальная platform page для Houdini 22 указывает Qt 6.8.3, PySide6 6.8.3 и
-Python 3.13.10 (также доступен Python 3.11 build); Qt 5 builds больше нет.
+The official platform page for Houdini 22 lists Qt 6.8.3, PySide6 6.8.3, and
+Python 3.13.10 (a Python 3.11 build is also available); there's no more Qt 5 build.
 
-Источник: [Houdini 22 system requirements and supported platforms](https://www.sidefx.com/docs/houdini/news/22/platforms.html).
+Source: [Houdini 22 system requirements and supported platforms](https://www.sidefx.com/docs/houdini/news/22/platforms.html).
 
-Официальные H22 примеры показывают прямой `from PySide6 import ...`, а комментарии
-в нескольких factory `.pypanel` из локальной установки прямо называют
-`hutil.PySide` internal-use only и советуют стороннему коду импортировать PySide
-напрямую. Это противоречит нашему локальному правилу «Qt только через
-`hutil.PySide`».
+Official H22 examples show a direct `from PySide6 import ...`, and comments in several factory
+`.pypanel` files from the local install explicitly call `hutil.PySide` internal-use only and
+advise third-party code to import PySide directly. This contradicts our own project rule of
+"Qt only through `hutil.PySide`."
 
-Решение проекта остаётся осознанным compatibility layer для одного кода на H20.5
-и H22, но его нельзя выдавать за рекомендацию публичной H22 документации SideFX.
-Это наш trade-off; при проблемах совместимости shim будет первым подозреваемым.
+The project's decision remains a deliberate compatibility layer for one codebase across H20.5
+and H22, but it must not be presented as something recommended by SideFX's public H22
+documentation. This is our own trade-off; if compatibility issues show up, the shim will be
+the first suspect.
 
-### 3. Наследование Houdini stylesheet
+### 3. Inheriting the Houdini stylesheet
 
-`hou.qt.styleSheet()` возвращает Houdini stylesheet. Если передать путь к своему
-QSS, Houdini разворачивает в нём свои placeholders: resource colors вроде
-`@MenuBG@` и scale-aware размеры вроде `@14px@`. Дочерние widgets наследуют style
-родителя; документация `hou.qt.mainWindow()` отдельно подтверждает, что parent к
-главному окну наследует Houdini stylesheet.
+`hou.qt.styleSheet()` returns the Houdini stylesheet. If you pass it a path to your own
+QSS, Houdini expands its own placeholders inside it: resource colors like
+`@MenuBG@` and scale-aware sizes like `@14px@`. Child widgets inherit their parent's style;
+`hou.qt.mainWindow()`'s documentation separately confirms that a widget parented to the
+main window inherits the Houdini stylesheet.
 
-Это даёт два режима:
+This gives two modes:
 
-- обычные widgets внутри Python Panel: ничего глобально не перекрашивать, позволить
-  Qt унаследовать host style;
-- специфичный chat widget: загрузить маленький локальный QSS через
-  `hou.qt.styleSheet(path)`, используя tokens Houdini вместо hex и обычных `px`.
+- ordinary widgets inside a Python Panel: don't recolor anything globally, let
+  Qt inherit the host style;
+- a chat-specific widget: load a small local QSS via
+  `hou.qt.styleSheet(path)`, using Houdini's tokens instead of hex values and plain `px`.
 
-Источники:
+Sources:
 
 - [`hou.qt.styleSheet`](https://www.sidefx.com/docs/houdini/hom/hou/qt/styleSheet.html)
 - [`hou.qt.mainWindow`](https://www.sidefx.com/docs/houdini/hom/hou/qt/mainWindow.html)
 
-### 4. Цвета — resource names, не hex
+### 4. Colors — resource names, not hex
 
-`hou.qt.getColor(name)` возвращает `QColor` для именованного Houdini resource color;
-имена определены в текущих `.hcs` color scheme files. Для custom painting это более
-точный Houdini API, чем копирование RGB из factory dark theme. Для обычных
-`QWidget` ещё проще использовать текущий `QPalette`.
+`hou.qt.getColor(name)` returns a `QColor` for a named Houdini resource color;
+the names are defined in the current `.hcs` color scheme files. For custom painting this is a
+more accurate Houdini API than copying RGB values out of the factory dark theme. For plain
+`QWidget`s it's even simpler to just use the current `QPalette`.
 
-Практическое разделение:
+A practical split:
 
-- `QPalette.Window`, `Text`, `Base`, `Button`, `Highlight` — базовый custom paint;
-- `hou.qt.getColor("SecondaryText")`, `getColor("IconError")` и другие resource
-  tokens — только когда нужна отсутствующая в `QPalette` семантика;
-- не кешировать вычисленный цвет как вечную константу: пользователь может сменить
-  тему во время сессии.
+- `QPalette.Window`, `Text`, `Base`, `Button`, `Highlight` — for basic custom painting;
+- `hou.qt.getColor("SecondaryText")`, `getColor("IconError")`, and other resource
+  tokens — only when semantics missing from `QPalette` are needed;
+- don't cache a computed color as a permanent constant: the user can switch
+  themes mid-session.
 
-Источник: [`hou.qt.getColor`](https://www.sidefx.com/docs/houdini/hom/hou/qt/getColor.html).
+Source: [`hou.qt.getColor`](https://www.sidefx.com/docs/houdini/hom/hou/qt/getColor.html).
 
-Последний пункт про обновление кеша — наша инженерная рекомендация, а не явно
-сформулированное правило SideFX.
+The last point, about refreshing the cache, is our own engineering recommendation, not an
+explicitly stated SideFX rule.
 
-### 5. Иконки — штатный Houdini icon registry
+### 5. Icons — the standard Houdini icon registry
 
-`hou.qt.Icon(icon_name)` создаёт `QIcon` из Houdini icon name. Имена можно смотреть
-через file chooser по `hicon://`; старый `hou.qt.createIcon()` deprecated. Это
-предпочтительнее буквенных бейджей и Unicode-символов там, где у Houdini есть ясная
-семантическая иконка.
+`hou.qt.Icon(icon_name)` builds a `QIcon` from a Houdini icon name. Names can be browsed
+via the file chooser under `hicon://`; the old `hou.qt.createIcon()` is deprecated. This is
+preferable to letter badges and Unicode symbols wherever Houdini already has a clear
+semantic icon.
 
-Источники:
+Sources:
 
 - [`hou.qt.Icon`](https://www.sidefx.com/docs/houdini/hom/hou/qt/Icon.html)
 - [`hou.qt.createIcon` (deprecated)](https://www.sidefx.com/docs/houdini/hom/hou/qt/createIcon.html)
 
-### 6. Размеры — Global UI Size
+### 6. Sizes — Global UI Size
 
-`hou.ui.scaledSize(n)` масштабирует hard-coded size по Houdini Global UI Size.
-`hou.ui.globalScaleFactor()` нужен там, где API принимает коэффициент, например для
-`QWebEngineView`. QSS placeholders `@Npx@` дают тот же принцип декларативно.
+`hou.ui.scaledSize(n)` scales a hard-coded size according to Houdini's Global UI Size.
+`hou.ui.globalScaleFactor()` is needed wherever an API takes a raw factor, e.g. for
+`QWebEngineView`. QSS placeholders `@Npx@` express the same principle declaratively.
 
-Источник: [`hou.ui`](https://www.sidefx.com/docs/houdini/hom/hou/ui.html).
+Source: [`hou.ui`](https://www.sidefx.com/docs/houdini/hom/hou/ui.html).
 
-### 6.1. Шрифты — наследовать, а не фиксировать
+### 6.1. Fonts — inherit, don't fix
 
-Публичного typography scale или `hou.qt.getFont(token)` не найдено. Безопасный
-контракт — наследовать application/widget font, меняя только weight или размер
-относительно текущего font. H22 включает Routed Gothic, но platform page не обещает
-его как стабильный public UI-font contract. Factory QSS использует `@FontFixed@`,
-однако публичная документация явно гарантирует лишь сам механизм placeholders, а не
-полный стабильный список font tokens.
+No public typography scale or `hou.qt.getFont(token)` was found. The safe
+contract is to inherit the application/widget font, changing only weight or size
+relative to the current font. H22 bundles Routed Gothic, but the platform page doesn't promise
+it as a stable public UI-font contract. The factory QSS uses `@FontFixed@`,
+but the public documentation explicitly guarantees only the placeholder mechanism itself, not
+a full, stable list of font tokens.
 
-Практический вывод: обычный текст наследует host font; для кода подходит
-`QFontDatabase.systemFont(QFontDatabase.FixedFont)`, уже используемый проектом.
+Practical takeaway: ordinary text inherits the host font; for code,
+`QFontDatabase.systemFont(QFontDatabase.FixedFont)` fits, and the project already uses it.
 
-### 7. Готовые Houdini-look widgets
+### 7. Ready-made Houdini-look widgets
 
-Публичный `hou.qt` включает `Menu`, `MenuButton`, `ComboBox`, `SearchLineEdit`,
+The public `hou.qt` includes `Menu`, `MenuButton`, `ComboBox`, `SearchLineEdit`,
 `FieldLabel`, `Separator`, `ToolTip`, `HelpButton`, `FileChooserButton`,
-`NodeChooserButton`, `GridLayout` и другие классы, прямо описанные как widgets с
-Houdini look and feel или стабильной cross-platform layout geometry.
+`NodeChooserButton`, `GridLayout`, and other classes explicitly documented as widgets with
+Houdini look and feel or stable cross-platform layout geometry.
 
-Для Agent Panel особенно уместны:
+For the Agent Panel, particularly relevant ones are:
 
-- `hou.qt.Menu` / `MenuButton` для выбора агента, режима и сессии;
-- `hou.qt.SearchLineEdit` на экране агентов;
-- `hou.qt.Separator` вместо нарисованных линий;
-- `hou.qt.ToolTip` для Houdini-native подсказок;
-- `hou.qt.Icon` для toolbar actions.
+- `hou.qt.Menu` / `MenuButton` for picking the agent, mode, and session;
+- `hou.qt.SearchLineEdit` on the agents screen;
+- `hou.qt.Separator` instead of drawn lines;
+- `hou.qt.ToolTip` for Houdini-native tooltips;
+- `hou.qt.Icon` for toolbar actions.
 
-Источник: [`hou.qt` package](https://www.sidefx.com/docs/houdini/hom/hou/qt/index.html).
+Source: [`hou.qt` package](https://www.sidefx.com/docs/houdini/hom/hou/qt/index.html).
 
-## Что показывает установленный Houdini 22.0.368
+## What the installed Houdini 22.0.368 shows
 
-Это наблюдения по factory files, а не обещанный публичный API.
+These are observations from factory files, not a promised public API.
 
-Проверены:
+Checked:
 
 - `$HFS/houdini/config/Styles/base.qss`;
-- `$HFS/houdini/config/UIDark.hcs` и `UILight.hcs`;
+- `$HFS/houdini/config/UIDark.hcs` and `UILight.hcs`;
 - `$HFS/houdini/config/Icons/SVGIcons.index`;
-- 35 factory `.pypanel` в `$HFS/houdini/python_panels`.
+- 35 factory `.pypanel` files under `$HFS/houdini/python_panels`.
 
-Локальная сборка подтверждает Python 3.13.10, Qt 6.8.3 и PySide6 6.8.3.
+The local build confirms Python 3.13.10, Qt 6.8.3, and PySide6 6.8.3.
 
-Наблюдения:
+Observations:
 
-- factory QSS сам использует токены (`@BackColor@`, `@TextColor@`,
-  `@ButtonGradHi@`, `@SelectedTextBG@`) и scale placeholders (`@1px@`, `@17px@`);
-- базовая геометрия плотная: line edit и tool button около 17 px при normal scale,
-  tabs около 20 px, checkbox/radio indicator около 14 px;
-- радиусы сдержанные: tool button 4 px, group box 5 px, tabs квадратные;
-- native controls важнее custom card styling: списки, поля, меню, tabs и scrollbars
-  уже согласованы stylesheet-ом;
-- штатные панели в основном являются тонкой `.pypanel`-обёрткой над Qt/QML module,
-  а не копируют общий stylesheet в каждом интерфейсе;
-- сам factory code иногда вызывает `setStyleSheet(hou.qt.styleSheet())` для detached
-  menus и сложных panel roots.
+- the factory QSS itself uses tokens (`@BackColor@`, `@TextColor@`,
+  `@ButtonGradHi@`, `@SelectedTextBG@`) and scale placeholders (`@1px@`, `@17px@`);
+- the base geometry is dense: a line edit and a tool button are about 17 px at normal scale,
+  tabs are about 20 px, checkbox/radio indicators are about 14 px;
+- corner radii are restrained: a tool button is 4 px, a group box is 5 px, tabs are square;
+- native controls matter more than custom card styling: lists, fields, menus, tabs, and scrollbars
+  are already handled consistently by the stylesheet;
+- the standard panels are mostly a thin `.pypanel` wrapper over a Qt/QML module,
+  rather than each copying a shared stylesheet into its own interface;
+- the factory code itself occasionally calls `setStyleSheet(hou.qt.styleSheet())` for detached
+  menus and complex panel roots.
 
-Из этого не следует, что надо копировать `base.qss` или зависеть от его точных
-селекторов: файл внутренний и может измениться. Он полезен как визуальный reference,
-а публичные методы `hou.qt` — как runtime contract.
+None of this means you should copy `base.qss` or depend on its exact
+selectors: the file is internal and can change. It's useful as a visual reference,
+while `hou.qt`'s public methods are the runtime contract.
 
-### Какие штатные панели смотреть как референс
+### Which standard panels are worth studying as reference
 
 - `hrecipes/manager.py` (Recipe Manager) — compact header, notices, search/list
   states;
-- `lightmixer/lmui.py` и `lmmixer.py` (Light Mixer) — toolbar, tree, custom cells,
+- `lightmixer/lmui.py` and `lmmixer.py` (Light Mixer) — toolbar, tree, custom cells,
   scoped QSS;
-- `scenegraphdetails/` — split panes, toolbar, tables, вторичная иерархия;
-- `pdgdatalayer/datalayerpanel.py` — явный `hou.qt.styleSheet()` и scaled geometry;
+- `scenegraphdetails/` — split panes, toolbar, tables, a secondary hierarchy;
+- `pdgdatalayer/datalayerpanel.py` — an explicit `hou.qt.styleSheet()` call and scaled geometry;
 - `paintinstances/panel.py`, `charpicker/controlbutton.py` — `hou.qt.Icon`,
   `getColor`, state styling.
 
-Это локальные implementation references H22.0.368, не публичные API. Private
-dynamic properties из factory QSS (`plain`, `transparent`, `field_label`) копировать
-в продукт не стоит.
+These are local implementation references for H22.0.368, not public APIs. The private
+dynamic properties from the factory QSS (`plain`, `transparent`, `field_label`) shouldn't be
+copied into the product.
 
-## Рекомендованный визуальный код для Agent Panel
+## Recommended visual approach for the Agent Panel
 
-### Иерархия решений
+### Decision hierarchy
 
-1. Сначала standard Qt widget без локального stylesheet.
-2. Если есть подходящий публичный `hou.qt` widget — использовать его.
-3. Для custom paint — текущий `QPalette`; для Houdini-specific semantics —
+1. Start with a standard Qt widget and no local stylesheet.
+2. If a suitable public `hou.qt` widget exists — use it.
+3. For custom painting — the current `QPalette`; for Houdini-specific semantics —
    `hou.qt.getColor()`.
-4. Для custom QSS — отдельный короткий файл с `@ColorToken@` и `@Npx@`, обработанный
+4. For custom QSS — a separate short file using `@ColorToken@` and `@Npx@`, processed via
    `hou.qt.styleSheet(path)`.
-5. Для размеров layout/custom paint — один `scaled(n)` adapter вокруг
-   `hou.ui.scaledSize(n)` с fallback `n` для тестов вне Houdini.
-6. Иконки — `hou.qt.Icon`; свой SVG только если Houdini registry не имеет нужной
-   продуктовой семантики.
+5. For layout/custom-paint sizes — one `scaled(n)` adapter wrapping
+   `hou.ui.scaledSize(n)` with a fallback of `n` for tests outside Houdini.
+6. Icons — `hou.qt.Icon`; a custom SVG only when the Houdini registry has no
+   matching product semantics.
 
-Проектное правило импорта остаётся сильнее примеров SideFX: Qt берём только через
-`hutil.PySide`; `hou` допустим лишь в UI/main thread и через маленький host adapter,
-чтобы widgets оставались тестируемыми без Houdini.
+The project's import rule stays stronger than SideFX's examples: Qt is only taken through
+`hutil.PySide`; `hou` is only allowed on the UI/main thread and through a small host adapter,
+so widgets stay testable without Houdini.
 
-### Минимальный adapter
+### A minimal adapter
 
-Это направление кода, не готовый patch:
+This is a direction for the code, not a ready-made patch:
 
 ```python
-# ui/host_style.py — вызывается только из Houdini UI/main thread
+# ui/host_style.py — called only from Houdini's UI/main thread
 try:
     import hou
 except ImportError:
@@ -265,52 +264,52 @@ def color(resource: str, fallback_role=QtGui.QPalette.Text) -> QtGui.QColor:
     return QtWidgets.QApplication.palette().color(fallback_role)
 ```
 
-В реальной реализации импорт `hou` стоит изолировать ещё жёстче, чтобы модуль
-невозможно было случайно вызвать из ACP worker thread.
+In a real implementation, the `hou` import should be isolated even more strictly, so the
+module can't accidentally be called from the ACP worker thread.
 
-### Что делать с чатом, который не является штатным Houdini control
+### What to do with the chat, which has no standard Houdini control
 
-У transcript, tool call, permission request и composer нет прямых аналогов в HOM.
-Здесь допустим собственный язык, но он должен быть «надстройкой над Houdini»:
+The transcript, tool call, permission request, and composer have no direct equivalents in HOM.
+A custom visual language is fine here, but it should read as "a layer on top of Houdini":
 
-- сообщения — без bubble-card рамки по умолчанию; разделение отступом и типографикой;
-- tool call — компактная строка высотой native control, раскрытие по клику;
-- permission — штатные `QPushButton`, primary action через Accent/Highlight, не через
-  фирменный hex;
-- composer — `QPlainTextEdit`/`QTextEdit` с host field background и native border;
-- toolbar actions — `QToolButton` с Houdini icons, 16–18 logical px;
-- status различать формой + текстом, не только цветом;
-- spacing держать плотным: базовая сетка 4 px, наружный gutter 8 px, но оба значения
-  обязательно scale-aware.
+- messages — no bubble-card border by default; separated by spacing and typography;
+- tool call — a compact row the height of a native control, expandable on click;
+- permission — standard `QPushButton`s, the primary action styled via Accent/Highlight, not a
+  brand hex value;
+- composer — a `QPlainTextEdit`/`QTextEdit` with the host field background and native border;
+- toolbar actions — `QToolButton` with Houdini icons, 16–18 logical px;
+- distinguish status by shape + text, not color alone;
+- keep spacing dense: a 4 px base grid, an 8 px outer gutter, but both values must be
+  scale-aware.
 
-Последний набор — вывод из factory QSS и устройства панели, не официальный SideFX
-гайд.
+The last set of rules is a conclusion drawn from the factory QSS and the panel's own makeup,
+not an official SideFX guideline.
 
-## Аудит текущего кода
+## Audit of the current code
 
-Текущий [`ui/theme.py`](../python/houdini_agent_panel/ui/theme.py) уже делает главное
-правильно: использует `QApplication.palette()` и не хардкодит dark-theme hex.
+The current [`ui/theme.py`](../python/houdini_agent_panel/ui/theme.py) already gets the main
+thing right: it uses `QApplication.palette()` and doesn't hardcode dark-theme hex values.
 
-Что стоит улучшить отдельной задачей:
+Worth improving as a separate task:
 
-1. Масштабировать `SPACING`, `MARGIN`, `RADIUS`, `ICON_SIZE` и остальные literal
-   sizes через host adapter. Сейчас UI scale Houdini не учитывается.
-2. Заменить `color: gray` в `ui/agents.py` на palette/resource semantic.
-3. Не задавать `font-size: 14px` в `ui/auth_view.py`; использовать host font с
-   bold/relative size.
-4. Проверить Houdini icon registry для add/settings/send/stop/attachment и tool kinds;
-   использовать `hou.qt.Icon` там, где семантика совпадает. Текстовые бейджи оставить
-   осознанным fallback.
-5. Не применять full Houdini stylesheet ко всему panel root без нужды: panel уже
-   встроен в styled tree. Явно стилизовать только detached popups/menus или локальные
+1. Scale `SPACING`, `MARGIN`, `RADIUS`, `ICON_SIZE`, and the other literal
+   sizes through a host adapter. Right now Houdini's UI scale isn't taken into account.
+2. Replace `color: gray` in `ui/agents.py` with a palette/resource-based semantic.
+3. Don't set `font-size: 14px` in `ui/auth_view.py`; use the host font with
+   bold/relative sizing instead.
+4. Check the Houdini icon registry for add/settings/send/stop/attachment and tool kinds;
+   use `hou.qt.Icon` wherever the semantics match. Keep text badges as a deliberate
+   fallback.
+5. Don't apply the full Houdini stylesheet to the entire panel root without a reason: the panel
+   is already embedded in a styled tree. Only explicitly style detached popups/menus or local
    custom selectors.
-6. Проверять H22 как минимум на Houdini Dark, одной сильно изменённой custom theme,
-   experimental light theme и UI scale 1.0/1.5/2.0, а также в узком и широком dock.
+6. Test H22 on at least Houdini Dark, one heavily customized theme, the
+   experimental light theme, and UI scale 1.0/1.5/2.0, plus in a narrow and a wide dock.
 
-## Вывод
+## Conclusion
 
-У SideFX нет найденного отдельного учебника «как рисовать красивый Houdini UI», но
-у Houdini 22 есть более полезная вещь для embedded plugin: живая theme system и
-публичный Qt integration layer. Для этой панели правильная стратегия — не делать
-Houdini-подобную тему самим, а дать Houdini рисовать всё стандартное и построить
-только chat-specific components поверх его цветов, metrics и icons.
+SideFX has no single found tutorial on "how to draw a good-looking Houdini UI," but
+Houdini 22 has something more useful for an embedded plugin: a live theme system and a
+public Qt integration layer. For this panel, the right strategy is not to build a
+Houdini-like theme ourselves, but to let Houdini draw everything standard and build
+only the chat-specific components on top of its colors, metrics, and icons.

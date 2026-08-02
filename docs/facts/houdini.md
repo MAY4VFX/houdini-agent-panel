@@ -1,25 +1,25 @@
-# Houdini Python-панели и пакеты — проверенные факты
+# Houdini Python panels and packages — verified facts
 
-Собрано на месте установки: Houdini 20.5.445 и Houdini 22.0.368
-(`/Applications/Houdini/`), пользовательские prefs
-`~/Library/Preferences/houdini/20.5` и `~/Library/Preferences/houdini/22.0`.
-Ничего не выдумано — везде указан источник (путь к файлу).
+Gathered on-site from an install of Houdini 20.5.445 and Houdini 22.0.368
+(`/Applications/Houdini/`), user prefs at
+`~/Library/Preferences/houdini/20.5` and `~/Library/Preferences/houdini/22.0`.
+Nothing here is made up — every claim has a source (a file path).
 
 ---
 
-## 1. Формат `.pypanel`
+## 1. The `.pypanel` format
 
-Корневой тег — `<pythonPanelDocument>`, внутри один или несколько
-`<interface>`. Комментарий в самих файлах Houdini прямо предупреждает:
+The root tag is `<pythonPanelDocument>`, containing one or more
+`<interface>` elements. A comment in Houdini's own files warns explicitly:
 "It should not be hand-edited when it is being used by the application."
-(но как шаблон для генерации файла руками — нормально, Houdini просто
-перезапишет его при следующем сохранении через UI).
+(but using it as a template to generate the file by hand is fine — Houdini
+will just overwrite it the next time it's saved through the UI).
 
-### Пример 1 — простейший, с колбэком `onNodePathChanged`
+### Example 1 — the simplest one, with an `onNodePathChanged` callback
 
-Источник: `.../Houdini20.5.445/.../Resources/houdini/help/examples/python_panels/nodepath.pypanel`
-(идентичный файл есть и в установке путём `python_panels/` для примеров;
-дословно):
+Source: `.../Houdini20.5.445/.../Resources/houdini/help/examples/python_panels/nodepath.pypanel`
+(an identical file also exists in the install's `python_panels/` examples
+folder; verbatim):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -74,10 +74,10 @@ def onNodePathChanged(node):
 </pythonPanelDocument>
 ```
 
-### Пример 2 — реальная панель SideFX с полным набором колбэков жизненного цикла
+### Example 2 — a real SideFX panel with a full set of lifecycle callbacks
 
-Источник: `.../Houdini22.0.368/.../Resources/houdini/python_panels/NodeInfo.pypanel`
-(дословно):
+Source: `.../Houdini22.0.368/.../Resources/houdini/python_panels/NodeInfo.pypanel`
+(verbatim):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -117,9 +117,9 @@ def onNodePathChanged(node):
 </pythonPanelDocument>
 ```
 
-Ещё один реальный, минимальный (без node navigation, использует
-`toolutils.safe_reload` для hot-reload модуля при пересоздании интерфейса) —
-`.../Houdini22.0.368/.../python_panels/LogViewer.pypanel`:
+Another real, minimal one (no node navigation, uses
+`toolutils.safe_reload` to hot-reload the module whenever the interface is
+recreated) — `.../Houdini22.0.368/.../python_panels/LogViewer.pypanel`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -139,73 +139,75 @@ def onCreateInterface():
 </pythonPanelDocument>
 ```
 
-### Атрибуты `<interface>` (наблюдаемые значения)
+### `<interface>` attributes (observed values)
 
-- `name` — уникальный ID интерфейса (строка, может содержать `::` как
-  неймспейс у SideFX-панелей, например `sidefx::node_info`).
-- `label` — видимое имя в меню панелей.
-- `icon` — либо имя иконки Houdini (`MISC_python`, `BUTTONS_chooser_node`),
-  либо `hicon:/`-путь к SVG (`hicon:/SVGIcons.index?DATATYPES_node_path.svg`).
-- `showNetworkNavigationBar` — `"true"`/`"false"`: показывать ли строку
-  breadcrumb-навигации по сети над панелью (не влияет напрямую на вызовы
-  `onNodePathChanged`, это про UI-полосу).
-- `help_url` — либо пусто, либо путь в Houdini help (`/network/info`).
+- `name` — the interface's unique ID (a string, can contain `::` as a
+  namespace on SideFX panels, e.g. `sidefx::node_info`).
+- `label` — the visible name in the panels menu.
+- `icon` — either a Houdini icon name (`MISC_python`, `BUTTONS_chooser_node`),
+  or a `hicon:/` path to an SVG (`hicon:/SVGIcons.index?DATATYPES_node_path.svg`).
+- `showNetworkNavigationBar` — `"true"`/`"false"`: whether to show the
+  breadcrumb navigation bar for the network above the panel (doesn't
+  directly affect `onNodePathChanged` calls, it's about a UI strip).
+- `help_url` — either empty, or a path in Houdini's help (`/network/info`).
 
-### Обязательная и опциональные функции в `<script>`
+### Required and optional functions in `<script>`
 
-- `onCreateInterface()` — **обязательна**. Возвращает `QWidget` (или
-  подкласс), который Houdini встраивает в панель. Вызывается каждый раз,
-  когда пользователь создаёт новый таб этой панели.
-- `onNodePathChanged(node)` — опциональна, вызывается при смене "текущего
-  узла" (то, что подсвечено в network editor / выбрано как контекст),
-  `node` — `hou.Node` или `None`.
-- `onActivateInterface()` / `onDeactivateInterface()` — опциональны,
-  вызываются когда таб панели становится активным/неактивным. Это
-  переключение вкладок, а НЕ закрытие: вешать на них освобождение ресурсов
-  нельзя.
-- `onDestroyInterface()` — опциональна, вот это и есть закрытие таба.
-  Встречается в 29 штатных панелях 22.0 (`PoseLibrary.pypanel` зовёт оттуда
-  `cleanup()`, `LightLinker.pypanel` обнуляет свой объект). Пересчёт по
-  установке: `onCreateInterface` — 35, `onDestroyInterface` — 29,
-  `onActivateInterface`/`onDeactivateInterface` — по 25, `onNodePathChanged` — 19.
-- В области видимости `<script>` доступен глобальный `kwargs`, и в нём лежит
-  `paneTab` — этим различаются несколько открытых табов одной панели.
-  Дословно из `LightLinker.pypanel`:
+- `onCreateInterface()` — **required**. Returns a `QWidget` (or a
+  subclass), which Houdini embeds into the panel. Called every time the
+  user creates a new tab for this panel.
+- `onNodePathChanged(node)` — optional, called when the "current node"
+  changes (whatever's highlighted in the network editor / selected as
+  context), `node` is a `hou.Node` or `None`.
+- `onActivateInterface()` / `onDeactivateInterface()` — optional, called
+  when the panel's tab becomes active/inactive. This is a tab switch, NOT
+  closing: resource cleanup must not be hung off of them.
+- `onDestroyInterface()` — optional, and this is what a tab closing
+  actually is. Found in 29 of the standard 22.0 panels
+  (`PoseLibrary.pypanel` calls `cleanup()` from it, `LightLinker.pypanel`
+  nulls out its object). Tally across the install: `onCreateInterface` — 35,
+  `onDestroyInterface` — 29, `onActivateInterface`/`onDeactivateInterface`
+  — 25 each, `onNodePathChanged` — 19.
+- A global `kwargs` is available in the `<script>`'s scope, and it holds
+  `paneTab` — this is how several open tabs of the same panel are told
+  apart. Verbatim from `LightLinker.pypanel`:
   ```python
   def onActivateInterface():
       global theLightLinker
       theLightLinker.activate(kwargs.get('paneTab', None))
   ```
 
-Меню-теги — на выбор один из:
+Menu tags — pick one:
 - `<includeInToolbarMenu menu_position="N" create_separator="false"/>` —
-  панель появляется в меню "Toolbar" списка панелей.
+  the panel shows up in the panel list's "Toolbar" menu.
 - `<includeInPaneTabMenu menu_position="N" create_separator="false"/>` —
-  появляется в меню создания таба пейна (Tab menu → Python Panels и в
-  контекстном меню пейна).
+  shows up in the pane-tab creation menu (Tab menu → Python Panels and the
+  pane's context menu).
 
-### Регистрация — где искать `.pypanel`
+### Registration — where `.pypanel` is looked for
 
-Houdini сканирует директорию `python_panels/` в каждом пути, входящем в
-`HOUDINI_PATH` (включая пути, добавленные пакетами через `"path"` в JSON
-пакета). Отдельного `Panels.txt`/menu-файла для python-панелей не требуется —
-в отличие от shelf-тулов (`toolbar/*.shelf` + `MainMenuCommon`), каждый
-`.pypanel` самодостаточен и сам себя регистрирует в общем реестре Python
-Panels при старте Houdini. Подтверждено расположением: SideFX кладёт свои
-панели в `$HFS/houdini/python_panels/*.pypanel`, а сторонние пакеты — в
-`<package_path>/python_panels/*.pypanel`, например:
+Houdini scans the `python_panels/` directory inside every path listed in
+`HOUDINI_PATH` (including paths added by packages via `"path"` in the
+package JSON). No separate `Panels.txt`/menu file is required for python
+panels — unlike shelf tools (`toolbar/*.shelf` + `MainMenuCommon`), each
+`.pypanel` is self-contained and registers itself in the shared Python
+Panels registry at Houdini startup. Confirmed by their locations: SideFX
+puts its own panels in `$HFS/houdini/python_panels/*.pypanel`, while
+third-party packages put theirs in
+`<package_path>/python_panels/*.pypanel`, e.g.:
 `.../Houdini22.0.368/.../Resources/packages/shotbuilder/python_panels/ShotLoad.pypanel`,
 `.../packages/kinefx/python_panels/mixer.pypanel`,
-`.../packages/apex/python_panels/apexselectionmanager.pypanel` — то есть
-директория ищется относительно любого элемента `HOUDINI_PATH`, не только
+`.../packages/apex/python_panels/apexselectionmanager.pypanel` — meaning
+the directory is looked for relative to any `HOUDINI_PATH` entry, not just
 `$HFS/houdini`.
 
 ---
 
-## 2. Houdini package JSON
+## 2. The Houdini package JSON
 
-Реальные примеры из `~/Library/Preferences/houdini/{20.5,22.0}/packages/*.json`
-пользователя (дословно, значения путей — реальные, с машины пользователя):
+Real examples from the user's
+`~/Library/Preferences/houdini/{20.5,22.0}/packages/*.json` (verbatim, the
+path values are real, from the user's own machine):
 
 `~/Library/Preferences/houdini/22.0/packages/fxhoudinimcp.json`:
 ```json
@@ -260,41 +262,42 @@ Panels при старте Houdini. Подтверждено расположе�
 }
 ```
 
-Наблюдаемые ключи и их смысл:
-- `"path"` — добавляется в `HOUDINI_PATH` (сюда же попадёт `python_panels/`,
-  если такая поддиректория есть внутри — см. раздел 1).
-- `"env"` — список объектов `{ИМЯ_ПЕРЕМЕННОЙ: значение}`. Значение может быть
-  просто строкой (перезапись/установка) либо объектом
-  `{"value": ..., "method": "append"|"prepend"|"set"}` для управления тем,
-  как переменная комбинируется с уже существующим значением (важно для
-  `PYTHONPATH`/`HOUDINI_PATH`, чтобы не затереть системные значения).
-- `"load_package_once": true` — пакет обрабатывается один раз даже если
-  файл встречается по нескольким путям поиска пакетов (защита от дублей).
-- `"version"` — произвольная строка версии пакета, не влияет на поведение
-  загрузчика напрямую, скорее для документации/дебага.
-- Переменные внутри `env`-значений разворачиваются лениво в духе `$VAR`
-  (например `$FXHOUDINIMCP` использует переменную, определённую в том же
-  файле чуть выше — порядок в списке `env` важен).
-- `"enable"` и `"hpath"` в этих реальных файлах не встретились, но по
-  документации SideFX: `"enable": false` отключает пакет без удаления
-  файла, `"hpath"` — добавляет запись в `HOUDINI_PATH` так же, как
-  верхнеуровневый `"path"`, но специально для случая нескольких путей.
-  Раз в этих файлах их нет — не подтверждаю форму записи, только называние.
-- `"recommends"` в проверенных файлах отсутствует — не подтверждено на
-  этой машине.
+Observed keys and what they mean:
+- `"path"` — added to `HOUDINI_PATH` (this is also where `python_panels/`
+  would end up, if such a subdirectory exists inside it — see section 1).
+- `"env"` — a list of `{VARIABLE_NAME: value}` objects. A value can be a
+  plain string (overwrite/set), or an object
+  `{"value": ..., "method": "append"|"prepend"|"set"}` controlling how the
+  variable is combined with an already-existing value (important for
+  `PYTHONPATH`/`HOUDINI_PATH`, so as not to clobber system values).
+- `"load_package_once": true` — the package is processed only once even if
+  the file is found across several package search paths (dedup protection).
+- `"version"` — an arbitrary package version string, doesn't directly
+  affect the loader's behavior, more for documentation/debugging.
+- Variables inside `env` values are lazily expanded in the `$VAR` style
+  (e.g. `$FXHOUDINIMCP` uses a variable defined earlier in the same file —
+  order within the `env` list matters).
+- `"enable"` and `"hpath"` weren't found in these real files, but per
+  SideFX's documentation: `"enable": false` disables a package without
+  deleting the file, `"hpath"` adds an entry to `HOUDINI_PATH` the same way
+  the top-level `"path"` does, but specifically for the case of multiple
+  paths. Since neither shows up in these files, I'm not confirming their
+  exact form — only naming them.
+- `"recommends"` is absent from the files checked — not confirmed on this
+  machine.
 
-Каталоги, где Houdini ищет `packages/*.json` (подтверждено самим наличием
-файлов там): `$HOUDINI_USER_PREF_DIR/packages/` — то есть
-`~/Library/Preferences/houdini/20.5/packages/` и
-`~/Library/Preferences/houdini/22.0/packages/` отдельно на каждую версию.
+Directories where Houdini looks for `packages/*.json` (confirmed simply by
+files existing there): `$HOUDINI_USER_PREF_DIR/packages/` — meaning
+`~/Library/Preferences/houdini/20.5/packages/` and
+`~/Library/Preferences/houdini/22.0/packages/` separately per version.
 
 ---
 
 ## 3. `hutil.PySide`
 
-Модуль реально существует в обеих версиях по пути
+The module genuinely exists in both versions, at
 `.../Resources/houdini/python3.{11,13}libs/hutil/PySide/__init__.py`.
-Полный текст (дословно, идентичен в 20.5 и 22.0):
+Full text (verbatim, identical in 20.5 and 22.0):
 
 ```python
 """
@@ -345,108 +348,111 @@ for submodule_info in pkgutil.walk_packages(_internal_pyside.__path__):
 __all__ = []
 ```
 
-Механизм: модуль **не** объявляет `QtWidgets`/`QtCore`/`QtGui`/`QtNetwork`
-как явные атрибуты пакета — он регистрирует их динамически в
-`sys.modules["hutil.PySide.<submodule>"]` через `pkgutil.walk_packages`.
-Практическое следствие: правильный импорт — **прямой submodule-импорт**,
-как обычный субпакет:
+The mechanism: the module does **not** declare `QtWidgets`/`QtCore`/`QtGui`/`QtNetwork`
+as explicit package attributes — it registers them dynamically into
+`sys.modules["hutil.PySide.<submodule>"]` via `pkgutil.walk_packages`.
+The practical consequence: the correct import is a **direct submodule
+import**, like an ordinary subpackage:
 
 ```python
 from hutil.PySide import QtWidgets, QtCore, QtGui, QtNetwork
 ```
 
-Это работает благодаря тому, что имена уже лежат в `sys.modules` к моменту
-импорта (регистрация происходит в момент выполнения `hutil/PySide/__init__.py`,
-то есть при первом `import hutil.PySide` или `from hutil.PySide import ...`).
-Правило проекта "Qt только через `hutil.PySide`" соответствует именно этому
-факту — модуль подставляет PySide6 на Qt6-сборках Houdini (22.0) и PySide2
-на Qt5-сборках (20.5) прозрачно для остального кода.
+This works because the names are already in `sys.modules` by the time the
+import happens (registration happens when `hutil/PySide/__init__.py` runs,
+i.e. on the first `import hutil.PySide` or `from hutil.PySide import ...`).
+The project rule "Qt only through `hutil.PySide`" corresponds directly to
+this fact — the module transparently substitutes PySide6 on Houdini's Qt6
+builds (22.0) and PySide2 on its Qt5 builds (20.5), transparent to the rest
+of the code.
 
-Есть также отдельный модуль `hutil/Qt.py` (сторонняя библиотека
-[Qt.py от Marcus Ottosson](https://github.com/mottosso/Qt.py), версия
-`__version__ = "1.2.3"`, встроена в обе версии Houdini) — это более старый
-универсальный шим с приоритетом `PySide6 → PySide2 → PyQt5 → PySide → PyQt4`
-и своими переменными окружения (`HOUDINI_QT_VERBOSE`,
-`HOUDINI_QT_PREFERRED_BINDING`). Именно его использует пример
-`nodepath.pypanel` (`from hutil.Qt import QtWidgets`). Это не то же самое,
-что `hutil.PySide` — оба существуют одновременно, но правило проекта
-называет именно `hutil.PySide`, поэтому использовать нужно его, а не
-`hutil.Qt`.
+There's also a separate `hutil/Qt.py` module (a third-party library,
+[Qt.py by Marcus Ottosson](https://github.com/mottosso/Qt.py), version
+`__version__ = "1.2.3"`, bundled with both Houdini versions) — an older,
+general-purpose shim with a priority order of
+`PySide6 → PySide2 → PyQt5 → PySide → PyQt4` and its own environment
+variables (`HOUDINI_QT_VERBOSE`, `HOUDINI_QT_PREFERRED_BINDING`). This is
+exactly what the `nodepath.pypanel` example uses (`from hutil.Qt import
+QtWidgets`). This is not the same thing as `hutil.PySide` — both exist at
+the same time, but the project rule names `hutil.PySide` specifically, so
+that's what must be used, not `hutil.Qt`.
 
-### Версии Qt/PySide (проверено запуском интерпретатора Houdini)
+### Qt/PySide versions (verified by running Houdini's interpreter)
 
 - **Houdini 20.5.445**: `PySide2.__version__ == "5.15.15"` (Qt 5.15.15),
-  пакет лежит в
+  the package lives at
   `.../Houdini20.5.445/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages-forced/PySide2`.
-  Рядом — `shiboken2`, `shiboken2_generator`.
-- **Houdini 22.0.368**: `PySide6` версии `6.8.3`
+  Next to it: `shiboken2`, `shiboken2_generator`.
+- **Houdini 22.0.368**: `PySide6` version `6.8.3`
   (`.../Houdini22.0.368/.../site-packages-forced/PySide6-6.8.3-py3.13.egg-info`),
-  пакет в
+  the package at
   `.../Houdini22.0.368/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages-forced/PySide6`.
 
-### Наличие `QtWebEngineWidgets`, `QtWebSockets`, `QtMultimedia`
+### Availability of `QtWebEngineWidgets`, `QtWebSockets`, `QtMultimedia`
 
-Проверено реальным импортом в обеих версиях (не просто наличием `.pyi`
-стаба — рантайм-модуль импортируется без ошибок):
+Verified by actually importing them in both versions (not just the
+presence of a `.pyi` stub — the runtime module imports without errors):
 
 ```
 PySide2 (20.5, Qt 5.15.15): QtWebEngineWidgets OK, QtWebSockets OK, QtMultimedia OK, QtNetwork OK
 PySide6 (22.0, Qt 6.8.3):   QtWebEngineWidgets OK, QtWebSockets OK, QtMultimedia OK, QtNetwork OK
 ```
 
-Все четыре модуля доступны в обеих версиях — можно строить сетевой слой
-(ACP по WebSocket/stdio) и веб-контент без опасений про их отсутствие.
+All four modules are available in both versions — a network layer
+(ACP over WebSocket/stdio) and web content can be built without worrying
+about their absence.
 
-Дополнительно: 22.0 (PySide6) не содержит модуль `QtWebEngine.pyi` (он был в
-Qt5/PySide2 как объединяющий модуль), вместо него — раздельные
-`QtWebEngineCore`, `QtWebEngineWidgets`, `QtWebEngineQuick`. В 20.5
-(PySide2) есть отдельный `QtWebEngine.pyi` в дополнение к тем же трём.
+Additionally: 22.0 (PySide6) has no `QtWebEngine.pyi` module (it existed in
+Qt5/PySide2 as a unifying module), instead there are the separate
+`QtWebEngineCore`, `QtWebEngineWidgets`, `QtWebEngineQuick`. In 20.5
+(PySide2) there's a separate `QtWebEngine.pyi` in addition to those same
+three.
 
 ---
 
-## 4. Версия Python и директории автозагрузки
+## 4. Python version and autoload directories
 
-Проверено прямым запуском бинарника Python из Houdini:
+Verified by directly running Houdini's Python binary:
 
 ```
 Houdini 20.5.445 → Python 3.11.7 (main, May  9 2024, ...) [Clang 15.0.0]
 Houdini 22.0.368 → Python 3.13.10 (main, Mar  4 2026, ...) [Clang 15.0.0]
 ```
 
-Соответствующие директории автозагрузки user-скриптов (подтверждены самим
-существованием и содержимым, например `hutil` лежит именно там):
-- Houdini 20.5 → `python3.11libs` (например
+The corresponding user-script autoload directories (confirmed by the mere
+existence and content there, e.g. `hutil` lives exactly there):
+- Houdini 20.5 → `python3.11libs` (e.g.
   `.../Houdini20.5.445/.../Resources/houdini/python3.11libs/hutil/...`)
-- Houdini 22.0 → `python3.13libs` (например
+- Houdini 22.0 → `python3.13libs` (e.g.
   `.../Houdini22.0.368/.../Resources/houdini/python3.13libs/hutil/...`)
 
-Любая директория `python3.11libs`/`python3.13libs`, найденная в любом из
-путей `HOUDINI_PATH` (включая пути пакетов), автоматически добавляется в
-`sys.path` — так `hutil`, `toolutils`, `hdefereval` и т.д. становятся
-импортируемыми без ручного добавления в `PYTHONPATH`.
+Any `python3.11libs`/`python3.13libs` directory found in any of the
+`HOUDINI_PATH` entries (including package paths) is automatically added to
+`sys.path` — that's how `hutil`, `toolutils`, `hdefereval`, and the rest
+become importable without manually adding them to `PYTHONPATH`.
 
-Момент выполнения (по документации SideFX; в установке не хранится как
-пример, т.к. это user-скрипты, создаваемые самим художником —
-подтверждено отсутствием файлов `123.py`/`pythonrc.py` по умолчанию в
-`$HFS/houdini/scripts/`, там нашлась только `scripts/` и `config/Scripts`
-директории, без этих конкретных файлов):
-- `$HOUDINI_USER_PREF_DIR/scripts/pythonrc.py` — выполняется один раз при
-  запуске Houdini, до первого открытия сцены/UI.
-- `$HOUDINI_USER_PREF_DIR/scripts/123.py` — выполняется при каждом создании
-  новой сцены и при загрузке `.hip`-файла (аналог `456.cmd`/`123.cmd` для
-  hscript, только для Python).
-- `uiready.py` — **подтверждено физически**, файл существует:
+When these run (per SideFX's documentation; not stored as an example in the
+install, since these are user scripts created by the artist themselves —
+confirmed by the absence of `123.py`/`pythonrc.py` files by default in
+`$HFS/houdini/scripts/`, where only `scripts/` and `config/Scripts`
+directories were found, without these specific files):
+- `$HOUDINI_USER_PREF_DIR/scripts/pythonrc.py` — runs once when Houdini
+  starts, before the first scene/UI is opened.
+- `$HOUDINI_USER_PREF_DIR/scripts/123.py` — runs every time a new scene is
+  created and when a `.hip` file loads (the Python equivalent of
+  `456.cmd`/`123.cmd` for hscript).
+- `uiready.py` — **confirmed physically**, the file exists:
   `.../Houdini22.0.368/.../Resources/houdini/python3.13libs/uiready.py`.
-  По документации SideFX выполняется после того, как UI Houdini полностью
-  готов (когда можно безопасно создавать Qt-виджеты, открывать панели и
-  т.п.) — более поздняя точка, чем `123.py`, которая может выполняться до
-  готовности UI в batch/hbatch режиме.
+  Per SideFX's documentation it runs after Houdini's UI is fully ready
+  (a point where it's safe to create Qt widgets, open panels, etc.) — a
+  later point than `123.py`, which can run before the UI is ready in
+  batch/hbatch mode.
 
 ---
 
-## 5. Тёмная тема / стилизация Qt
+## 5. Dark theme / Qt styling
 
-Подтверждено исходным кодом `hou.py` (SWIG-обёртка, реальные докстринги):
+Confirmed by `hou.py`'s source code (a SWIG wrapper, real docstrings):
 
 ```python
 def colorFromName(self, name: "char const *") -> "HOM_Color":
@@ -458,25 +464,25 @@ def colorFromName(self, name: "char const *") -> "HOM_Color":
     return _hou.ui_colorFromName(self, name)
 ```
 
-То есть `hou.ui.colorFromName("ИмяЦвета")` — рабочий, задокументированный
-способ достать конкретный цвет темы Houdini (имена цветов вроде
-`GraphDisplayHighlight`, `GraphRenderHighlight`, `DisplayOnColor` — взяты
-из докстрингов соседних функций в том же файле, строки ~80410-80426).
+So `hou.ui.colorFromName("ColorName")` is a working, documented way to
+fetch a specific Houdini theme color (names like `GraphDisplayHighlight`,
+`GraphRenderHighlight`, `DisplayOnColor` come from docstrings of
+neighboring functions in the same file, around lines 80410-80426).
 
-Отдельного публичного метода для получения qss-таблицы стилей Houdini
-(что-то вроде `hou.ui.qtStyleSheet()`) в `hou.py` не встретилось при поиске
-по этому файлу — не подтверждаю его существование. Стандартная практика в
-панелях SideFX — не переопределять глобальный QSS, а точечно красить
-через палитру приложения (`QtWidgets.QApplication.palette()`, уже настроенную
-Houdini) и через `hou.ui.colorFromName` для акцентных цветов, оставляя
-базовые виджеты (кнопки, поля) на нативном стиле Houdini — тогда панель
-выглядит нативно "бесплатно", без своего qss.
+No separate public method for getting Houdini's qss stylesheet
+(something like `hou.ui.qtStyleSheet()`) was found while searching this
+file — its existence isn't confirmed. The standard practice in SideFX's
+panels is not to override the global QSS, but to selectively paint via the
+application's palette (`QtWidgets.QApplication.palette()`, already
+configured by Houdini) and via `hou.ui.colorFromName` for accent colors,
+leaving base widgets (buttons, fields) on Houdini's native style — that
+way a panel looks native "for free," with no QSS of its own.
 
 ---
 
 ## 6. `$HIP`
 
-Подтверждено докстрингами `hou.py`:
+Confirmed by `hou.py`'s docstrings:
 
 ```python
 def path(self) -> "std::string":   # hou.hipFile.path()
@@ -497,31 +503,31 @@ def expandString(self, str: "char const *", expand_tilde: "bool"=True) -> "std::
     return _hou.text_expandString(self, str, expand_tilde)
 ```
 
-Итого два рабочих способа:
-- `hou.hipFile.path()` — абсолютный путь к текущему `.hip`-файлу.
-- `hou.text.expandString("$HIP/...")` — разворачивает переменную Houdini
-  `$HIP` внутри произвольной строки (годится для путей с плейсхолдерами).
+So there are two working ways:
+- `hou.hipFile.path()` — the absolute path to the current `.hip` file.
+- `hou.text.expandString("$HIP/...")` — expands Houdini's `$HIP` variable
+  inside an arbitrary string (works for paths with placeholders).
 
-`hou.hipFile.isNewFile()` (метод присутствует в `hou.py`, класс `hipFile`,
-строка ~65590 в файле 22.0) — способ узнать, что сцена ещё не сохранялась
-(несохранённая новая сцена); для неё `path()` вернёт путь по умолчанию
-Houdini подставляет вроде `untitled.hip` в текущей рабочей директории —
-это поведение не проверялось живым запуском Houdini в рамках этой задачи
-(интерпретатор `hou` не удалось запустить standalone вне самого приложения
-из-за отсутствия части рантайм-окружения/dylib, см. раздел 8), поэтому
-дословное значение для новой сцены не подтверждаю напрямую — только то, что
-через `hou.hipFile.isNewFile()` можно на это отдельно проверить перед тем,
-как доверять `path()`.
+`hou.hipFile.isNewFile()` (a method present in `hou.py`, class `hipFile`,
+around line 65590 in the 22.0 file) is a way to find out that a scene
+hasn't been saved yet (a new, unsaved scene); for it, `path()` presumably
+returns a default like `untitled.hip` in the current working directory —
+this behavior wasn't verified with a live Houdini run within this task's
+scope (the `hou` interpreter couldn't be run standalone outside the
+application itself, due to a missing part of the runtime environment/dylib,
+see section 8), so the exact value for a new scene isn't confirmed directly
+— only that `hou.hipFile.isNewFile()` can be checked for this separately,
+before trusting `path()`.
 
 ---
 
-## 7. Главный поток и безопасный вызов `hou` из фонового потока
+## 7. The main thread and safely calling `hou` from a background thread
 
-Подтверждено исходным кодом модуля `hdefereval.py`, который реально
-существует в обеих версиях:
+Confirmed by the source of the `hdefereval.py` module, which genuinely
+exists in both versions:
 `.../Houdini22.0.368/.../Resources/houdini/python3.13libs/hdefereval.py`.
 
-Докстринг модуля (дословно):
+The module's docstring (verbatim):
 ```python
 """This module provides functions to perform deferred evaluation of Python
 code.  You can call these functions from any thread, and they are executed
@@ -529,7 +535,7 @@ in the main thread when Houdini's event loop is idle.
 """
 ```
 
-Сигнатуры (дословно):
+Signatures (verbatim):
 ```python
 def executeDeferred(code, *args, **kwargs):
     """Run the specified Python code in the main thread and do not wait
@@ -553,16 +559,16 @@ def executeInMainThreadWithResult(code, *args, **kwargs):
     return _queueDeferred(code, args, kwargs, block=True)
 ```
 
-Практическое правило (соответствует правилу проекта "`hou` не трогаем из
-рабочего потока"):
-- Из фонового Python-потока панели: звать `hou`-код только через
+The practical rule (matches the project rule "we never touch `hou` from the
+worker thread"):
+- From the panel's background Python thread: only call `hou` code via
   `hdefereval.executeDeferred(callable, *args, **kwargs)` (fire-and-forget,
-  выполнится на главном потоке на следующем цикле событий) или
+  runs on the main thread on the next event loop pass) or
   `hdefereval.executeInMainThreadWithResult(callable, *args, **kwargs)`
-  (блокирует вызывающий поток до выполнения на главном и возвращает
-  результат).
-- `hou.ui.postEventCallback(callback)` — тоже задокументирован в `hou.py`
-  (строка ~105389, дословно):
+  (blocks the calling thread until it runs on the main thread and returns
+  the result).
+- `hou.ui.postEventCallback(callback)` is also documented in `hou.py`
+  (around line ~105389, verbatim):
   ```python
   def postEventCallback(self, callback: "InterpreterObject") -> "void":
       r"""
@@ -577,12 +583,12 @@ def executeInMainThreadWithResult(code, *args, **kwargs):
               __call__.
       """
   ```
-  В отличие от `hdefereval`, у `hou.ui.postEventCallback` колбэк без
-  аргументов и без возврата результата вызывающему — то есть это более
-  низкоуровневый примитив, а `hdefereval` — удобная обёртка поверх
-  аналогичного механизма, ориентированная именно на межпоточные вызовы.
-- Проверка "можно ли трогать `hou` прямо сейчас" —
-  `hou.isUIAvailable()` (докстринг из `hou.py`, дословно):
+  Unlike `hdefereval`, `hou.ui.postEventCallback`'s callback takes no
+  arguments and returns no result to the caller — so it's a lower-level
+  primitive, while `hdefereval` is a convenient wrapper over a similar
+  mechanism, specifically aimed at cross-thread calls.
+- The check for "can I touch `hou` right now" is
+  `hou.isUIAvailable()` (docstring from `hou.py`, verbatim):
   ```python
   def isUIAvailable() -> "bool":
       r"""
@@ -595,68 +601,69 @@ def executeInMainThreadWithResult(code, *args, **kwargs):
       Houdini and command-line and/or MPlay.
       """
   ```
-  Важно: это про доступность `hou.ui` (batch/hbatch vs full UI), а не про
-  "сейчас ли главный поток". Отдельного публичного API "являюсь ли я
-  главным потоком" в `hou.py` при поиске не встретилось — стандартная
-  практика (в т.ч. подтверждаемая самим существованием `hdefereval`) —
-  просто никогда не считать себя на главном потоке внутри
-  worker/QThread панели и всегда идти через `hdefereval`, а не пытаться
-  динамически определять поток.
+  Important: this is about `hou.ui`'s availability (batch/hbatch vs. full
+  UI), not about "am I on the main thread right now." No separate public
+  API for "am I the main thread" was found in `hou.py` — the standard
+  practice (also confirmed by the mere existence of `hdefereval`) is to
+  simply never assume you're on the main thread inside the panel's
+  worker/QThread, and always go through `hdefereval` rather than trying to
+  dynamically detect the thread.
 
 ---
 
-## 8. Ограничения этого исследования
+## 8. Limitations of this research
 
-- `hou` не удалось импортировать standalone-Python'ом Houdini 22.0 вне
-  самого приложения — падает на `dlopen` (`Symbol not found: _iconv` в
-  `libfbxsdk.dylib` при неполном `DYLD_LIBRARY_PATH`/окружении). Все факты
-  про `hou.*` в этом документе взяты из исходного текста `hou.py`
-  (SWIG-обёртка с полными докстрингами) и из докстрингов `hipFile`/`ui`/
-  `text`/`isUIAvailable`, а не из живого вызова внутри Houdini — то есть
-  сигнатуры и докстринги подтверждены дословно, но фактическое поведение
-  в момент выполнения (тип возвращаемого значения на новой несохранённой
-  сцене и т.п.) не перепроверялось живым запуском в рамках этой задачи.
-- В `hou.py` не найден метод вида `hou.ui.qtStyleSheet()` — если он
-  существует, он не встретился при grep по этому файлу; не утверждаю ни
-  наличие, ни отсутствие сверх этого.
+- `hou` couldn't be imported standalone with Houdini 22.0's Python outside
+  the application itself — it fails at `dlopen` (`Symbol not found: _iconv`
+  in `libfbxsdk.dylib` due to an incomplete `DYLD_LIBRARY_PATH`/environment).
+  Every fact about `hou.*` in this document is taken from `hou.py`'s source
+  text (a SWIG wrapper with full docstrings) and from the docstrings of
+  `hipFile`/`ui`/`text`/`isUIAvailable`, rather than from a live call
+  inside Houdini — meaning the signatures and docstrings are confirmed
+  verbatim, but the actual runtime behavior (the type of value returned for
+  a new, unsaved scene, etc.) wasn't re-verified with a live run within
+  this task's scope.
+- No method of the form `hou.ui.qtStyleSheet()` was found in `hou.py` — if
+  it exists, it didn't turn up while grepping this file; neither its
+  presence nor its absence is asserted beyond that.
 
 ---
 
-## 9. asyncio внутри Houdini — `haio` (найдено при интеграции, ломает наивный QThread)
+## 9. asyncio inside Houdini — `haio` (found during integration, breaks a naive QThread)
 
-Houdini подменяет политику asyncio своей: `asyncio.get_event_loop_policy()`
-возвращает `haio.HoudiniEventLoopPolicy`, а `asyncio.new_event_loop()` —
-`haio.HoudiniEventLoop`. Проверено запуском в обеих версиях
+Houdini swaps in its own asyncio policy: `asyncio.get_event_loop_policy()`
+returns `haio.HoudiniEventLoopPolicy`, and `asyncio.new_event_loop()`
+returns `haio.HoudiniEventLoop`. Verified by running it in both versions
 (`python3.11libs/haio.py`, `python3.13libs/haio.py`).
 
-Два следствия, каждое ломает клиент, написанный «как обычно»:
+Two consequences, each of which breaks a client written "the normal way":
 
-**1. Цикл Houdini работает только на главном потоке.**
+**1. Houdini's loop only works on the main thread.**
 ```
 RuntimeError: Current thread is not the main thread
   haio.py(116): check_thread
   haio.py(2116): run_forever
 ```
-То есть `asyncio.new_event_loop()` + `run_forever()` на рабочем QThread падает.
-Лечится тем, что класс цикла берётся напрямую, минуя политику:
+That is, `asyncio.new_event_loop()` + `run_forever()` on a worker QThread
+fails. Fixed by taking the loop class directly, bypassing the policy:
 ```python
 loop = asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.SelectorEventLoop()
 ```
 
-**2. Подпроцесс через `asyncio.create_subprocess_exec` не поднимается.**
-Стоковый `_UnixSelectorEventLoop._make_subprocess_transport` идёт за child
-watcher через политику, а у Houdini она его не даёт:
+**2. A subprocess via `asyncio.create_subprocess_exec` doesn't come up.**
+The stock `_UnixSelectorEventLoop._make_subprocess_transport` goes through
+the policy to get a child watcher, and Houdini's policy doesn't provide one:
 ```
   asyncio/unix_events.py(202): watcher = events.get_child_watcher()
   asyncio/events.py(842): return get_event_loop_policy().get_child_watcher()
   haio.py(3084): raise NotImplementedError
 ```
-Значит `acp.spawn_agent_process()` внутри Houdini не работает — он построен
-именно на `create_subprocess_exec`.
+That means `acp.spawn_agent_process()` doesn't work inside Houdini — it's
+built specifically on `create_subprocess_exec`.
 
-Рабочий обход, проверенный запуском в Houdini 22.0.368 и 20.5.445: поднимать
-процесс обычным `subprocess.Popen`, а его каналы заводить в цикл публичным
-API, которому watcher не нужен:
+A working workaround, verified by running it in Houdini 22.0.368 and
+20.5.445: spawn the process with plain `subprocess.Popen`, and hook its
+pipes into the loop through the public API that doesn't need a watcher:
 ```python
 proc = subprocess.Popen(argv, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=env, cwd=cwd)
 
@@ -667,13 +674,13 @@ transport, protocol = await loop.connect_write_pipe(
     lambda: asyncio.streams.FlowControlMixin(loop=loop), proc.stdin)
 writer = asyncio.StreamWriter(transport, protocol, reader, loop)
 
-conn = acp.connect_to_agent(client, writer, reader)   # байтовая форма
+conn = acp.connect_to_agent(client, writer, reader)   # the byte-stream form
 ```
-`connect_to_agent` принимает пару StreamWriter/StreamReader — это
-задокументированная форма вызова (см. [`acp-sdk.md`](acp-sdk.md) §1), так что
-обход остаётся на публичном API SDK.
+`connect_to_agent` accepts a StreamWriter/StreamReader pair — this is a
+documented calling form (see [`acp-sdk.md`](acp-sdk.md) §1), so the
+workaround stays within the SDK's public API.
 
-Почему это не поймали юнит-тесты: вне Houdini политика стоковая, и оба вызова
-работают. Тест, который ловит регрессию, обязан подставлять политику,
-имитирующую `haio` — падающую на `run_forever()` не в главном потоке и
-бросающую `NotImplementedError` из `get_child_watcher()`.
+Why unit tests didn't catch this: outside Houdini the policy is the stock
+one, and both calls work. A test that catches the regression has to install
+a policy that mimics `haio` — one that fails on `run_forever()` off the
+main thread and raises `NotImplementedError` from `get_child_watcher()`.

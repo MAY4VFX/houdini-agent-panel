@@ -1,9 +1,10 @@
-"""Реестр ACP-агентов: разбор, кеш, выбор дистрибутива под платформу.
+"""ACP agent registry: parsing, cache, picking the right distribution for the platform.
 
-Источник — публичный JSON без каких-либо гарантий совместимости со стороны
-houdini-agent-panel: чужой проект может добавить поле, убрать необязательное
-или прислать значение не того типа. `parse_registry` обязана пережить любую
-из этих ситуаций, уронив только конкретную битую запись, а не весь реестр.
+The source is public JSON with no compatibility guarantee toward
+houdini-agent-panel whatsoever: someone else's project may add a field,
+remove an optional one, or send a value of the wrong type. `parse_registry`
+must survive any of these, dropping only the one broken entry rather than
+the whole registry.
 """
 
 from __future__ import annotations
@@ -21,18 +22,20 @@ from .network import Fetcher, NetworkError, fetch_json
 
 REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
-#: Шестёрка из design.md — ровно то, что панель предлагает. Порядок — порядок
-#: показа в UI.
+#: The six from design.md — exactly what the panel offers. The order is the
+#: order they're shown in the UI.
 #:
-#: Это НЕ «всё, что есть в реестре»: там под сорок записей, и вываливать их
-#: художнику значит подменить выбор списком, в котором он не разбирается и не
-#: обязан. Всё, чего здесь нет, ставится через «Свой агент» — это и есть ответ
-#: дизайна на «остальное».
+#: This is NOT "everything in the registry": there are close to forty
+#: entries there, and dumping them on an artist would replace a curated
+#: choice with a list they don't know and shouldn't have to know. Anything
+#: not here can be installed via "Custom Agent" — that's the design's answer
+#: to "everything else".
 #:
-#: Идентификаторы сверены с живым реестром (version 1.0.0) и не совпадают с
-#: тем, как агенты называются для людей: "Claude Agent" лежит под "claude-acp",
-#: "Gemini CLI" под "gemini", "Kimi CLI" под "kimi". Угадать их по памяти
-#: нельзя — только "codex-acp", "grok-build" и "opencode" очевидны.
+#: Ids were checked against the live registry (version 1.0.0) and don't
+#: match the human-facing agent names: "Claude Agent" is under "claude-acp",
+#: "Gemini CLI" under "gemini", "Kimi CLI" under "kimi". They can't be
+#: guessed from memory — only "codex-acp", "grok-build" and "opencode" are
+#: obvious.
 FEATURED_AGENT_IDS: tuple[str, ...] = (
     "claude-acp",
     "codex-acp",
@@ -44,13 +47,12 @@ FEATURED_AGENT_IDS: tuple[str, ...] = (
 
 
 def featured(entries: "Sequence[AgentEntry]") -> "list[AgentEntry]":
-    """Отобрать и упорядочить агентов v1.
+    """Select and order the v1 agents.
 
-    Порядок берётся из ``FEATURED_AGENT_IDS``, а не из реестра: реестр
-    отсортирован по идентификатору, и для человека этот порядок не значит
-    ничего. Запись, которой в реестре не оказалось (переименовали, убрали),
-    просто пропускается — панель не должна показывать пустую строку с именем,
-    которое ей неоткуда взять.
+    The order comes from ``FEATURED_AGENT_IDS``, not from the registry: the
+    registry is sorted by id, and that order means nothing to a human. An
+    entry missing from the registry (renamed, removed) is simply skipped —
+    the panel shouldn't show a blank row with a name it has nowhere to get.
     """
     order = {agent_id: index for index, agent_id in enumerate(FEATURED_AGENT_IDS)}
     chosen = [entry for entry in entries if entry.id in order]
@@ -65,10 +67,10 @@ _CACHE_FILE_NAME = "registry.json"
 class NpxDistribution:
     package: str
     args: list[str] = field(default_factory=list)
-    #: Не было в исходном контракте архитектуры, но реальный реестр его несёт
-    #: (например у "auggie" — `AUGMENT_DISABLE_AUTO_UPDATE=1`), а без него
-    #: `install_agent` не сможет собрать корректный `LaunchSpec.env` для тех
-    #: агентов, которым это нужно. Отступление от architecture.md §3.
+    #: Not in the original architecture contract, but the real registry
+    #: carries it (e.g. "auggie" has `AUGMENT_DISABLE_AUTO_UPDATE=1`), and
+    #: without it `install_agent` couldn't build a correct `LaunchSpec.env`
+    #: for the agents that need it. A deviation from architecture.md §3.
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -77,11 +79,12 @@ class BinaryDistribution:
     archive: str
     cmd: str
     args: list[str] = field(default_factory=list)
-    #: В контракте — обязательное str. В реальном реестре у части агентов
-    #: (`crow-cli`, `corust-agent`) поля нет вовсе. Делаем необязательным с
-    #: пустой строкой по умолчанию и трактуем пустое значение как "проверить
-    #: нечем" — `runtime.install_agent` в этом случае отказывает в установке,
-    #: а не устанавливает непроверенный бинарь. Отступление от architecture.md §3.
+    #: The contract says this is a required str. In the real registry, some
+    #: agents (`crow-cli`, `corust-agent`) don't have this field at all. We
+    #: make it optional with an empty-string default and treat an empty
+    #: value as "nothing to verify against" — `runtime.install_agent` in
+    #: that case refuses to install rather than installing an unverified
+    #: binary. A deviation from architecture.md §3.
     sha256: str = ""
 
 
@@ -104,41 +107,41 @@ class AgentEntry:
         return self.npx is not None
 
     def distribution_for(self, key: str | None = None) -> NpxDistribution | BinaryDistribution | None:
-        """None — агента нельзя поставить на эту платформу.
+        """None — the agent can't be installed on this platform.
 
-        Например Kimi CLI не собирается под `darwin-x86_64` (design.md). UI
-        обязан показать это причиной (см. `unavailable_reason`), а не молча
-        спрятать кнопку установки.
+        For example Kimi CLI isn't built for `darwin-x86_64` (design.md).
+        The UI must surface this as a reason (see `unavailable_reason`)
+        rather than silently hiding the install button.
         """
         if self.npx is not None:
             return self.npx
         return self.binaries.get(key or platform_key())
 
     def unavailable_reason(self, key: str | None = None) -> str:
-        """Человекочитаемая причина отсутствия дистрибутива под `key`.
+        """Human-readable reason for the missing distribution under `key`.
 
-        Пустая строка означает "доступен" — вызывающему нет смысла её
-        показывать. Непустая — то, что UI обязан вывести человеку вместо
-        того, чтобы просто не рисовать кнопку установки.
+        An empty string means "available" — there's no point in the caller
+        showing it. A non-empty one is what the UI must display to the
+        human instead of just not drawing the install button.
         """
         resolved_key = key or platform_key()
         if self.distribution_for(resolved_key) is not None:
             return ""
         if self.npx is None and not self.binaries:
-            return f"{self.name}: в реестре нет способа установки"
-        return f"{self.name} не собирается под {resolved_key}"
+            return f"{self.name}: no installation method in the registry"
+        return f"{self.name} isn't built for {resolved_key}"
 
 
 class RegistryError(RuntimeError):
-    """Реестр недоступен: ни сети, ни пригодного кеша."""
+    """The registry is unavailable: no network, no usable cache."""
 
 
 def platform_key() -> str:
     """darwin-aarch64 | darwin-x86_64 | linux-aarch64 | linux-x86_64 | windows-x86_64
 
-    Ровно те пять ключей, что встречаются в качестве строений `distribution.binary`
-    в живом реестре (там же попадается ещё и `windows-aarch64` у части агентов,
-    но Houdini под Windows ARM не бывает, так что этот ключ мы никогда не просим).
+    Exactly the five keys that appear as `distribution.binary` entries in
+    the live registry (there's also a `windows-aarch64` for some agents, but
+    Houdini doesn't exist on Windows ARM, so we never ask for that key).
     """
     system = platform.system()
     machine = platform.machine().lower()
@@ -149,16 +152,17 @@ def platform_key() -> str:
         return f"linux-{arch}"
     if system == "Windows":
         return "windows-x86_64"
-    raise RegistryError(f"неизвестная платформа: {system!r}")
+    raise RegistryError(f"unknown platform: {system!r}")
 
 
 def parse_registry(payload: Mapping) -> list[AgentEntry]:
-    """Разобрать тело `registry.json`.
+    """Parse the body of `registry.json`.
 
-    Реестр — чужой JSON без версионной гарантии на наши ожидания. Битая
-    запись (не тот тип, отсутствующее обязательное поле) пропускается —
-    остальные агенты обязаны разобраться, иначе одна опечатка стороннего
-    майнтейнера кладёт весь экран "Агенты" панели.
+    The registry is someone else's JSON with no version guarantee toward
+    our expectations. A broken entry (wrong type, missing required field)
+    is skipped — the rest of the agents must still come through, otherwise
+    a single typo by a third-party maintainer takes down the panel's whole
+    "Agents" screen.
     """
     if not isinstance(payload, Mapping):
         return []
@@ -184,8 +188,9 @@ def _parse_entry(raw: Any) -> AgentEntry | None:
         return None
     if not isinstance(name, str) or not name:
         return None
-    # version в схеме — строка, но не рискуем ронять запись из-за числа-жабы;
-    # берём str() от чего угодно сериализуемого, кроме None.
+    # version in the schema is a string, but we don't want to risk dropping
+    # an entry over a numeric toad; we take str() of anything serializable
+    # except None.
     if version is None:
         return None
     version = str(version)
@@ -256,7 +261,7 @@ def _parse_binaries(distribution: Mapping) -> dict[str, BinaryDistribution]:
     return binaries
 
 
-# --- кеш на диске -----------------------------------------------------------
+# --- on-disk cache -----------------------------------------------------------
 
 
 def _cache_path() -> Path:
@@ -264,7 +269,7 @@ def _cache_path() -> Path:
 
 
 def _read_cache(path: Path, *, max_age: float | None) -> list[AgentEntry] | None:
-    """`max_age=None` — взять кеш любого возраста (сеть недоступна, кеш есть)."""
+    """`max_age=None` — accept a cache of any age (network unavailable, cache exists)."""
     if not path.exists():
         return None
     try:
@@ -296,13 +301,14 @@ def _write_cache(path: Path, payload: Any) -> None:
 def fetch_registry(
     *, force: bool = False, max_age: float = 86400.0, fetch: Fetcher | None = None
 ) -> list[AgentEntry]:
-    """Реестр агентов, кеш в `<cache>/registry.json`.
+    """The agent registry, cached at `<cache>/registry.json`.
 
-    Кеш свежее `max_age` и `force=False` — отдаём его, не ходя в сеть. Сеть
-    недоступна (в том числе `force=True`, но запрос не удался) — отдаём кеш
-    ЛЮБОГО возраста, не притворяясь, что данные свежие: экран "Агенты" лучше
-    показать со старыми версиями, чем не показать вовсе. Ни кеша, ни сети —
-    `RegistryError`.
+    If the cache is fresher than `max_age` and `force=False`, we return it
+    without touching the network. If the network is unavailable (including
+    with `force=True`, but the request failed), we return the cache at ANY
+    age, without pretending the data is fresh: it's better for the "Agents"
+    screen to show stale versions than not show anything at all. Neither
+    cache nor network — `RegistryError`.
     """
     cache_file = _cache_path()
     if not force:
@@ -317,7 +323,7 @@ def fetch_registry(
         if stale is not None:
             return stale
         raise RegistryError(
-            f"{REGISTRY_URL}: сеть недоступна, а локального кеша ещё нет"
+            f"{REGISTRY_URL}: network unavailable, and there's no local cache yet"
         ) from None
 
     entries = parse_registry(payload)

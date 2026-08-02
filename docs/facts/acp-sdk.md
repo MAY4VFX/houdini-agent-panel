@@ -1,14 +1,14 @@
-# `agent-client-protocol` (PyPI) 0.12.0 — точный справочник клиентской части
+# `agent-client-protocol` (PyPI) 0.12.0 — an exact reference for the client side
 
-Пакет: `agent_client_protocol-0.12.0` (`import acp`).
-Проверено чтением исходников в
-`.../scratchpad/venv/lib/python3.14/site-packages/acp/` и живым `python -c "import acp; ..."`
-на интерпретаторе `.../scratchpad/venv/bin/python`. Ссылки на строки — из файлов пакета.
+Package: `agent_client_protocol-0.12.0` (`import acp`).
+Verified by reading the source in
+`.../scratchpad/venv/lib/python3.14/site-packages/acp/` and a live `python -c "import acp; ..."`
+on the `.../scratchpad/venv/bin/python` interpreter. Line references are from the package's files.
 
-Schema сгенерирована из `schema/meta.json`, ref `refs/tags/schema-v1.19.0`
-(см. `acp/meta.py:1-2`). `PROTOCOL_VERSION = 1` (`acp/meta.py:49`).
+The schema was generated from `schema/meta.json`, ref `refs/tags/schema-v1.19.0`
+(see `acp/meta.py:1-2`). `PROTOCOL_VERSION = 1` (`acp/meta.py:49`).
 
-## 0. Совместимость с Python 3.11 (Houdini 20.5)
+## 0. Compatibility with Python 3.11 (Houdini 20.5)
 
 `agent_client_protocol-0.12.0.dist-info/METADATA`:
 ```
@@ -19,15 +19,16 @@ Classifier: Programming Language :: Python :: 3.12
 Classifier: Programming Language :: Python :: 3.13
 Classifier: Programming Language :: Python :: 3.14
 ```
-Ничего не требует >=3.12. Пакет официально поддерживает 3.10-3.14, значит встроенный
-Python 3.11 в Houdini 20.5 подходит без оговорок. Модули используют
-`from __future__ import annotations` и `X | Y` синтаксис в аннотациях (не в рантайме) —
-это тоже безопасно на 3.11 благодаря отложенным аннотациям.
+Nothing requires >=3.12. The package officially supports 3.10-3.14, so the
+Python 3.11 built into Houdini 20.5 works without reservation. Modules use
+`from __future__ import annotations` and `X | Y` syntax in annotations (not at
+runtime) — that's also safe on 3.11 thanks to deferred annotations.
 
-## 1. Как клиент поднимает агента как подпроцесс
+## 1. How the client spawns the agent as a subprocess
 
-Есть готовый асинхронный контекст-менеджер, специально под сценарий «мы клиент, агент —
-внешний CLI-процесс», это то, что нужно панели:
+There's a ready-made async context manager, built specifically for the "we're the
+client, the agent is an external CLI process" scenario — exactly what the panel
+needs:
 
 ```python
 # acp/stdio.py:161-183
@@ -44,62 +45,62 @@ async def spawn_agent_process(
     """Spawn an ACP agent subprocess and return a ClientSideConnection to it."""
 ```
 
-Использование:
+Usage:
 ```python
 async with acp.spawn_agent_process(my_client_impl, "claude-code-acp") as (conn, process):
     resp = await conn.initialize(protocol_version=acp.PROTOCOL_VERSION)
     ...
 ```
-`to_client` — либо готовый объект, реализующий `Client`-протокол (см. §2), либо фабрика
-`Callable[[Agent], Client]`, которой передаётся сам `conn` (как `Agent`) — удобно, если
-клиенту нужно дергать агента в обратную сторону (например, отменить сессию из UI).
-`ClientSideConnection` в `to_client(self)` вызывается синхронно в `__init__`
+`to_client` is either a ready-made object implementing the `Client` protocol (see §2), or a
+`Callable[[Agent], Client]` factory that receives `conn` itself (as an `Agent`) — handy when the
+client needs to call the agent back the other way (e.g. cancel a session from the UI).
+`ClientSideConnection` calls `to_client(self)` synchronously in `__init__`
 (`acp/client/connection.py:71`).
 
-Под капотом — `acp/transports.py:47-119`, `spawn_stdio_transport`:
-- собирает окружение через `default_environment()` (наследует только
-  `HOME, LOGNAME, PATH, SHELL, TERM, USER` на POSIX — почти пустой env, не полный `os.environ`!
-  надо явно передавать `env=` с нужными переменными, если агенту нужно что-то ещё,
-  например `ANTHROPIC_API_KEY` или PATH до нод/питона проекта) и мержит с переданным `env`.
+Under the hood, it's `acp/transports.py:47-119`, `spawn_stdio_transport`:
+- assembles the environment via `default_environment()` (inherits only
+  `HOME, LOGNAME, PATH, SHELL, TERM, USER` on POSIX — an almost-empty env, not the full `os.environ`!
+  you must explicitly pass `env=` with any variable the agent needs beyond that,
+  e.g. `ANTHROPIC_API_KEY` or the project's node/python PATH) and merges it with the given `env`.
 - `asyncio.create_subprocess_exec(command, *args, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=merged_env, cwd=...)`.
-- при выходе из `async with`: graceful shutdown — `stdin.write_eof()` → `drain()` → `close()`,
-  затем `wait_for(process.wait(), timeout=2.0)`, при таймауте `terminate()`, ещё раз таймаут,
-  затем `kill()`. Параметр `shutdown_timeout` настраиваемый через `transport_kwargs`.
-- `stderr` подпроцесса по умолчанию — отдельный `PIPE` (`aio_subprocess.PIPE`), не смешивается
-  со stdout; его надо читать отдельно, иначе буфер может заполниться и подвиснуть.
+- on exiting `async with`: a graceful shutdown — `stdin.write_eof()` → `drain()` → `close()`,
+  then `wait_for(process.wait(), timeout=2.0)`, on timeout `terminate()`, another timeout,
+  then `kill()`. The `shutdown_timeout` parameter is configurable via `transport_kwargs`.
+- the subprocess's `stderr` is by default a separate `PIPE` (`aio_subprocess.PIPE`), not merged
+  into stdout; it has to be read separately, or the buffer can fill up and hang the process.
 
-`spawn_agent_process` — это высокоуровневый хелпер (создаёт `ClientSideConnection` сам).
-Если нужен только низкоуровневый `Connection` без готовой связки методов — есть
-`spawn_stdio_connection(handler, command, *args, ...)` (`acp/stdio.py:143-158`), но для
-клиента панели это не нужно: `spawn_agent_process` подходит напрямую.
+`spawn_agent_process` is a high-level helper (it builds the `ClientSideConnection` itself).
+If you only need a low-level `Connection` without a ready-made bundle of methods, there's
+`spawn_stdio_connection(handler, command, *args, ...)` (`acp/stdio.py:143-158`), but for
+the panel's client this isn't needed: `spawn_agent_process` fits directly.
 
-Обратный хелпер `spawn_client_process` (агент спавнит клиента) — не нужен для этого проекта,
-панель именно клиент.
+The reverse helper `spawn_client_process` (the agent spawns the client) isn't needed for this
+project, the panel is specifically the client.
 
-Буфер stdio по умолчанию у низкоуровневых `stdio_streams()` — 64KB (`asyncio.StreamReader`
-default), но `run_agent()` (агентская сторона) поднимает лимит до 50MB
-(`DEFAULT_STDIO_BUFFER_LIMIT_BYTES = 50 * 1024 * 1024`, `acp/core.py:36`) — это константа
-для агентской стороны через `run_agent`; `spawn_agent_process`/`spawn_stdio_transport`
-принимают свой `limit` через `transport_kwargs={"limit": ...}`, но по умолчанию НЕ поднимают
-его до 50MB (default `limit=None` → `asyncio.create_subprocess_exec` без `limit=` → стандартный
-64KB reader limit). **Для больших base64-картинок/аудио от агента может понадобиться явно
-передать `transport_kwargs={"limit": 50*1024*1024}`.**
+The default stdio buffer for the low-level `stdio_streams()` is 64KB (`asyncio.StreamReader`'s
+default), but `run_agent()` (the agent side) raises the limit to 50MB
+(`DEFAULT_STDIO_BUFFER_LIMIT_BYTES = 50 * 1024 * 1024`, `acp/core.py:36`) — that's a constant
+for the agent side via `run_agent`; `spawn_agent_process`/`spawn_stdio_transport`
+accept their own `limit` via `transport_kwargs={"limit": ...}`, but by default they do NOT raise
+it to 50MB (default `limit=None` → `asyncio.create_subprocess_exec` with no `limit=` → the standard
+64KB reader limit). **For large base64 images/audio from the agent, it may be necessary to
+explicitly pass `transport_kwargs={"limit": 50*1024*1024}`.**
 
-## 2. Класс, который реализует КЛИЕНТ (колбэки, которые агент зовёт у нас)
+## 2. The class that implements the CLIENT (callbacks the agent calls on us)
 
-`acp.interfaces.Client` — это `typing.Protocol` (structural typing), **не ABC**:
+`acp.interfaces.Client` is a `typing.Protocol` (structural typing), **not an ABC**:
 ```python
 >>> acp.Client.__mro__
 (<class 'acp.interfaces.Client'>, <class 'typing.Protocol'>, <class 'typing.Generic'>, <class 'object'>)
 ```
-Наследоваться от него не обязательно — маршрутизация (`acp/client/router.py`,
-`_resolve_handler` в `acp/router.py:31-46`) работает через `getattr(obj, attr_name)`,
-чистый duck-typing. Если метода нет на объекте — для request-методов с `optional=True`
-роутер вернёт `default_result` вместо ошибки (см. список ниже), иначе клиенту прилетит
-JSON-RPC `-32601 Method not found`.
+Subclassing it isn't required — routing (`acp/client/router.py`,
+`_resolve_handler` in `acp/router.py:31-46`) works via `getattr(obj, attr_name)`,
+pure duck typing. If an object has no such method — for request methods with `optional=True`
+the router returns `default_result` instead of an error (see the list below), otherwise the
+client gets a JSON-RPC `-32601 Method not found`.
 
-Полный протокол (`acp/interfaces.py:83-158`), с точными сигнатурами (все параметры —
-keyword, плюс `**kwargs` для полей `_meta` / будущих полей):
+The full protocol (`acp/interfaces.py:83-158`), with exact signatures (all parameters are
+keyword-only, plus `**kwargs` for `_meta` fields / future fields):
 
 ```python
 class Client(Protocol):
@@ -134,26 +135,26 @@ class Client(Protocol):
     def on_connect(self, conn: Agent) -> None: ...
 ```
 
-Методы для панели houdini-agent-panel: реально обязательные —
-`session_update` (входящий поток обновлений — это то, что рисует чат) и
-`request_permission` (диалог разрешений). Остальные — по потребности агента;
-если панель их не реализует, роутер сам вернёт разумный дефолт для терминалов
-(`optional=True, default_result={} | None`, см. `acp/client/router.py:103-144`), но
-`write_text_file`/`read_text_file`/`request_permission`/`session_update` — НЕ опциональны
-в роутере (`route_request(... )` без `optional=True`, `acp/client/router.py:95-102`,
-`163`) — если агент их вызовет, а панель не предоставит метод, будет JSON-RPC ошибка
-`method not found`. На практике: агент вызывает `fs/read_text_file` /
-`fs/write_text_file` только если панель заявила поддержку в
-`ClientCapabilities.fs` (см. §4) — так что если not implementing, просто не
-объявляй capability.
+Methods that matter for the houdini-agent-panel client: the ones genuinely required are
+`session_update` (the incoming update stream — this is what draws the chat) and
+`request_permission` (the permission dialog). The rest depend on what the agent needs;
+if the panel doesn't implement them, the router itself returns a sensible default for terminal
+methods (`optional=True, default_result={} | None`, see `acp/client/router.py:103-144`), but
+`write_text_file`/`read_text_file`/`request_permission`/`session_update` are NOT optional
+in the router (`route_request(...)` without `optional=True`, `acp/client/router.py:95-102`,
+`163`) — if the agent calls one of these and the panel doesn't provide the method, it gets a
+JSON-RPC `method not found` error. In practice: the agent only calls `fs/read_text_file` /
+`fs/write_text_file` if the panel declared support in
+`ClientCapabilities.fs` (see §4) — so if you're not implementing it, just don't
+declare the capability.
 
-Метод **не async, обычный**: `on_connect(self, conn: Agent) -> None` — вызывается синхронно
-сразу в конструкторе `ClientSideConnection.__init__` (`acp/client/connection.py:83-84`),
-если у клиента есть атрибут `on_connect`. Удобное место, чтобы сохранить `conn` (агент
-как `Agent`-объект) на сессию клиента, если понадобится, например, звать `conn.cancel(...)`
-изнутри самого объекта Client.
+The method **is not async, it's a plain one**: `on_connect(self, conn: Agent) -> None` — called synchronously
+right in `ClientSideConnection.__init__`'s constructor (`acp/client/connection.py:83-84`),
+if the client has an `on_connect` attribute. A convenient place to store `conn` (the agent
+as an `Agent` object) for the client's session, if it's ever needed, e.g. to call
+`conn.cancel(...)` from inside the Client object itself.
 
-Соответствие JSON-RPC method name → Python-метод (`CLIENT_METHODS`, `acp/meta.py:33-48`):
+Mapping from JSON-RPC method name → Python method (`CLIENT_METHODS`, `acp/meta.py:33-48`):
 ```
 session/request_permission -> request_permission
 session/update             -> session_update
@@ -161,21 +162,21 @@ fs/write_text_file         -> write_text_file
 fs/read_text_file          -> read_text_file
 terminal/create            -> create_terminal
 terminal/output            -> terminal_output
-terminal/release           -> release_terminal
-terminal/wait_for_exit     -> wait_for_terminal_exit
-terminal/kill               -> kill_terminal
-mcp/connect                -> (не в Client Protocol — внутренний для elicitation/mcp транспортов)
-mcp/message                -> (см. выше)
-mcp/disconnect              -> (см. выше)
-elicitation/create          -> create_elicitation
-elicitation/complete        -> complete_elicitation
+terminal/release            -> release_terminal
+terminal/wait_for_exit      -> wait_for_terminal_exit
+terminal/kill                -> kill_terminal
+mcp/connect                 -> (not in the Client Protocol — internal, for elicitation/mcp transports)
+mcp/message                  -> (see above)
+mcp/disconnect                -> (see above)
+elicitation/create             -> create_elicitation
+elicitation/complete            -> complete_elicitation
 ```
 
-## 3. Исходящие вызовы клиента — `ClientSideConnection`
+## 3. Outgoing client calls — `ClientSideConnection`
 
-`acp/client/connection.py` — класс `ClientSideConnection` (то, что возвращает
-`spawn_agent_process`/`connect_to_agent`). Все методы — `async`, все параметры keyword,
-плюс `**kwargs` мержится в `_meta` (`field_meta`) запроса.
+`acp/client/connection.py` — the `ClientSideConnection` class (what
+`spawn_agent_process`/`connect_to_agent` return). All methods are `async`, all parameters keyword-only,
+plus `**kwargs` gets merged into the request's `_meta` (`field_meta`).
 
 ```python
 class ClientSideConnection:
@@ -211,7 +212,7 @@ class ClientSideConnection:
     async def resume_session(self, session_id: str, cwd: str, additional_directories=None, mcp_servers=None, **kwargs) -> ResumeSessionResponse: ...
     async def close_session(self, session_id: str, **kwargs) -> CloseSessionResponse | None: ...
 
-    async def cancel(self, session_id: str, **kwargs) -> None:  # это НОТИФИКАЦИЯ, не request — нет ответа
+    async def cancel(self, session_id: str, **kwargs) -> None:  # this is a NOTIFICATION, not a request — no reply
         ...
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]: ...
@@ -219,22 +220,22 @@ class ClientSideConnection:
 
     async def close(self) -> None: ...
     async def __aenter__(self) -> "ClientSideConnection": ...
-    async def __aexit__(self, exc_type, exc, tb) -> None: ...  # закрывает соединение
+    async def __aexit__(self, exc_type, exc, tb) -> None: ...  # closes the connection
 ```
 
-Важно про `cancel`: это JSON-RPC *notification* (`session/cancel`), а не request —
-метод не блокируется в ожидании ответа и всегда возвращает `None` немедленно после отправки
-(`await notify_model(...)`, `acp/client/connection.py:269-275`). Отменённый промпт агент
-завершит через обычный `session/update` поток + `PromptResponse.stop_reason == "cancelled"`
-на текущем `await conn.prompt(...)`.
+Important detail about `cancel`: it's a JSON-RPC *notification* (`session/cancel`), not a request —
+the method doesn't block waiting for a reply and always returns `None` immediately after sending
+(`await notify_model(...)`, `acp/client/connection.py:269-275`). The agent finishes a cancelled
+prompt through the usual `session/update` stream + `PromptResponse.stop_reason == "cancelled"`
+on the currently pending `await conn.prompt(...)`.
 
-`session/list`, `session/fork`, `session/resume`, `session/close` — это методы схемы
-v1.19.0, они присутствуют в SDK, но по факту не все агенты их поддерживают
-(зависит от `AgentCapabilities.session_capabilities`, см. §4). Для минимального ACP-клиента
-(Claude Code/Codex/Gemini CLI как агент) реально нужны только: `initialize`, `new_session`,
-`prompt`, `cancel`, `set_session_mode`, опционально `authenticate`.
+`session/list`, `session/fork`, `session/resume`, `session/close` are schema v1.19.0 methods,
+they exist in the SDK, but in practice not every agent supports them
+(depends on `AgentCapabilities.session_capabilities`, see §4). For a minimal ACP client
+(Claude Code/Codex/Gemini CLI as the agent), the ones actually needed are just: `initialize`, `new_session`,
+`prompt`, `cancel`, `set_session_mode`, optionally `authenticate`.
 
-JSON-RPC имена методов агента (`AGENT_METHODS`, `acp/meta.py:3-32`):
+JSON-RPC method names for the agent (`AGENT_METHODS`, `acp/meta.py:3-32`):
 ```
 initialize            -> initialize
 authenticate          -> authenticate
@@ -245,18 +246,18 @@ session/set_config_option -> set_config_option
 session/prompt        -> prompt
 session/cancel        -> cancel (notification)
 session/list          -> list_sessions
-session/delete        -> (нет в Agent Protocol / ClientSideConnection — есть DeleteSessionRequest в schema, но не обёрнуто методом)
+session/delete        -> (absent from the Agent Protocol / ClientSideConnection — DeleteSessionRequest exists in the schema, but isn't wrapped by a method)
 session/fork          -> fork_session
 session/resume        -> resume_session
 session/close         -> close_session
 ```
 
-## 4. Модели
+## 4. Models
 
-Все модели — pydantic v2 `BaseModel` с алиасами camelCase (`Field(alias="...")`),
-Python-имена полей — snake_case. У всех есть `field_meta: dict|None` с алиасом `_meta`
-(универсальное расширение протокола) — не путать с kwargs-параметром `**kwargs` у методов
-(тот как раз мапится именно в это поле).
+All models are pydantic v2 `BaseModel`s with camelCase aliases (`Field(alias="...")`),
+while the Python field names are snake_case. All of them have a `field_meta: dict|None` aliased to `_meta`
+(a general protocol extension point) — don't confuse this with the `**kwargs` parameter on methods
+(which is exactly what maps into this field).
 
 ### InitializeRequest / InitializeResponse (`acp/schema.py:6307-6382`, `6647-6724`)
 
@@ -272,21 +273,21 @@ class InitializeResponse(BaseModel):
     auth_methods: list[EnvVarAuthMethod|TerminalAuthMethod|AuthMethodAgent] | None = []  # alias "authMethods"
     agent_info: Implementation | None = None                              # alias "agentInfo"
 ```
-`InitializeRequest` терпимо относится к нечисловому `protocol_version` (например строка
-даты от старых клиентов Zed) — конвертирует в `1` при ошибке парсинга
-(`_coerce_protocol_version`, `acp/schema.py:6349-6361`) — это защита на СТОРОНЕ АГЕНТА,
-панели как клиенту это не важно, просто отправляй `acp.PROTOCOL_VERSION` (int `1`).
+`InitializeRequest` is lenient about a non-numeric `protocol_version` (e.g. a date string from
+older Zed clients) — it converts to `1` on a parse error
+(`_coerce_protocol_version`, `acp/schema.py:6349-6361`) — this is a safeguard on the AGENT
+SIDE, it doesn't matter to the panel as a client, just send `acp.PROTOCOL_VERSION` (int `1`).
 
-`Implementation` (`acp/schema.py:1250` область) — `{name: str, version: str, title: str|None}`
-(не выписываю по полям — это тривиальная модель типа npm-package info).
+`Implementation` (around `acp/schema.py:1250`) is `{name: str, version: str, title: str|None}`
+(not spelled out field by field — it's a trivial model like an npm package info object).
 
 ### ClientCapabilities (`acp/schema.py:5818-5947`)
 ```python
 class ClientCapabilities(BaseModel):
-    fs: FileSystemCapabilities | None = FileSystemCapabilities()   # readTextFile/writeTextFile — оба default False
+    fs: FileSystemCapabilities | None = FileSystemCapabilities()   # readTextFile/writeTextFile — both default to False
     terminal: bool | None = False
     session: ClientSessionCapabilities | None = None
-    plan: PlanCapabilities | None = None            # UNSTABLE: plan_update/plan_removed апдейты
+    plan: PlanCapabilities | None = None            # UNSTABLE: plan_update/plan_removed updates
     auth: AuthCapabilities | None = {"terminal": False}
     elicitation: ElicitationCapabilities | None = None
     nes: ClientNesCapabilities | None = None        # Next Edit Suggestions, UNSTABLE
@@ -298,47 +299,48 @@ class FileSystemCapabilities(BaseModel):
     read_text_file: bool | None = False   # alias "readTextFile"
     write_text_file: bool | None = False  # alias "writeTextFile"
 ```
-Если панель хочет, чтобы агент читал/писал файлы через клиента (а не напрямую через ФС) —
-надо выставить `fs=FileSystemCapabilities(read_text_file=True, write_text_file=True)`
-и реализовать `Client.read_text_file`/`write_text_file`. Иначе агент читает/пишет файлы
-сам (у него есть `cwd`).
+If the panel wants the agent to read/write files through the client (rather than directly
+through the filesystem) — it needs to set
+`fs=FileSystemCapabilities(read_text_file=True, write_text_file=True)`
+and implement `Client.read_text_file`/`write_text_file`. Otherwise the agent reads/writes files
+itself (it has `cwd`).
 
-### AgentCapabilities (`acp/schema.py:6412-...`, начало)
+### AgentCapabilities (`acp/schema.py:6412-...`, start)
 ```python
 class AgentCapabilities(BaseModel):
-    load_session: bool | None = False                          # alias "loadSession" — поддержка session/load
-    prompt_capabilities: PromptCapabilities | None = PromptCapabilities()   # alias "promptCapabilities": image/audio/embeddedContext bool-флаги
-    mcp_capabilities: McpCapabilities | None = McpCapabilities()            # alias "mcpCapabilities": http/sse/acp bool-флаги
+    load_session: bool | None = False                          # alias "loadSession" — support for session/load
+    prompt_capabilities: PromptCapabilities | None = PromptCapabilities()   # alias "promptCapabilities": image/audio/embeddedContext bool flags
+    mcp_capabilities: McpCapabilities | None = McpCapabilities()            # alias "mcpCapabilities": http/sse/acp bool flags
     session_capabilities: SessionCapabilities | None = SessionCapabilities()  # alias "sessionCapabilities" — fork/resume/close/list/delete
     auth: AgentAuthCapabilities | None = ...
 ```
-Проверяй `agent_capabilities.prompt_capabilities.image` перед отправкой `ImageContentBlock`
-в промпте — если `False`, агент может это отвергнуть.
+Check `agent_capabilities.prompt_capabilities.image` before sending an `ImageContentBlock`
+in the prompt — if it's `False`, the agent may reject it.
 
 ### NewSessionRequest / NewSessionResponse (`acp/schema.py:5172-5219`, `6216-6265`)
 ```python
 class NewSessionRequest(BaseModel):
-    cwd: str                                    # обязателен, абсолютный путь
+    cwd: str                                    # required, an absolute path
     additional_directories: list[str] | None = None   # alias "additionalDirectories"
-    mcp_servers: list[HttpMcpServer|SseMcpServer|AcpMcpServer|McpServerStdio]   # alias "mcpServers" — список, не Optional (но ClientSideConnection.new_session сам подставляет [] если None, см. §3)
+    mcp_servers: list[HttpMcpServer|SseMcpServer|AcpMcpServer|McpServerStdio]   # alias "mcpServers" — a list, not Optional (but ClientSideConnection.new_session itself substitutes [] if None, see §3)
 
 class NewSessionResponse(BaseModel):
     session_id: str                             # alias "sessionId"
-    modes: SessionModeState | None = None        # начальный набор режимов агента, если поддерживает
+    modes: SessionModeState | None = None        # the agent's initial set of modes, if it supports them
     config_options: list[SessionConfigOptionSelect|SessionConfigOptionBoolean] | None = None  # alias "configOptions"
 ```
 
-### MCP-серверы — точная форма записи (`acp/schema.py:2270-2372`)
-Дискриминации по форме класса нет единого `type`-литерала в базовых классах (это Union без
-discriminator в `NewSessionRequest.mcp_servers`, значит pydantic будет пробовать по порядку/по
-полям) — 4 варианта:
+### MCP servers — the exact record shape (`acp/schema.py:2270-2372`)
+There's no single discriminating `type` literal on the base classes (it's a Union with no
+discriminator in `NewSessionRequest.mcp_servers`, meaning pydantic tries them in order/by
+fields) — 4 variants:
 
 ```python
 class McpServerStdio(BaseModel):
     name: str
-    command: str             # абсолютный путь к исполняемому файлу MCP-сервера
-    args: list[str]           # НЕ Optional — список аргументов (может быть [])
-    env: list[EnvVariable]     # НЕ Optional — список {name: str, value: str} (см. EnvVariable)
+    command: str             # absolute path to the MCP server's executable
+    args: list[str]           # NOT Optional — a list of arguments (can be [])
+    env: list[EnvVariable]     # NOT Optional — a list of {name: str, value: str} (see EnvVariable)
 
 class McpServerHttp(BaseModel):
     name: str
@@ -352,20 +354,20 @@ class McpServerSse(BaseModel):
 
 class McpServerAcp(BaseModel):
     name: str
-    server_id: str    # alias "serverId" — уникальный id ACP-транспортного MCP-сервера
+    server_id: str    # alias "serverId" — a unique id for the ACP-transport MCP server
 ```
-Т.е. да — есть варианты http и sse, помимо stdio, плюс собственный "acp"-транспорт
-(MCP-сервер, доступный через тот же ACP-соединение). В `interfaces.py`/`connection.py` они
-экспортируются как `HttpMcpServer`/`SseMcpServer`/`AcpMcpServer` (тонкие сабклассы
-`McpServerHttp`/`McpServerSse`/`McpServerAcp` без доп. полей, `acp/schema.py:4387-4398`) —
-именно эти "публичные" имена и нужно использовать в списке `mcp_servers`.
-`EnvVariable`: `{name: str, value: str}` (`acp/schema.py:210-228`, тривиальна).
+So yes — there are http and sse variants besides stdio, plus its own "acp" transport
+(an MCP server reachable over that same ACP connection). In `interfaces.py`/`connection.py` they're
+exported as `HttpMcpServer`/`SseMcpServer`/`AcpMcpServer` (thin subclasses of
+`McpServerHttp`/`McpServerSse`/`McpServerAcp` with no extra fields, `acp/schema.py:4387-4398`) —
+these are the "public" names that should be used in the `mcp_servers` list.
+`EnvVariable`: `{name: str, value: str}` (`acp/schema.py:210-228`, trivial).
 
-### PromptRequest — content-блоки (`acp/schema.py:5222-5269`, блоки — `4819-4838`)
+### PromptRequest — content blocks (`acp/schema.py:5222-5269`, blocks — `4819-4838`)
 ```python
 prompt: list[TextContentBlock | ImageContentBlock | AudioContentBlock | ResourceContentBlock | EmbeddedResourceContentBlock]
 ```
-Дискриминатор — поле `type` (Literal) на каждом варианте:
+The discriminator is the `type` field (a Literal) on each variant:
 ```python
 class TextContentBlock(TextContent):        type: Literal["text"]
 class ImageContentBlock(ImageContent):        type: Literal["image"]
@@ -373,7 +375,7 @@ class AudioContentBlock(AudioContent):        type: Literal["audio"]
 class ResourceContentBlock(ResourceLink):     type: Literal["resource_link"]
 class EmbeddedResourceContentBlock(EmbeddedResource):  type: Literal["resource"]
 ```
-Базовые поля (без discriminator, эти — родительские классы):
+The base fields (no discriminator, these are the parent classes):
 ```python
 class TextContent(BaseModel):
     annotations: Annotations | None = None
@@ -403,7 +405,7 @@ class EmbeddedResource(BaseModel):  # EmbeddedResourceContentBlock = EmbeddedRes
     annotations: Annotations | None = None
     resource: TextResourceContents | BlobResourceContents
 ```
-Хелперы-конструкторы (`acp/helpers.py`, готовы к использованию без прямого импорта схемы):
+Constructor helpers (`acp/helpers.py`, ready to use without importing the schema directly):
 ```python
 text_block(text: str) -> TextContentBlock
 image_block(data: str, mime_type: str, *, uri: str|None=None) -> ImageContentBlock
@@ -421,9 +423,9 @@ class SessionNotification(BaseModel):
     update: Union[UserMessageChunk, AgentMessageChunk, AgentThoughtChunk, ToolCallStart, ToolCallProgress,
                   AgentPlanUpdate, AgentPlanContentUpdate, AgentPlanRemovedUpdate, AvailableCommandsUpdate,
                   CurrentModeUpdate, ConfigOptionUpdate, SessionInfoUpdate, UsageUpdate]
-    # Field(discriminator="session_update")   <-- дискриминатор ИМЕННО это поле (alias "sessionUpdate"), НЕ "type"
+    # Field(discriminator="session_update")   <-- the discriminator is EXACTLY this field (alias "sessionUpdate"), NOT "type"
 ```
-Каждый вариант — literal на поле `session_update` (alias `sessionUpdate`):
+Each variant is a literal on the `session_update` field (alias `sessionUpdate`):
 ```python
 UserMessageChunk(ContentChunk):        session_update: Literal["user_message_chunk"]
 AgentMessageChunk(ContentChunk):        session_update: Literal["agent_message_chunk"]
@@ -436,25 +438,25 @@ AgentPlanRemovedUpdate(PlanRemoved):    session_update: Literal["plan_removed"] 
 AvailableCommandsUpdate(_AvailableCommandsUpdate): session_update: Literal["available_commands_update"]
 CurrentModeUpdate(_CurrentModeUpdate):  session_update: Literal["current_mode_update"]
 ConfigOptionUpdate(_ConfigOptionUpdate): session_update: Literal["config_option_update"]
-SessionInfoUpdate(_SessionInfoUpdate):  session_update: Literal["session_info_update"]   # предположительно; не выписан подробно
+SessionInfoUpdate(_SessionInfoUpdate):  session_update: Literal["session_info_update"]   # presumed; not spelled out in detail
 UsageUpdate(_UsageUpdate):              session_update: Literal["usage_update"]
 ```
-`ContentChunk` (база для user/agent/thought-чанков):
+`ContentChunk` (the base for user/agent/thought chunks):
 ```python
 class ContentChunk(BaseModel):
     content: TextContentBlock | ImageContentBlock | AudioContentBlock | ResourceContentBlock | EmbeddedResourceContentBlock  # discriminator="type"
-    message_id: str | None = None   # alias "messageId" — общий для всех чанков одного сообщения
+    message_id: str | None = None   # alias "messageId" — shared across every chunk of one message
 ```
-Практический разбор входящего `session/update` в Python:
+A practical breakdown of an incoming `session/update` in Python:
 ```python
 async def session_update(self, session_id, update, **kwargs):
-    match update.session_update:  # это Python-имя поля (alias "sessionUpdate" только на проводе)
+    match update.session_update:  # this is the Python field name (alias "sessionUpdate" only on the wire)
         case "agent_message_chunk":
             text = update.content.text if update.content.type == "text" else None
         case "tool_call":
-            ...  # update — ToolCallStart, поля как в ToolCall (см. ниже)
+            ...  # update is a ToolCallStart, fields as in ToolCall (see below)
         case "tool_call_update":
-            ...  # update — ToolCallProgress (все поля Optional — частичное обновление)
+            ...  # update is a ToolCallProgress (all fields Optional — a partial update)
         case "plan":
             for entry in update.entries: ...
 ```
@@ -470,35 +472,35 @@ class ToolCall(BaseModel):    # ToolCallStart = ToolCall + session_update litera
     kind: ToolKind | None = None
     status: ToolCallStatus | None = None
     content: list[ContentToolCallContent|FileEditToolCallContent|TerminalToolCallContent] | None = None
-    locations: list[ToolCallLocation] | None = None   # для "follow-along" в UI — подсветить файл
+    locations: list[ToolCallLocation] | None = None   # for "follow-along" in the UI — highlighting a file
     raw_input: Any | None = None    # alias "rawInput"
     raw_output: Any | None = None   # alias "rawOutput"
 
 class ToolCallUpdate(BaseModel):   # ToolCallProgress = ToolCallUpdate + session_update literal
-    tool_call_id: str        # обязателен — id обновляемого вызова
+    tool_call_id: str        # required — the id of the call being updated
     kind: ToolKind | None = None
     status: ToolCallStatus | None = None
     title: str | None = None
-    content: list[...] | None = None       # ЗАМЕНЯЕТ весь список при обновлении, не патчит по элементам
+    content: list[...] | None = None       # REPLACES the whole list on update, doesn't patch element by element
     locations: list[ToolCallLocation] | None = None
     raw_input: Any | None = None
     raw_output: Any | None = None
 ```
-`ToolCallLocation` — `{path: str, line: int|None}` (примерно, `acp/schema.py:186-209`).
-Три варианта содержимого tool call, дискриминатор поля `type`:
+`ToolCallLocation` is roughly `{path: str, line: int|None}` (`acp/schema.py:186-209`).
+Three variants of a tool call's content, discriminated by the `type` field:
 ```python
-class ContentToolCallContent(Content):   type наследуется из Content — там нет literal сверху,
-    # фактически: {"type": "content", "content": <ContentBlock>}
+class ContentToolCallContent(Content):   type is inherited from Content — there's no literal at this level,
+    # in practice: {"type": "content", "content": <ContentBlock>}
 class FileEditToolCallContent(Diff):      # {"type": "diff", "path": str, "new_text": str, "old_text": str|None}
 class TerminalToolCallContent(Terminal):  # {"type": "terminal", "terminal_id": str}
 ```
-(смотри хелперы `tool_content()/tool_diff_content()/tool_terminal_ref()` в `acp/helpers.py:129-138`
-— они сами простявляют правильный `type`.)
+(see the helpers `tool_content()/tool_diff_content()/tool_terminal_ref()` in `acp/helpers.py:129-138`
+— they set the correct `type` themselves.)
 
-Хелперы для быстрой сборки апдейтов (`acp/helpers.py`):
+Helpers for quickly assembling updates (`acp/helpers.py`):
 ```python
 start_tool_call(tool_call_id, title, *, kind=None, status=None, content=None, locations=None, raw_input=None, raw_output=None) -> ToolCallStart
-start_read_tool_call(tool_call_id, title, path, *, extra_options=None) -> ToolCallStart   # kind="read", проставляет locations/raw_input сам
+start_read_tool_call(tool_call_id, title, path, *, extra_options=None) -> ToolCallStart   # kind="read", sets locations/raw_input itself
 start_edit_tool_call(tool_call_id, title, path, content, *, extra_options=None) -> ToolCallStart  # kind="edit"
 update_tool_call(tool_call_id, *, title=None, kind=None, status=None, content=None, locations=None, raw_input=None, raw_output=None) -> ToolCallProgress
 ```
@@ -514,9 +516,9 @@ class PlanEntry(BaseModel):
     status: PlanEntryStatus
 
 class Plan(BaseModel):   # AgentPlanUpdate = Plan + session_update: Literal["plan"]
-    entries: list[PlanEntry]   # КАЖДЫЙ раз полный список — клиент заменяет план целиком, не патчит
+    entries: list[PlanEntry]   # the FULL list every time — the client replaces the plan wholesale, it doesn't patch
 ```
-Хелперы: `plan_entry(content, *, priority="medium", status="pending") -> PlanEntry`,
+Helpers: `plan_entry(content, *, priority="medium", status="pending") -> PlanEntry`,
 `update_plan(entries: Iterable[PlanEntry]) -> AgentPlanUpdate`.
 
 ### RequestPermissionRequest / RequestPermissionResponse / PermissionOption (`acp/schema.py:6382-6412`, `5320-5341`, `3382-3406`)
@@ -530,28 +532,28 @@ class PermissionOption(BaseModel):
 
 class RequestPermissionRequest(BaseModel):
     session_id: str            # alias "sessionId"
-    tool_call: ToolCallUpdate   # alias "toolCall" — детали вызова, требующего разрешения
+    tool_call: ToolCallUpdate   # alias "toolCall" — details of the call that needs permission
     options: list[PermissionOption]
 
 class RequestPermissionResponse(BaseModel):
-    outcome: DeniedOutcome | AllowedOutcome   # discriminator="outcome" (само поле "outcome" внутри варианта — литерал)
+    outcome: DeniedOutcome | AllowedOutcome   # discriminator="outcome" (the "outcome" field itself is a literal inside the variant)
 
 class DeniedOutcome(BaseModel):
     outcome: Literal["cancelled"]
 
 class SelectedPermissionOutcome(BaseModel):    # AllowedOutcome = SelectedPermissionOutcome + outcome: Literal["selected"]
-    option_id: str    # alias "optionId" — какой из PermissionOption.option_id выбран
+    option_id: str    # alias "optionId" — which of PermissionOption.option_id was chosen
 
 class AllowedOutcome(SelectedPermissionOutcome):
     outcome: Literal["selected"]
 ```
-Т.е. форма ответа: либо `RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))`
-(пользователь отменил/закрыл диалог), либо
+So the reply takes one of two shapes: either `RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))`
+(the user cancelled/closed the dialog), or
 `RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id="allow_once"))`
-(пользователь выбрал один из присланных вариантов). Обрати внимание: дискриминирующее поле
-называется `outcome` И на уровне обёртки (`RequestPermissionResponse.outcome`), И как литерал
-внутри самого варианта (`DeniedOutcome.outcome`/`AllowedOutcome.outcome`) — не путать эти два
-разных `outcome`.
+(the user picked one of the offered options). Note: the discriminating field is called `outcome`
+BOTH at the wrapper level (`RequestPermissionResponse.outcome`) AND as a literal inside the
+variant itself (`DeniedOutcome.outcome`/`AllowedOutcome.outcome`) — don't confuse these two
+different `outcome`s.
 
 ### AvailableCommand / AvailableCommandsUpdate (`acp/schema.py:5084-...`, `5116-...`, `5712-5714`)
 ```python
@@ -560,8 +562,8 @@ class AvailableCommand(BaseModel):
     description: str
     input: AvailableCommandInput | None = None
     # AvailableCommandInput = RootModel[UnstructuredCommandInput]
-    # UnstructuredCommandInput (acp/schema.py:1795) = {"hint": str} — единственное поле,
-    # человекочитаемая подсказка о том, что ожидается после имени команды (напр. "/model <name>").
+    # UnstructuredCommandInput (acp/schema.py:1795) = {"hint": str} — its only field,
+    # a human-readable hint about what's expected after the command name (e.g. "/model <name>").
 
 class _AvailableCommandsUpdate(BaseModel):
     available_commands: list[AvailableCommand]   # alias "availableCommands"
@@ -569,7 +571,7 @@ class _AvailableCommandsUpdate(BaseModel):
 class AvailableCommandsUpdate(_AvailableCommandsUpdate):
     session_update: Literal["available_commands_update"]
 ```
-Хелпер: `update_available_commands(commands: Iterable[AvailableCommand]) -> AvailableCommandsUpdate`.
+Helper: `update_available_commands(commands: Iterable[AvailableCommand]) -> AvailableCommandsUpdate`.
 
 ### SessionModeState / SessionMode / CurrentModeUpdate (`acp/schema.py:3918-...`, `1381-...`, `1815`/`4157`)
 ```python
@@ -582,13 +584,13 @@ class SessionModeState(BaseModel):
     current_mode_id: str          # alias "currentModeId"
     available_modes: list[SessionMode]   # alias "availableModes"
 
-class CurrentModeUpdate(_CurrentModeUpdate):     # _CurrentModeUpdate, скорее всего {current_mode_id: str}
+class CurrentModeUpdate(_CurrentModeUpdate):     # _CurrentModeUpdate, most likely {current_mode_id: str}
     session_update: Literal["current_mode_update"]
 ```
-Хелпер: `update_current_mode(current_mode_id: str) -> CurrentModeUpdate`.
-`SetSessionModeRequest`/`Response` — исходящий вызов `set_session_mode(session_id, mode_id)`
-(см. §3) переключает текущий режим (например "ask"/"code"/"architect" — конкретные id
-зависят от агента, приходят через `SessionModeState.available_modes`).
+Helper: `update_current_mode(current_mode_id: str) -> CurrentModeUpdate`.
+`SetSessionModeRequest`/`Response` — the outgoing `set_session_mode(session_id, mode_id)` call
+(see §3) switches the current mode (e.g. "ask"/"code"/"architect" — the actual ids
+depend on the agent and arrive via `SessionModeState.available_modes`).
 
 ### PromptResponse / StopReason (`acp/schema.py:4051-4087`, `15`)
 ```python
@@ -596,13 +598,13 @@ StopReason = Literal["end_turn","max_tokens","max_turn_requests","refusal","canc
 
 class PromptResponse(BaseModel):
     stop_reason: StopReason    # alias "stopReason"
-    usage: Usage | None = None   # UNSTABLE — токены
+    usage: Usage | None = None   # UNSTABLE — tokens
 ```
 
-## 5. Ошибка `auth_required`
+## 5. The `auth_required` error
 
-Нет отдельного класса исключения — единый `acp.RequestError(code, message, data=None)`
-(`acp/exceptions.py`), обычный `Exception` с полями `.code`/`.data`:
+There's no separate exception class — a single `acp.RequestError(code, message, data=None)`
+(`acp/exceptions.py`), a plain `Exception` with `.code`/`.data` fields:
 ```python
 class RequestError(Exception):
     def __init__(self, code: int, message: str, data: Any | None = None) -> None: ...
@@ -612,10 +614,10 @@ class RequestError(Exception):
     # + parse_error(-32700), invalid_request(-32600), method_not_found(-32601),
     #   invalid_params(-32602), internal_error(-32603), resource_not_found(-32002)
 ```
-`auth_required` — это конструктор для АГЕНТСКОЙ стороны (чтобы агент кинул эту ошибку
-из своего `initialize`/`new_session`/`prompt`, если требуется логин). На КЛИЕНТСКОЙ
-стороне (`ClientSideConnection`) она приходит просто как JSON-RPC error-объект и
-транслируется в `RequestError` с тем же кодом (`acp/connection.py:279-289`,
+`auth_required` is a constructor meant for the AGENT SIDE (so the agent can raise this
+error from its own `initialize`/`new_session`/`prompt` if login is required). On the CLIENT
+side (`ClientSideConnection`), it just arrives as a JSON-RPC error object and gets
+translated into a `RequestError` with the same code (`acp/connection.py:279-289`,
 `_handle_response`):
 ```python
 if "error" in message:
@@ -624,51 +626,51 @@ if "error" in message:
         error_obj.get("code", -32603), error_obj.get("message", "Error"), error_obj.get("data"),
     ))
 ```
-Практика для клиента:
+The practical pattern for the client:
 ```python
 try:
     resp = await conn.new_session(cwd=cwd, mcp_servers=[])
 except acp.RequestError as exc:
     if exc.code == -32000:
-        # нужен логин — вызвать conn.authenticate(method_id=...) с одним из
-        # InitializeResponse.auth_methods, затем повторить new_session
+        # a login is required — call conn.authenticate(method_id=...) with one of
+        # InitializeResponse.auth_methods, then retry new_session
         ...
     else:
         raise
 ```
-Код `-32000` — соглашение самого SDK/протокола (не стандартный JSON-RPC 2.0 код, это
-application-specific диапазон -32000..-32099), но нет отдельного `AuthRequiredError`
-подкласса — проверяй именно `exc.code == -32000`.
+The code `-32000` is a convention of the SDK/protocol itself (not a standard JSON-RPC 2.0 code,
+it's in the application-specific range -32000..-32099), but there's no dedicated `AuthRequiredError`
+subclass — check `exc.code == -32000` specifically.
 
-## 6. Примеры/тесты клиента в самом пакете
+## 6. Client examples/tests inside the package itself
 
-В установленном дистрибутиве (`site-packages/acp/`) НЕТ каталога `examples/` или `tests/` —
-это только сама библиотека, без исходного репозитория/README с примерами. Полноценного
-"дословного примера клиента" в пакете нет. Но есть модуль `acp.contrib` с готовыми
-утилитами более высокого уровня — публичный API (не приватный, не `_`-префикс на уровне
-модулей) каждого файла подтверждён чтением исходников:
+The installed distribution (`site-packages/acp/`) has NO `examples/` or `tests/` directory —
+it's just the library itself, with no source repository/README with examples. There's no
+full "literal client example" in the package. But there is an `acp.contrib` module with
+ready-made, higher-level utilities — the public API (not private, no `_`-prefix at the
+module level) of each file was verified by reading the source:
 
-**`acp/contrib/session_state.py`** — накопление состояния сессии из потока `session_update`
-(именно то, что нужно панели, чтобы держать модель чата в актуальном виде):
+**`acp/contrib/session_state.py`** — accumulates session state from the `session_update`
+stream (exactly what the panel needs to keep the chat model up to date):
 ```python
-class ToolCallView(BaseModel): ...      # снапшот одного tool call (публичное поле-представление)
-class SessionSnapshot(BaseModel): ...    # снапшот всей сессии (сообщения, tool calls, план, режим...)
+class ToolCallView(BaseModel): ...      # a snapshot of one tool call (a public representation field)
+class SessionSnapshot(BaseModel): ...    # a snapshot of the whole session (messages, tool calls, plan, mode...)
 
 class SessionAccumulator:
     def __init__(self, *, auto_reset_on_session_change: bool = True) -> None: ...
     def reset(self) -> None: ...
     def subscribe(self, callback: Callable[[SessionSnapshot, SessionNotification], None]) -> Callable[[], None]: ...
-    def apply(self, notification: SessionNotification) -> SessionSnapshot: ...   # скорми сюда каждый session_update
+    def apply(self, notification: SessionNotification) -> SessionSnapshot: ...   # feed every session_update in here
     def snapshot(self) -> SessionSnapshot: ...
 ```
-Практически: в `Client.session_update(self, session_id, update, **kwargs)` достаточно
-собрать `SessionNotification(session_id=session_id, update=update)` (или взять готовый —
-если правишь роутер, там модель уже есть) и вызвать `accumulator.apply(notification)`,
-подписавшись на `subscribe(...)` для обновления UI.
+In practice: inside `Client.session_update(self, session_id, update, **kwargs)` it's enough to
+build a `SessionNotification(session_id=session_id, update=update)` (or use a ready-made one —
+if you're patching the router, the model is already there) and call
+`accumulator.apply(notification)`, subscribing via `subscribe(...)` to update the UI.
 
-**`acp/contrib/tool_calls.py`** — construction/tracking ToolCall-объектов на СТОРОНЕ АГЕНТА
-(не клиента) — полезно, только если панель когда-нибудь сама будет писать агента, для клиента
-неприменимо напрямую:
+**`acp/contrib/tool_calls.py`** — constructing/tracking ToolCall objects on the AGENT SIDE
+(not the client) — useful only if the panel ever ends up writing its own agent, not directly
+applicable to the client:
 ```python
 class TrackedToolCallView(BaseModel): ...
 class ToolCallTracker:
@@ -681,21 +683,21 @@ class ToolCallTracker:
     def tool_call_model(self, external_id: str) -> ToolCallUpdate: ...
 ```
 
-**`acp/contrib/permissions.py`** — брокер разрешений, тоже АГЕНТСКАЯ утилита (готовит
-`RequestPermissionRequest`/дефолтные опции для отправки клиенту), не нужна на стороне
-клиента-панели:
+**`acp/contrib/permissions.py`** — a permission broker, also an AGENT-SIDE utility (it builds
+`RequestPermissionRequest`/default options to send to the client), not needed on the
+panel-as-client side:
 ```python
 def default_permission_options() -> tuple[PermissionOption, PermissionOption, PermissionOption]: ...
 class PermissionBroker:
     def __init__(self, ...) -> None: ...
     async def request_for(self, ...) -> RequestPermissionResponse: ...
 ```
-Вывод: для клиента панели полезен только `session_state.SessionAccumulator` — он реально
-экономит написание своего редьюсера над потоком `session_update`. `tool_calls`/`permissions`
-из `contrib` — вспомогательные классы для СТОРОНЫ АГЕНТА, панели не пригодятся напрямую.
+Conclusion: for the panel's client, only `session_state.SessionAccumulator` is useful — it
+genuinely saves writing your own reducer over the `session_update` stream. `tool_calls`/`permissions`
+from `contrib` are helper classes for the AGENT SIDE, not directly useful to the panel.
 
-Минимальный полный skeleton клиента, собранный из проверенных фрагментов выше (не дословная
-цитата, а компоновка реальных сигнатур — использовать как стартовую точку):
+A minimal, complete client skeleton assembled from the verified fragments above (not a literal
+quote, but a composition of real signatures — use it as a starting point):
 ```python
 import acp
 
@@ -703,46 +705,47 @@ class HoudiniPanelClient:
     def __init__(self):
         self.conn: acp.Client | None = None
 
-    def on_connect(self, conn):        # sync, вызывается ClientSideConnection.__init__
+    def on_connect(self, conn):        # sync, called by ClientSideConnection.__init__
         self.agent = conn
 
     async def session_update(self, session_id, update, **kwargs):
-        ...  # см. §4 SessionNotification — рисуем чат по update.session_update
+        ...  # see §4 SessionNotification — draw the chat based on update.session_update
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
-        ...  # показать диалог, вернуть acp.RequestPermissionResponse(outcome=...)
+        ...  # show a dialog, return acp.RequestPermissionResponse(outcome=...)
 
-    # write_text_file/read_text_file/create_terminal/... — только если объявили capability
+    # write_text_file/read_text_file/create_terminal/... — only if the capability was declared
 
 async def main():
     client = HoudiniPanelClient()
     async with acp.spawn_agent_process(client, "claude-code-acp") as (conn, process):
         init = await conn.initialize(
             protocol_version=acp.PROTOCOL_VERSION,
-            client_capabilities=acp.schema.ClientCapabilities(),  # или дефолт
+            client_capabilities=acp.schema.ClientCapabilities(),  # or the default
         )
         session = await conn.new_session(cwd="/path/to/hip/project", mcp_servers=[])
         resp = await conn.prompt(
             session_id=session.session_id,
-            prompt=[acp.text_block("привет")],
+            prompt=[acp.text_block("hello")],
         )
         print(resp.stop_reason)
 ```
 
-## 7. Прочее, что пригодится при реализации
+## 7. Other things worth knowing for the implementation
 
-- `RequestError` на КЛИЕНТСКОМ вызове (`await conn.prompt(...)` и т.п.) прилетает как
-  обычное исключение из `await request_model(...)` → `Connection.send_request` → `future`
-  (`acp/connection.py:144-159`, `273-289`) — оборачивать в `try/except acp.RequestError`.
-- Все Python-имена — snake_case, все имена на проводе (JSON) — camelCase через `Field(alias=...)`;
-  pydantic-модели строятся из snake_case kwargs (`InitializeRequest(protocol_version=..., ...)`),
-  сериализация в camelCase происходит автоматически при `model_dump(by_alias=True)` внутри SDK
-  (клиенту не нужно самому заботиться про алиасы — только использовать python-имена полей).
-  Единственное практическое исключение — метод `Client.session_update`, где discriminator
-  на проводе `sessionUpdate`, а Python-атрибут — `session_update` (тот же паттерн alias).
-- `**kwargs` в сигнатурах методов и конструкторах моделей — это НЕ произвольные доп.
-  параметры, они целиком уходят в `field_meta` (`_meta`) конкретного request/response —
-  расширение протокола, а не способ передать undocumented-параметры мимо модели.
-- Cancel — notification, не request: `await conn.cancel(session_id=...)` не ждёт ответа;
-  результат отмены увидишь как `PromptResponse.stop_reason == "cancelled"` у того промпта,
-  что отменяли, и/или как поток `session/update`, если агент успел что-то досказать до отмены.
+- A `RequestError` on a CLIENT call (`await conn.prompt(...)` and the like) arrives as a
+  regular exception from `await request_model(...)` → `Connection.send_request` → `future`
+  (`acp/connection.py:144-159`, `273-289`) — wrap it in `try/except acp.RequestError`.
+- All Python names are snake_case, every name on the wire (JSON) is camelCase via `Field(alias=...)`;
+  pydantic models are built from snake_case kwargs (`InitializeRequest(protocol_version=..., ...)`),
+  serialization to camelCase happens automatically on `model_dump(by_alias=True)` inside the SDK
+  (the client doesn't need to worry about aliases itself — just use the Python field names).
+  The one practical exception is `Client.session_update`, where the discriminator
+  on the wire is `sessionUpdate`, while the Python attribute is `session_update` (the same alias pattern).
+- `**kwargs` in method signatures and model constructors is NOT arbitrary extra
+  parameters — it all goes into a specific request/response's `field_meta` (`_meta`) —
+  a protocol extension point, not a way to sneak undocumented parameters past the model.
+- Cancel is a notification, not a request: `await conn.cancel(session_id=...)` doesn't wait
+  for a reply; you'll see the effect of the cancellation as
+  `PromptResponse.stop_reason == "cancelled"` on the prompt that was cancelled, and/or as a
+  `session/update` stream, if the agent managed to say something more before the cancellation.

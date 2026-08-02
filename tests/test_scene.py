@@ -1,5 +1,6 @@
-"""Тесты `scene.py` — без Houdini: `hou`/`fxhoudinimcp_server` подставляются
-фейковыми модулями в `sys.modules`, ровно так, как задумана ленивость импорта.
+"""Tests for `scene.py` — no Houdini involved: `hou`/`fxhoudinimcp_server` are
+replaced with fake modules in `sys.modules`, exactly how the lazy import was
+designed to work.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from houdini_agent_panel import scene
 
 @pytest.fixture(autouse=True)
 def _clean_fake_modules():
-    """На случай, если предыдущий тест забыл прибрать за собой."""
+    """In case the previous test forgot to clean up after itself."""
     for name in ("hou", "fxhoudinimcp_server", "fxhoudinimcp_server.startup"):
         sys.modules.pop(name, None)
     yield
@@ -54,8 +55,8 @@ def test_fx_port_none_when_startup_module_says_not_running():
 
 
 def test_fx_port_falls_back_to_http_scan_when_plugin_not_loaded(monkeypatch):
-    # fxhoudinimcp_server отсутствует вовсе (гарантировано fixture'ой выше) —
-    # значит fx_port должен уйти в деградацию, а не упасть с ImportError.
+    # fxhoudinimcp_server is entirely absent (guaranteed by the fixture
+    # above) — so fx_port must fall into the degraded path, not raise ImportError.
     monkeypatch.setattr(scene, "_probe_health", lambda port: port == 8105)
     assert scene.fx_port() == 8105
 
@@ -88,7 +89,7 @@ def test_mcp_servers_pins_port_when_known(monkeypatch):
 
 
 def test_mcp_servers_env_is_a_list_not_a_dict(monkeypatch):
-    """`McpServerStdio.env` — `list[EnvVariable]`, не словарь (facts/acp-sdk.md §4)."""
+    """`McpServerStdio.env` is a `list[EnvVariable]`, not a dict (facts/acp-sdk.md §4)."""
     monkeypatch.setattr(scene, "fx_port", lambda: 8100)
     entry = scene.mcp_servers()[0]
     assert isinstance(entry["env"], list)

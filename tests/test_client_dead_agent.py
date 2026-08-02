@@ -1,13 +1,15 @@
-"""Агент, который не отвечает на initialize.
+"""An agent that doesn't reply to initialize.
 
-Регрессия из живой Houdini: панель писала «Запускаю claude-acp…» и висела
-бесконечно. Процесс агента умирал сразу после старта — путь к `npx-cli.js`
-резолвился в несуществующий файл на машине с Homebrew, — каналы закрывались,
-ответа на `initialize` не могло быть в принципе, а клиент всё ждал.
+Regression from a live Houdini session: the panel printed "Launching
+claude-acp…" and hung forever. The agent process had died right after
+starting — the path to `npx-cli.js` resolved to a file that didn't exist on
+a Homebrew machine — its pipes closed, a reply to `initialize` could no
+longer arrive under any circumstances, and the client just kept waiting.
 
-Причина в тот раз была одна, но ждать вечно нельзя ни по какой причине.
-Поэтому тесты проверяют не конкретный сломанный путь, а поведение клиента:
-процесс умер или молчит — панель обязана сказать об этом.
+The cause was one specific thing that time, but there's no reason good
+enough to wait forever. So these tests don't check for that specific broken
+path, they check the client's behavior: the process died or is silent — the
+panel is obligated to say so.
 """
 
 from __future__ import annotations
@@ -38,8 +40,8 @@ def test_agent_that_dies_immediately_reports_instead_of_hanging(qapp):
     failures: list[str] = []
     client.failed.connect(failures.append)
 
-    # Процесс, который мгновенно умирает с ненулевым кодом и пишет в stderr —
-    # ровно то, что делает `node <несуществующий-файл>.js`.
+    # A process that dies instantly with a non-zero code and writes to
+    # stderr — exactly what `node <nonexistent-file>.js` does.
     spec = LaunchSpec(
         command=sys.executable,
         args=["-c", "import sys; sys.stderr.write('cannot find module npx-cli.js\\n'); sys.exit(1)"],
@@ -47,22 +49,23 @@ def test_agent_that_dies_immediately_reports_instead_of_hanging(qapp):
     )
     client.start(spec, cwd=".")
 
-    assert _wait_for(qapp, lambda: bool(failures)), "клиент завис вместо того, чтобы сообщить об ошибке"
+    assert _wait_for(qapp, lambda: bool(failures)), "the client hung instead of reporting an error"
     assert not client.is_running()
 
     message = failures[0]
-    # Что именно выиграет гонку — обрыв соединения от SDK или наш собственный
-    # надзор за процессом — зависит от того, кто успел первым, и это не важно.
-    # Важно, что сообщение объясняет причину, а суть почти всегда в stderr:
-    # не найден файл, нет прав, не хватает переменной окружения.
-    assert "npx-cli.js" in message, f"хвост stderr должен попадать в сообщение: {message!r}"
-    assert len(message.splitlines()) > 1, f"одна строка без деталей бесполезна: {message!r}"
+    # Which one wins the race — the SDK's own connection drop or our own
+    # process watchdog — depends on which got there first, and it doesn't
+    # matter. What matters is that the message explains the cause, and the
+    # substance is almost always in stderr: a missing file, missing
+    # permissions, a missing environment variable.
+    assert "npx-cli.js" in message, f"the stderr tail should end up in the message: {message!r}"
+    assert len(message.splitlines()) > 1, f"a single line with no detail is useless: {message!r}"
 
     client.stop()
 
 
 def test_agent_that_starts_but_never_answers_hits_the_ceiling(qapp, monkeypatch):
-    """Процесс жив и молчит — тоже не повод ждать вечно."""
+    """The process is alive and silent — also not a reason to wait forever."""
     from houdini_agent_panel import client as client_module
 
     monkeypatch.setattr(client_module, "_CONNECT_TIMEOUT", 1.0)
@@ -78,7 +81,7 @@ def test_agent_that_starts_but_never_answers_hits_the_ceiling(qapp, monkeypatch)
     )
     client.start(spec, cwd=".")
 
-    assert _wait_for(qapp, lambda: bool(failures), timeout_ms=15000), "клиент завис на молчащем агенте"
+    assert _wait_for(qapp, lambda: bool(failures), timeout_ms=15000), "the client hung on a silent agent"
     assert "initialize" in failures[0]
 
     client.stop()

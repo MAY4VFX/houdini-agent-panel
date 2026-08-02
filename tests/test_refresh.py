@@ -10,7 +10,7 @@ def _feed(*items: dict) -> dict:
 
 
 def _item(**overrides) -> dict:
-    base = {"id": "ann-1", "severity": "info", "title": "Заголовок"}
+    base = {"id": "ann-1", "severity": "info", "title": "Title"}
     base.update(overrides)
     return base
 
@@ -80,8 +80,9 @@ def test_both_enabled_combines_results(fetcher):
 
 
 def test_network_error_on_one_side_does_not_break_the_other(fetcher):
-    # У фида нет ответа в FakeFetcher вовсе - announcements.check() бросит
-    # NetworkError, но апдейты обязаны остаться доступны.
+    # The feed has no response registered in FakeFetcher at all -
+    # announcements.check() will raise NetworkError, but updates must
+    # remain available.
     fetcher.add_json(
         updates.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "9.9.9"}}
     )
@@ -90,20 +91,20 @@ def test_network_error_on_one_side_does_not_break_the_other(fetcher):
 
     result = refresh.daily_refresh(settings=settings, panel_version="0.1.0", fetch=fetcher, entries=[])
 
-    assert result.announcements == []  # сеть недоступна - тихо пусто, не падение
+    assert result.announcements == []  # network unavailable - quietly empty, not a crash
     assert any(u.kind == "panel" for u in result.updates)
-    assert result.checked is True  # хотя бы один реальный запрос всё же ушёл
+    assert result.checked is True  # at least one real request still went out
 
 
 def test_total_network_failure_never_raises(fetcher):
     settings = Settings(check_updates=True, show_announcements=True)
 
-    # Ни на один адрес нет ответа - оба check() упадут в NetworkError.
+    # No address has a response - both check() calls will raise NetworkError.
     result = refresh.daily_refresh(settings=settings, panel_version="0.1.0", fetch=fetcher, entries=[])
 
     assert result.updates == []
     assert result.announcements == []
-    assert result.checked is True  # попытки были - просто ни одна не удалась
+    assert result.checked is True  # attempts were made - none of them just succeeded
 
 
 def test_force_is_passed_through_to_both_checks(fetcher):

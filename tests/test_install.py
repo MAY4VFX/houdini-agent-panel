@@ -1,8 +1,8 @@
-"""Тесты на оркестрацию install/uninstall/doctor.
+"""Tests for install/uninstall/doctor orchestration.
 
-Ни hython, ни pip тут не запускаются по-настоящему — `deps.find_hython`,
-`deps.python_version_of`, `deps.install_deps` подменяются моками, а Houdini на
-диске имитируется фикстурой `_fake_houdini`.
+Neither hython nor pip actually run here — `deps.find_hython`,
+`deps.python_version_of`, `deps.install_deps` are all replaced with mocks, and
+Houdini on disk is simulated by the `_fake_houdini` fixture.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from houdini_agent_panel import paths
 
 @pytest.fixture
 def fake_houdini(tmp_path, monkeypatch):
-    """Одна версия Houdini "20.5" с существующей prefs-директорией."""
+    """A single Houdini "20.5" with an existing prefs directory."""
     monkeypatch.setattr(houdini_package.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(houdini_package.Path, "home", staticmethod(lambda: tmp_path))
     prefs = tmp_path / "Library" / "Preferences" / "houdini" / "20.5"
@@ -48,7 +48,7 @@ def test_install_dry_run_does_not_write_package_json(fake_houdini, monkeypatch):
 
     assert code == 0
     assert not (fake_houdini / "packages" / houdini_package.PACKAGE_NAME).exists()
-    # install_deps тоже должен получить dry_run=True, а не выполниться по-настоящему.
+    # install_deps must also receive dry_run=True instead of actually running.
     assert calls[0][1]["dry_run"] is True
 
 
@@ -71,7 +71,7 @@ def test_install_skip_deps_still_writes_package_json_without_installing(fake_hou
     _stub_hython(monkeypatch)
 
     def explode(*a, **k):
-        raise AssertionError("install_deps не должен звендиться при --skip-deps")
+        raise AssertionError("install_deps must not be called when --skip-deps is set")
 
     monkeypatch.setattr(deps_mod, "install_deps", explode)
 
@@ -108,9 +108,10 @@ def test_install_explicit_houdini_dir_overrides_autodetect(tmp_path, monkeypatch
     _stub_hython(monkeypatch)
     monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: [])
 
-    # explicit dir не выглядит как версия Houdini в имени родителя -> версия
-    # неизвестна, поэтому find_hython позвать нечем: убеждаемся, что пишем
-    # package json и в этом случае, раз каталог передан явно человеком.
+    # An explicit dir doesn't look like a Houdini version in its parent's name,
+    # so the version is unknown and there's nothing to call find_hython with:
+    # make sure we still write the package json in that case, since the
+    # directory was passed explicitly by a human.
     code = install_mod.install(houdini_dir=str(explicit), out=lambda *_: None)
 
     assert code == 0
@@ -123,20 +124,20 @@ def test_install_without_agents_flag_installs_no_agent(fake_houdini, monkeypatch
 
     code = install_mod.install(out=lambda *_: None)
 
-    assert code == 0  # агентов не просили — и ни один модуль агентов не трогается
+    assert code == 0  # no agents were requested, so no agent module is touched
 
 
 def test_install_with_agents_but_agent_modules_missing_reports_clear_error(fake_houdini, monkeypatch):
-    """Не должен зависеть от того, лежит ли registry.py/runtime.py на диске
-    прямо сейчас — подменяем саму точку импорта, а не полагаемся на реальное
-    отсутствие файла (оно нестабильно: параллельная ветка может дописать
-    runtime.py в любой момент, и тест, завязанный на файловую систему, станет
-    ложным)."""
+    """Must not depend on whether registry.py/runtime.py currently exist on
+    disk — we patch the import point itself rather than relying on the real
+    absence of the file (that's unstable: a parallel branch could add
+    runtime.py at any moment, and a test tied to the filesystem would become
+    flaky)."""
     _stub_hython(monkeypatch)
     monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: [])
 
     def explode():
-        raise ImportError("registry/runtime ещё не готовы (симуляция для теста)")
+        raise ImportError("registry/runtime aren't ready yet (simulated for the test)")
 
     monkeypatch.setattr(install_mod, "_load_agent_modules", explode)
     logged = []
@@ -148,10 +149,10 @@ def test_install_with_agents_but_agent_modules_missing_reports_clear_error(fake_
 
 
 def test_install_with_agents_opencode_installs_exactly_one_agent(fake_houdini, monkeypatch, fetcher):
-    """Реальный (не dry-run) путь --agents должен стыковаться с фактическими
-    сигнатурами `registry.fetch_registry(*, force, max_age, fetch)` и
-    `runtime.install_agent(entry, *, progress, fetch)` — а не с тем, что было
-    в архитектурном контракте на момент написания install.py."""
+    """The real (non-dry-run) --agents path must line up with the actual
+    signatures of `registry.fetch_registry(*, force, max_age, fetch)` and
+    `runtime.install_agent(entry, *, progress, fetch)` — not with whatever was
+    in the architecture contract at the time install.py was written."""
     from houdini_agent_panel import registry as registry_mod
 
     _stub_hython(monkeypatch)
@@ -281,7 +282,7 @@ def test_doctor_reports_missing_houdini(tmp_path, monkeypatch):
     code = install_mod.doctor(out=logged.append)
 
     assert code == 0
-    assert any("не найдена" in line.lower() or "не найден" in line.lower() for line in logged)
+    assert any("no houdini found" in line.lower() for line in logged)
 
 
 def test_doctor_reports_hython_and_deps_state(fake_houdini, monkeypatch):
@@ -294,7 +295,7 @@ def test_doctor_reports_hython_and_deps_state(fake_houdini, monkeypatch):
     joined = "\n".join(logged)
     assert "20.5" in joined
     assert "hython" in joined.lower()
-    assert "не поставлены" in joined.lower() or "не готовы" in joined.lower()
+    assert "not installed" in joined.lower()
 
 
 def test_doctor_reports_deps_ready_when_installed(fake_houdini, monkeypatch):
@@ -306,4 +307,4 @@ def test_doctor_reports_deps_ready_when_installed(fake_houdini, monkeypatch):
 
     install_mod.doctor(out=logged.append)
 
-    assert any("готов" in line.lower() for line in logged)
+    assert any("ready" in line.lower() for line in logged)

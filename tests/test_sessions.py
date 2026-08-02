@@ -1,4 +1,4 @@
-"""Тесты `sessions.py` — нужен QApplication (сигналы Qt), но не сеть и не Houdini."""
+"""Tests for `sessions.py` — needs a QApplication (Qt signals), but no network and no Houdini."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from houdini_agent_panel.sessions import SessionPool, SessionState
 
 
 def _state(session_id: str, *, cwd: str = "/tmp/shot") -> SessionState:
-    return SessionState(session_id=session_id, title="Новый разговор", cwd=cwd, created_at=0.0)
+    return SessionState(session_id=session_id, title="New conversation", cwd=cwd, created_at=0.0)
 
 
 def test_add_makes_session_current_by_default(qapp):
@@ -25,7 +25,7 @@ def test_add_emits_added_once_and_changed_on_update(qapp):
     pool.changed.connect(changed.append)
 
     pool.add(_state("s1"))
-    pool.add(_state("s1"))  # тот же id — обновление, не новая сессия
+    pool.add(_state("s1"))  # same id — an update, not a new session
 
     assert added == ["s1"]
     assert changed == ["s1"]
@@ -90,7 +90,7 @@ def test_remove_current_falls_back_to_last_remaining(qapp):
     assert removed == ["s2"]
     assert pool.get("s2") is None
     assert [s.session_id for s in pool.all()] == ["s1", "s3"]
-    # текущей стала последняя оставшаяся сессия
+    # the last remaining session becomes the current one
     assert pool.current().session_id == "s3"
     assert current_changed == ["s3"]
 

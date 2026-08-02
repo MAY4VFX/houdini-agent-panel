@@ -1,14 +1,15 @@
-"""Привязка панели к своей сцене Houdini.
+"""Binding the panel to its own Houdini scene.
 
-Панель живёт внутри процесса Houdini, поэтому порт своего fx-сервера ей не
-надо угадывать сканом — `fxhoudinimcp_server.startup` в этом же процессе
-знает его точно (см. docs/architecture.md §4). HTTP-скан 8100..8115 — только
-запасной путь на случай, если плагин fx не загружен или устарел; он находит
-ЧУЖУЮ Houdini (первую живую в диапазоне), поэтому используется как деградация
-с явным логом, а не молча.
+The panel lives inside the Houdini process, so it doesn't have to guess its
+own fx server's port by scanning — `fxhoudinimcp_server.startup` in that
+same process knows it exactly (see docs/architecture.md §4). The HTTP scan
+over 8100..8115 is only a fallback for when the fx plugin isn't loaded or is
+out of date; it finds SOMEONE ELSE's Houdini (the first live one in the
+range), so it's used as a degradation with an explicit log entry, not
+silently.
 
-`hou` и `fxhoudinimcp_server` импортируются лениво внутри функций: модуль
-обязан импортироваться в тестах вне Houdini.
+`hou` and `fxhoudinimcp_server` are imported lazily inside functions: the
+module must be importable in tests outside Houdini.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ from pathlib import Path
 
 FX_SERVER_NAME = "fxhoudini"
 
-#: Диапазон и таймаут — те же, что использует сам fxhoudinimcp при автоскане
-#: (см. docs/facts/fxhoudinimcp.md §3): база 8100, 16 портов, 1 секунда на порт.
+#: The range and timeout match what fxhoudinimcp itself uses for its
+#: auto-scan (see docs/facts/fxhoudinimcp.md §3): base 8100, 16 ports,
+#: 1 second per port.
 _PORT_SCAN_BASE = 8100
 _PORT_SCAN_COUNT = 16
 _PORT_SCAN_TIMEOUT = 1.0
@@ -34,9 +36,9 @@ _log = logging.getLogger(__name__)
 
 
 def fx_port() -> int | None:
-    """Порт fx-сервера в ЭТОМ процессе Houdini. None — сервер не поднят."""
+    """The fx server's port in THIS Houdini process. None — the server isn't up."""
     try:
-        import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - см. докстринг модуля
+        import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - see the module docstring
     except ImportError:
         return _scan_for_any_fx_port()
 
@@ -50,34 +52,36 @@ def fx_host() -> str:
 
 
 def fx_python() -> str:
-    """Интерпретатор, в котором стоит fxhoudinimcp.
+    """The interpreter fxhoudinimcp is installed in.
 
-    Внутри Houdini `sys.executable` — бинарь самой Houdini, не Python: MCP-
-    сервер таким интерпретатором не поднимется. `HAP_PYTHON` — путь,
-    записанный инсталлятором панели именно для этой цели (см.
-    docs/architecture.md §0).
+    Inside Houdini, `sys.executable` is Houdini's own binary, not Python:
+    the MCP server can't be launched with that interpreter. `HAP_PYTHON` is
+    the path the panel's installer records specifically for this purpose
+    (see docs/architecture.md §0).
     """
     return os.environ.get("HAP_PYTHON") or sys.executable
 
 
 def mcp_servers() -> list[dict]:
-    """Ровно то, что уходит в session/new как mcpServers.
+    """Exactly what goes into session/new as mcpServers.
 
-    Пин порта обязателен: без него MCP-сервер сканирует диапазон и может
-    подключиться к чужой открытой Houdini. `env` — список {name, value}
-    (`McpServerStdio.env: list[EnvVariable]`), не словарь.
+    Pinning the port is mandatory: without it the MCP server scans the
+    range and might connect to someone else's open Houdini. `env` is a list
+    of {name, value} (`McpServerStdio.env: list[EnvVariable]`), not a dict.
     """
     env = [{"name": "HOUDINI_HOST", "value": fx_host()}]
     port = fx_port()
     if port is not None:
         env.append({"name": "HOUDINI_PORT", "value": str(port)})
     else:
-        # Сервер ещё не поднялся в этом процессе — пинить нечего. Без пина
-        # агент сам просканирует диапазон; это тот же риск "чужой Houdini",
-        # но деградация здесь неизбежна, т.к. настоящего порта попросту нет.
+        # The server hasn't come up in this process yet — nothing to pin.
+        # Without a pin the agent will scan the range itself; it's the same
+        # "someone else's Houdini" risk, but the degradation is unavoidable
+        # here since there simply is no real port.
         _log.warning(
-            "fx-сервер не поднят в этом процессе Houdini — mcpServers уйдёт "
-            "без HOUDINI_PORT, агент будет сканировать диапазон сам"
+            "the fx server isn't up in this Houdini process — mcpServers "
+            "will go out without HOUDINI_PORT, the agent will scan the "
+            "range itself"
         )
     return [
         {
@@ -90,12 +94,12 @@ def mcp_servers() -> list[dict]:
 
 
 def hip_dir() -> str:
-    """$HIP. ТОЛЬКО с главного потока.
+    """$HIP. From the main thread ONLY.
 
-    Несохранённая сцена — $HOME, а не несуществующий untitled-путь: cwd в
-    session/new обязан существовать.
+    An unsaved scene resolves to $HOME, not a nonexistent untitled path:
+    the cwd in session/new must exist.
     """
-    import hou  # noqa: PLC0415 - лениво, модуль есть только внутри Houdini
+    import hou  # noqa: PLC0415 - lazy, this module only exists inside Houdini
 
     if hou.hipFile.isNewFile():
         return str(Path.home())
@@ -107,11 +111,12 @@ def hip_dir() -> str:
 
 
 def houdini_version() -> str:
-    """Версия Houdini этого процесса.
+    """This process's Houdini version.
 
-    `HOUDINI_VERSION` — та же переменная окружения, которую сама Houdini
-    экспортирует и которую отдаёт `mcp.health` fx-сервера (см.
-    docs/facts/fxhoudinimcp.md §8) — не нужно ходить в `hou` за тем же самым.
+    `HOUDINI_VERSION` is the same environment variable Houdini exports
+    itself and that the fx server's `mcp.health` returns (see
+    docs/facts/fxhoudinimcp.md §8) — no need to go through `hou` for the
+    same thing.
     """
     version = os.environ.get("HOUDINI_VERSION")
     if version:
@@ -120,7 +125,7 @@ def houdini_version() -> str:
         import hou  # noqa: PLC0415
 
         return ".".join(str(part) for part in hou.applicationVersion())
-    except Exception:  # noqa: BLE001 - версия для диагностики, падать нельзя
+    except Exception:  # noqa: BLE001 - this version is only for diagnostics, must not raise
         return "unknown"
 
 
@@ -129,15 +134,15 @@ def is_fx_available() -> bool:
 
 
 def _scan_for_any_fx_port() -> int | None:
-    """Запасной путь: HTTP-скан `mcp.health` по 8100..8115.
+    """Fallback path: an HTTP scan of `mcp.health` over 8100..8115.
 
-    Логируется как деградация — этот путь по конструкции не может отличить
-    "нашу" Houdini от соседней, работающей на той же машине.
+    Logged as a degradation — by construction, this path can't tell "our"
+    Houdini apart from a neighboring one running on the same machine.
     """
     _log.warning(
-        "fxhoudinimcp_server недоступен изнутри процесса (плагин не "
-        "загружен или устарел) — сканирую %s..%s по HTTP; это может найти "
-        "ЧУЖУЮ Houdini, а не эту",
+        "fxhoudinimcp_server is unreachable from inside the process (the "
+        "plugin isn't loaded or is out of date) — scanning %s..%s over "
+        "HTTP; this may find SOMEONE ELSE's Houdini instead of this one",
         _PORT_SCAN_BASE,
         _PORT_SCAN_BASE + _PORT_SCAN_COUNT - 1,
     )
@@ -148,11 +153,11 @@ def _scan_for_any_fx_port() -> int | None:
 
 
 def _probe_health(port: int) -> bool:
-    """Один запрос `mcp.health` к `http://127.0.0.1:<port>/api`.
+    """A single `mcp.health` request to `http://127.0.0.1:<port>/api`.
 
-    Форма запроса — form-urlencoded `json=["mcp.health", [], {}]`, как того
-    хочет `hwebserver` (docs/facts/fxhoudinimcp.md §3-4). Любая ошибка
-    (порт закрыт, таймаут, не-JSON ответ) — просто "порт не тот".
+    The request shape is form-urlencoded `json=["mcp.health", [], {}]`, as
+    `hwebserver` expects (docs/facts/fxhoudinimcp.md §3-4). Any error
+    (port closed, timeout, non-JSON response) just means "wrong port".
     """
     body = urllib.parse.urlencode({"json": json.dumps(["mcp.health", [], {}])}).encode("ascii")
     request = urllib.request.Request(f"http://{fx_host()}:{port}/api", data=body)

@@ -1,11 +1,13 @@
-"""Где панель хранит свои файлы.
+"""Where the panel stores its files.
 
-Отдельной зависимости на ``platformdirs`` не берём: правило на три ОС короче,
-чем разговор о том, зачем в дереве зависимостей внутри Houdini лишнее колесо.
+We don't take on a separate dependency on ``platformdirs``: the rule for
+three OSes is shorter than the conversation about why there's an extra
+wheel in the dependency tree inside Houdini.
 
-Всё, что здесь возвращается, живёт под одним корнем, и корень переопределяется
-переменной ``HAP_DATA_DIR``. Это же — единственная точка входа для тестов: не
-надо патчить функции, достаточно указать temp-директорию.
+Everything returned here lives under a single root, and that root can be
+overridden by the ``HAP_DATA_DIR`` variable. That's also the only entry
+point tests need: no need to patch functions, just point at a temp
+directory.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "HoudiniAgentPanel"
-#: Имя переменной, которой перекрывается корень данных.
+#: Name of the variable that overrides the data root.
 DATA_DIR_ENV = "HAP_DATA_DIR"
 
 
@@ -34,7 +36,7 @@ def _default_root() -> Path:
 
 
 def data_dir() -> Path:
-    """Корень пользовательских данных панели. Создаётся, если его ещё нет."""
+    """The panel's user data root. Created if it doesn't exist yet."""
     override = os.environ.get(DATA_DIR_ENV)
     root = Path(override).expanduser() if override else _default_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -42,10 +44,11 @@ def data_dir() -> Path:
 
 
 def python_tag(version_info: tuple[int, int] | None = None) -> str:
-    """``py3.11`` — по этому имени разводятся деревья зависимостей.
+    """``py3.11`` — the name used to split up dependency trees.
 
-    Houdini 20.5 несёт Python 3.11, Houdini 22 — 3.13. У ``pydantic_core`` бинарь
-    под конкретный ABI, поэтому одно общее дерево на обе версии невозможно.
+    Houdini 20.5 ships Python 3.11, Houdini 22 ships 3.13. ``pydantic_core``
+    has a binary for a specific ABI, so one shared tree for both versions
+    isn't possible.
     """
     major, minor = version_info or sys.version_info[:2]
     return f"py{major}.{minor}"
@@ -86,10 +89,10 @@ def settings_path() -> Path:
 
 
 def open_in_file_manager(path: Path) -> None:
-    """Показать папку в Finder/Explorer/файловом менеджере.
+    """Show the folder in Finder/Explorer/the file manager.
 
-    Ошибку глушим: кнопка «Открыть» в настройках не повод ронять панель на
-    машине без графического файлового менеджера.
+    Errors are swallowed: the "Open" button in settings is no reason to
+    bring down the panel on a machine without a graphical file manager.
     """
     try:
         if sys.platform == "darwin":

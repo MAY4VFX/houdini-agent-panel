@@ -1,4 +1,4 @@
-"""CLI инсталлятора: ``python -m houdini_agent_panel <команда>``."""
+"""Installer CLI: ``python -m houdini_agent_panel <command>``."""
 
 from __future__ import annotations
 
@@ -20,55 +20,55 @@ def _split_agents(value: str | None) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="houdini_agent_panel",
-        description="Установка и диагностика панели-агента для Houdini.",
+        description="Install and diagnose the agent panel for Houdini.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     install_parser = subparsers.add_parser(
-        "install", help="Поставить панель в найденные на машине Houdini"
+        "install", help="Install the panel into every Houdini install found on this machine"
     )
     install_parser.add_argument(
         "--houdini-dir",
         default=None,
-        help="Явный путь к <prefs>/packages вместо автопоиска по всем версиям на машине",
+        help="Explicit path to <prefs>/packages instead of auto-detecting all versions on the machine",
     )
     install_parser.add_argument(
         "--agents",
         default=None,
-        help="Агенты через запятую, например claude,codex. Без флага не ставится ни один",
+        help="Comma-separated agents, e.g. claude,codex. None are installed without this flag",
     )
     install_parser.add_argument(
         "--find-links",
         default=None,
-        help="Локальная директория с колёсами: искать пакеты сначала там",
+        help="Local directory with wheels: look for packages there first",
     )
     install_parser.add_argument(
         "--offline",
         action="store_true",
-        help="Не ходить на PyPI вообще (нужен --find-links со всеми зависимостями)",
+        help="Never reach out to PyPI (requires --find-links with all dependencies)",
     )
     install_parser.add_argument(
         "--skip-deps",
         action="store_true",
-        help="Не ставить зависимости панели в Houdini-Python, только package json",
+        help="Do not install the panel's dependencies into Houdini's Python, only the package json",
     )
     install_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Только показать план, ничего не менять на диске",
+        help="Only show the plan, don't change anything on disk",
     )
 
-    uninstall_parser = subparsers.add_parser("uninstall", help="Убрать панель из Houdini")
+    uninstall_parser = subparsers.add_parser("uninstall", help="Remove the panel from Houdini")
     uninstall_parser.add_argument("--houdini-dir", default=None)
     uninstall_parser.add_argument(
-        "--purge", action="store_true", help="Также снести папку данных панели целиком"
+        "--purge", action="store_true", help="Also wipe the panel's entire data directory"
     )
     uninstall_parser.add_argument("--dry-run", action="store_true")
 
     subparsers.add_parser(
-        "houdini-package", help="Напечатать package json панели и куда его класть"
+        "houdini-package", help="Print the panel's package json and where to put it"
     )
-    subparsers.add_parser("doctor", help="Проверить, что из установки нашлось на машине")
+    subparsers.add_parser("doctor", help="Check what the installer was able to find on this machine")
 
     return parser
 
@@ -97,15 +97,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "houdini-package":
         target = paths.deps_dir()
         payload = houdini_package.package_json(deps=target, installer_python=sys.executable)
-        print(f"Куда класть: <HOUDINI_USER_PREF_DIR>/packages/{houdini_package.PACKAGE_NAME}")
+        print(f"Where to put it: <HOUDINI_USER_PREF_DIR>/packages/{houdini_package.PACKAGE_NAME}")
         print(payload)
         return 0
 
     if args.command == "doctor":
         return install_mod.doctor()
 
-    parser.error(f"неизвестная команда: {args.command}")
-    return 2  # parser.error сам завершает процесс, эта строка — для тестов на моке
+    parser.error(f"unknown command: {args.command}")
+    return 2  # parser.error terminates the process itself; this line is only for mocked tests
 
 
 if __name__ == "__main__":

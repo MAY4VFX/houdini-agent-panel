@@ -1,11 +1,11 @@
-# `announcements.json` — как редактировать фид
+# `announcements.json` — how to edit the feed
 
-Этот файл забирает каждая установленная панель раз в сутки (кешируется,
-см. `python/houdini_agent_panel/announcements.py`). Правьте его прямо в этом
-репозитории и пушьте в `main` — следующий суточный поход панели за
-обновлениями подхватит изменения сам, ничего разворачивать не нужно.
+Every installed panel fetches this file once a day (cached, see
+`python/houdini_agent_panel/announcements.py`). Edit it directly in this
+repository and push to `main` — the panel's next daily check-in will pick
+up the changes on its own, nothing needs to be deployed.
 
-Формат — вот этот, целиком:
+The format — this, in full:
 
 ```json
 {
@@ -14,10 +14,10 @@
         {
             "id": "2026-08-node-eol",
             "severity": "info",
-            "title": "Портативный Node будет обновлён",
-            "body": "В следующей версии панели поднимется минимальная версия Node до 22 LTS. Ничего делать не нужно — панель обновит его сама при следующей установке агента.",
+            "title": "Portable Node is getting updated",
+            "body": "The next panel version will raise the minimum Node version to 22 LTS. No action needed — the panel will update it on its own the next time an agent is installed.",
             "buttons": [
-                { "label": "Подробнее", "url": "https://github.com/MAY4VFX/houdini-agent-panel/releases" }
+                { "label": "Learn more", "url": "https://github.com/MAY4VFX/houdini-agent-panel/releases" }
             ],
             "panel_versions": "",
             "expires": "2026-09-01T00:00:00Z"
@@ -25,10 +25,10 @@
         {
             "id": "2026-08-critical-fx-bridge",
             "severity": "blocking",
-            "title": "Критическая ошибка в мосте к сцене",
-            "body": "В версиях 0.2.x при определённых сценах панель могла портить несохранённый файл. Обновитесь до 0.3.0 или новее, прежде чем продолжать работу.",
+            "title": "Critical bug in the scene bridge",
+            "body": "In versions 0.2.x, under certain scene conditions the panel could corrupt an unsaved file. Update to 0.3.0 or later before continuing to work.",
             "buttons": [
-                { "label": "Как обновиться", "url": "https://github.com/MAY4VFX/houdini-agent-panel#update" }
+                { "label": "How to update", "url": "https://github.com/MAY4VFX/houdini-agent-panel#update" }
             ],
             "panel_versions": ">=0.2,<0.3",
             "expires": ""
@@ -37,44 +37,46 @@
 }
 ```
 
-## Поля записи
+## Record fields
 
-| Поле | Обязательное | Значение |
+| Field | Required | Meaning |
 |---|---|---|
-| `id` | да | Уникальная строка. По ней панель запоминает "уже показано" (`settings.seen_announcements`) — **никогда не переиспользуйте id** для нового сообщения, иначе те, кто уже видел старое, не увидят новое. |
-| `severity` | нет | `"info"` (тихая плашка, закрывается сама) или `"blocking"` (попап над полем ввода, лента читается, но написать агенту нельзя, пока не нажата кнопка). Не указано или незнакомое значение — считается `"info"`: неизвестная будущая важность не должна случайно заблокировать художнику ввод. |
-| `title` | да | Заголовок. |
-| `body` | нет | Текст под заголовком. |
-| `buttons` | нет | Список `{ "label": "...", "url": "..." }`. Для `blocking` нужна хотя бы одна кнопка — без неё ввод разблокировать нечем. |
-| `panel_versions` | нет | Спецификатор версий панели вида `">=0.2,<0.4"` (условия через запятую, все должны выполниться). Пусто — показывать всем версиям. |
-| `expires` | нет | ISO 8601 (`"2026-09-01T00:00:00Z"`). После этого момента запись не показывается. Пусто или нечитаемая дата — бессрочно. |
+| `id` | yes | A unique string. The panel uses it to remember "already shown" (`settings.seen_announcements`) — **never reuse an id** for a new message, or people who already saw the old one won't see the new one. |
+| `severity` | no | `"info"` (a quiet banner that dismisses itself) or `"blocking"` (a popup over the input field — the feed is still readable, but the artist can't message the agent until the button is pressed). Missing or an unfamiliar value is treated as `"info"`: an unknown future severity level must not accidentally block an artist's input. |
+| `title` | yes | The headline. |
+| `body` | no | Text under the headline. |
+| `buttons` | no | A list of `{ "label": "...", "url": "..." }`. A `blocking` message needs at least one button — without one there's nothing to unblock input with. |
+| `panel_versions` | no | A panel version specifier like `">=0.2,<0.4"` (comma-separated conditions, all must hold). Empty means shown to every version. |
+| `expires` | no | ISO 8601 (`"2026-09-01T00:00:00Z"`). The record stops being shown after this point. Empty or an unreadable date means it never expires. |
 
-## Правила таргетинга
+## Targeting rules
 
-- `panel_versions` сравнивается с версией панели по PEP 440-подобному
-  сравнению из `updates.py` — без диапазонов эпох и локальных версий, только
-  простые числовые релизы с необязательным пре-релизом/`.postN`/`.devN`.
-- Спецификатор с опечаткой (неизвестный оператор, нечитаемая версия) **не
-  показывается никому** — это осознанный выбор: ошибка таргетинга в чужом
-  (для кода) JSON не должна случайно попасть к пользователям, которым не
-  предназначалась.
-- Битая запись целиком (нет `id` или `title`, не тот тип поля) пропускается
-  панелью молча — остальные записи фида при этом не теряются.
+- `panel_versions` is compared against the panel's version using the same
+  PEP 440-like comparison from `updates.py` — no epochs or local versions,
+  just plain numeric releases with an optional pre-release/`.postN`/`.devN`.
+- A specifier with a typo (an unknown operator, an unreadable version) is
+  **shown to nobody** — this is a deliberate choice: a targeting error in
+  JSON that's external to the code shouldn't accidentally reach users it
+  wasn't meant for.
+- A record that's broken as a whole (missing `id` or `title`, a field of
+  the wrong type) is silently skipped by the panel — the rest of the feed's
+  records aren't lost because of it.
 
-## Ограничение, которое стоит понимать
+## A limitation worth understanding
 
-**Факт перехода по ссылке из кнопки проверить нельзя** — фид статический, без
-сервера-получателя кликов. Панель фиксирует только факт нажатия самой
-кнопки в UI (это открывает ссылку в системном браузере), а не то, что
-человек её действительно прочитал. Для `blocking`-сообщений это означает:
-ввод разблокируется по нажатию кнопки, а не по подтверждению прочтения.
+**Whether someone actually clicked a button's link can't be verified** —
+the feed is static, with no server on the receiving end of clicks. The
+panel only records the fact that the button itself was pressed in the UI
+(which opens the link in the system browser), not that the person actually
+read it. For `blocking` messages this means: input unblocks when the
+button is pressed, not when reading is confirmed.
 
-## Что не стоит делать
+## What not to do
 
-- Не убирайте `id` у уже опубликованной записи и не меняйте его — это то же
-  самое, что показать её всем заново.
-- Не полагайтесь на порядок записей — панель не гарантирует, что покажет их
-  в порядке из файла.
-- Houdini не блокируется никогда, даже `blocking`-оповещением — блокируется
-  только поле ввода панели. Если нужно остановить работу человека
-  полностью — это не задача этого фида.
+- Don't remove or change the `id` of an already-published record — that's
+  the same as showing it to everyone again from scratch.
+- Don't rely on record order — the panel doesn't guarantee it will show
+  them in the order they appear in the file.
+- Houdini is never blocked, not even by a `blocking` announcement — only
+  the panel's input field gets blocked. If you need to stop a person's work
+  entirely, that's not what this feed is for.

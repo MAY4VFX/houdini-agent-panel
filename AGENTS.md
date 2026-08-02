@@ -1,52 +1,52 @@
-<!-- hub-kit identity block (добавлен /project-register; не удалять) -->
-# houdini-agent-panel — проект системы may-hub
+<!-- hub-kit identity block (added by /project-register; do not remove) -->
+# houdini-agent-panel — a may-hub system project
 
-Ты — агент роли, указанной в `.dept.md` (симлинк на слой роли в штабе).
-Штаб: MAY4VFX/may-hub (~/Github/may-hub).
+You are the agent for the role named in `.dept.md` (a symlink to the role layer in HQ).
+HQ: MAY4VFX/may-hub (~/Github/may-hub).
 
-**Обязательно перед работой** (если твой раннер не подгрузил это сам):
-1. Прочитай `.dept.md` в корне этого репо — правила твоей активной роли.
-2. `git -C ~/Github/may-hub pull`, затем HQ.md штаба и открытые issues своей роли по
-   этому проекту.
+**Required before starting work** (if your runner hasn't already loaded this):
+1. Read `.dept.md` at this repo's root — the rules for your active role.
+2. `git -C ~/Github/may-hub pull`, then HQ's HQ.md and your role's open issues for
+   this project.
 
-В конце сессии: `/sync` (нет скиллов — вручную: work-record-комментарии в затронутые
-issues, статусы на доске, push).
+At the end of the session: `/sync` (no skills — manually: work-record comments on
+affected issues, board statuses, push).
 
 @./.dept.md
 
-<!-- Всё ниже — local-правила проекта. Они СИЛЬНЕЕ правил роли. Секции ниже маркера
-     НИКОГДА не трогает project-register --update. -->
+<!-- Everything below is local project rules. They OVERRIDE role rules. Sections below
+     this marker are NEVER touched by project-register --update. -->
 <!-- /hub-kit identity block -->
 
-## Деплой (где живёт)
+## Deployment (where it lives)
 
-- Хостинг: не задеплоен (локальная разработка + дистрибуция через PyPI)
-- DNS: нет публичного домена
-- Выкат: `pip install houdini-agent-panel` + `python -m houdini_agent_panel install`
-- Проверка живости: панель открывается в Houdini, `get_houdini_connection_status` у fx отвечает `connected: true`
+- Hosting: not deployed (local development + distribution via PyPI)
+- DNS: no public domain
+- Rollout: `pip install houdini-agent-panel` + `python -m houdini_agent_panel install`
+- Liveness check: the panel opens in Houdini, fx's `get_houdini_connection_status` reports `connected: true`
 
-## Что это
+## What this is
 
-Панель-чат внутри Houdini, дающая художнику ACP-агента (Claude, Codex, Gemini, Grok,
-Kimi, OpenCode) поверх [fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp) —
-189 инструментов работы со сценой.
+A chat panel inside Houdini, giving an artist an ACP agent (Claude, Codex, Gemini, Grok,
+Kimi, OpenCode) on top of [fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp) —
+189 tools for working with the scene.
 
-**Мы не пишем ни агента, ни инструменты для Houdini.** Пишем ACP-клиент и инсталлятор.
+**We don't write the agent or the Houdini tools.** We write the ACP client and installer.
 
-Полный дизайн: [`docs/design.md`](docs/design.md). Читай его целиком перед первой
-задачей — там зафиксированы проверенные факты о протоколе и Houdini, повторно их
-выяснять не нужно.
+Full design: [`docs/design.md`](docs/design.md). Read it in full before your first
+task — it records verified facts about the protocol and Houdini, no need to
+rediscover them.
 
-## Правила проекта
+## Project rules
 
-- **Qt только через `hutil.PySide`** — шим Houdini, отдаёт PySide6 на H22 и PySide2 на
-  20.5. Прямые `import PySide6` запрещены.
-- **`hou` не трогаем из рабочего потока.** Вся работа со сценой идёт через отдельный
-  процесс fx по MCP. В панели `hou` только на главном потоке и только для `$HIP`.
-- **Правило UI: агент не умеет — контрол не рисуется.** Логин, режимы, разрешения,
-  слеш-команды, вложения приходят от агента данными. Ничего не решаем за него и не
-  изобретаем поверх протокола.
-- **Houdini не блокируем никогда.** Даже критическое оповещение блокирует только поле
-  ввода панели.
-- Не дублировать код из `fxhoudinimcp/install.py` — переиспользовать
+- **Qt only through `hutil.PySide`** — Houdini's shim, hands out PySide6 on H22 and PySide2 on
+  20.5. Direct `import PySide6` is forbidden.
+- **We never touch `hou` from the worker thread.** All scene work goes through a separate
+  fx process over MCP. In the panel, `hou` is used only on the main thread and only for `$HIP`.
+- **UI rule: the agent doesn't support it — the control doesn't get drawn.** Login, modes, permissions,
+  slash commands, attachments all arrive as data from the agent. We never decide anything on its
+  behalf and never invent anything on top of the protocol.
+- **Houdini is never blocked.** Even a critical announcement only blocks the panel's
+  input field.
+- Don't duplicate code from `fxhoudinimcp/install.py` — reuse
   `resolve_houdini_dirs`, `desktop_config_path`, `printable_argv`.

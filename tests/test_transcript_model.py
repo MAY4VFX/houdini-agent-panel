@@ -1,4 +1,4 @@
-"""Тесты `transcript_model.py` — чистый Python, никакого QApplication."""
+"""Tests for `transcript_model.py` — plain Python, no QApplication."""
 
 from __future__ import annotations
 
@@ -37,17 +37,17 @@ def _plan_entry(content, priority="medium", status="pending"):
 
 def test_append_user_creates_entry_with_text():
     model = TranscriptModel()
-    entry = model.append_user("привет")
+    entry = model.append_user("hi")
     assert entry.kind == "user"
-    assert entry.text == "привет"
+    assert entry.text == "hi"
     assert model.entries() == [entry]
 
 
 def test_activity_is_inserted_in_chronology_and_finished_in_place():
     model = TranscriptModel()
-    user = model.append_user("вопрос")
+    user = model.append_user("question")
     activity = model.start_activity()
-    answer = model.apply_chunk("m1", "ответ")
+    answer = model.apply_chunk("m1", "answer")
 
     finished = model.finish_activity()
 
@@ -58,26 +58,26 @@ def test_activity_is_inserted_in_chronology_and_finished_in_place():
 
 def test_chunks_with_same_message_id_are_merged():
     model = TranscriptModel()
-    first = model.apply_chunk("m1", "Привет")
-    second = model.apply_chunk("m1", ", мир")
+    first = model.apply_chunk("m1", "Hello")
+    second = model.apply_chunk("m1", ", world")
 
     assert first is second
-    assert first.text == "Привет, мир"
+    assert first.text == "Hello, world"
     assert model.entries() == [first]
 
 
 def test_chunks_with_different_message_id_are_separate_entries():
     model = TranscriptModel()
-    model.apply_chunk("m1", "первое")
-    model.apply_chunk("m2", "второе")
+    model.apply_chunk("m1", "first")
+    model.apply_chunk("m2", "second")
 
-    assert [e.text for e in model.entries()] == ["первое", "второе"]
+    assert [e.text for e in model.entries()] == ["first", "second"]
 
 
 def test_thought_chunk_is_a_separate_kind_from_agent_chunk():
     model = TranscriptModel()
-    thought = model.apply_chunk("m1", "думаю", thought=True)
-    agent = model.apply_chunk("m1", "говорю", thought=False)
+    thought = model.apply_chunk("m1", "thinking", thought=True)
+    agent = model.apply_chunk("m1", "speaking", thought=False)
 
     assert thought.kind == "thought"
     assert agent.kind == "agent"
@@ -115,7 +115,7 @@ def test_apply_tool_update_patches_only_provided_fields():
     entry = model.apply_tool_update(_tool_update(status="in_progress"))
 
     assert entry.tool.status == "in_progress"
-    assert entry.tool.title == "Read scene.py"  # не тронуто
+    assert entry.tool.title == "Read scene.py"  # left untouched
 
 
 def test_apply_tool_update_replaces_content_wholesale():
@@ -140,20 +140,20 @@ def test_apply_tool_update_for_unknown_id_returns_none():
 
 def test_apply_plan_creates_single_entry():
     model = TranscriptModel()
-    entry = model.apply_plan([_plan_entry("шаг 1"), _plan_entry("шаг 2")])
+    entry = model.apply_plan([_plan_entry("step 1"), _plan_entry("step 2")])
 
     assert entry.kind == "plan"
-    assert [p.content for p in entry.plan] == ["шаг 1", "шаг 2"]
+    assert [p.content for p in entry.plan] == ["step 1", "step 2"]
     assert model.entries() == [entry]
 
 
 def test_apply_plan_replaces_whole_list_and_reuses_entry():
     model = TranscriptModel()
-    first = model.apply_plan([_plan_entry("шаг 1")])
-    second = model.apply_plan([_plan_entry("шаг 1", status="completed"), _plan_entry("шаг 2")])
+    first = model.apply_plan([_plan_entry("step 1")])
+    second = model.apply_plan([_plan_entry("step 1", status="completed"), _plan_entry("step 2")])
 
     assert first is second
-    assert len(model.entries()) == 1  # не задублировалось
+    assert len(model.entries()) == 1  # didn't get duplicated
     assert [p.status for p in second.plan] == ["completed", "pending"]
 
 
@@ -192,6 +192,6 @@ def test_resolve_permission_unknown_key_returns_none():
 
 def test_append_error_creates_entry():
     model = TranscriptModel()
-    entry = model.append_error("что-то пошло не так")
+    entry = model.append_error("something went wrong")
     assert entry.kind == "error"
-    assert entry.text == "что-то пошло не так"
+    assert entry.text == "something went wrong"

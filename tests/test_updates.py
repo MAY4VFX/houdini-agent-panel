@@ -7,7 +7,7 @@ from houdini_agent_panel.registry import AgentEntry
 from houdini_agent_panel.settings import InstalledAgent, Settings
 
 
-# --- is_newer / сравнение версий ----------------------------------------
+# --- is_newer / version comparison ----------------------------------------
 
 
 def test_is_newer_basic():
@@ -35,7 +35,7 @@ def test_is_newer_prerelease_order():
 
 
 def test_is_newer_dev_before_prerelease():
-    # dev-релиз без пре-релиза и без post — раньше вообще любого пре-релиза.
+    # a dev release with no pre-release and no post comes before any pre-release at all.
     assert updates.is_newer("1.0.0a1", "1.0.0.dev1") is True
 
 
@@ -56,7 +56,7 @@ def test_compare_versions_none_on_garbage():
     assert updates.compare_versions("1.0.0", "2.0.0") == -1
 
 
-# --- check(): тумблер -----------------------------------------------------
+# --- check(): the toggle -----------------------------------------------------
 
 
 def test_check_disabled_makes_no_network_call(fetcher):
@@ -66,7 +66,7 @@ def test_check_disabled_makes_no_network_call(fetcher):
     assert fetcher.calls == []
 
 
-# --- check(): агенты -------------------------------------------------------
+# --- check(): agents -------------------------------------------------------
 
 
 def test_check_detects_agent_update(fetcher):
@@ -102,7 +102,7 @@ def test_check_skips_not_installed_agent(fetcher):
     assert [u for u in result if u.kind == "agent"] == []
 
 
-# --- check(): панель/fx через PyPI ----------------------------------------
+# --- check(): panel/fx via PyPI ----------------------------------------
 
 
 def test_check_detects_panel_update(fetcher):
@@ -120,11 +120,11 @@ def test_check_detects_panel_update(fetcher):
     assert len(panel_updates) == 1
     assert panel_updates[0].latest == "9.9.9"
     assert panel_updates[0].current == "0.1.0"
-    assert [u for u in result if u.kind == "fx"] == []  # fx уже последней версии
+    assert [u for u in result if u.kind == "fx"] == []  # fx is already on the latest version
 
 
 def test_check_pypi_failure_for_one_package_does_not_hide_the_other(fetcher):
-    # Ответа на houdini-agent-panel нет вовсе - FakeFetcher бросит NetworkError.
+    # There's no response registered for houdini-agent-panel at all - FakeFetcher will raise NetworkError.
     fetcher.add_json(updates.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "9.9.9"}})
     settings = Settings(check_updates=True)
 
@@ -138,7 +138,7 @@ def test_check_pypi_failure_for_one_package_does_not_hide_the_other(fetcher):
     assert fx_updates[0].latest == "9.9.9"
 
 
-# --- check(): кеш на сутки --------------------------------------------------
+# --- check(): the once-a-day cache --------------------------------------------------
 
 
 def test_check_uses_cache_within_a_day(fetcher):
@@ -165,7 +165,7 @@ def test_check_uses_cache_within_a_day(fetcher):
     )
 
     assert second == first
-    assert len(fetcher.calls) == calls_after_first  # ни одного нового запроса
+    assert len(fetcher.calls) == calls_after_first  # not a single new request
 
 
 def test_check_force_bypasses_cache(fetcher):

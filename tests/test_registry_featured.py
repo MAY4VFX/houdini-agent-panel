@@ -1,9 +1,10 @@
-"""Панель предлагает шестёрку из дизайна, а не весь реестр.
+"""The panel offers the design's six, not the whole registry.
 
-Регрессия: `FEATURED_AGENT_IDS` существовал с самого начала, но никто им не
-фильтровал — экран «Агенты» получал весь реестр целиком и показывал художнику
-под сорок записей вроде Cursor, Devin и Cline, которых в дизайне нет. Поймано
-не тестами, а взглядом на живую панель в Houdini.
+Regression: `FEATURED_AGENT_IDS` had existed from the start, but nothing
+filtered by it — the "Agents" screen got the entire registry and showed the
+artist close to forty entries like Cursor, Devin, and Cline, which aren't in
+the design. Caught not by tests, but by looking at the live panel in
+Houdini.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ def test_featured_keeps_only_the_designed_six():
 
 
 def test_featured_uses_the_declared_order_not_the_registry_order():
-    """Реестр отсортирован по идентификатору, и для человека этот порядок не
-    значит ничего — показывать надо в том порядке, что задан в дизайне."""
+    """The registry is sorted by id, and that order means nothing to a
+    human — it should be shown in the order the design specifies."""
     shuffled = [_entry(i) for i in ("opencode", "gemini", "claude-acp", "kimi")]
 
     chosen = registry.featured(shuffled)
@@ -40,8 +41,9 @@ def test_featured_uses_the_declared_order_not_the_registry_order():
 
 
 def test_featured_survives_an_agent_missing_from_the_registry():
-    """Агента переименовали или убрали из реестра — панель просто его не
-    показывает, а не рисует пустую строку с именем, которое ей неоткуда взять."""
+    """An agent got renamed or removed from the registry — the panel just
+    doesn't show it, instead of drawing a blank row with a name it has
+    nowhere to get."""
     chosen = registry.featured([_entry("opencode")])
 
     assert [e.id for e in chosen] == ["opencode"]

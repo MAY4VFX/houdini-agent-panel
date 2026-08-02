@@ -1,4 +1,4 @@
-"""Сетевой слой: TLS и учёт вызовов."""
+"""The network layer: TLS and call tracking."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from houdini_agent_panel import network
 
 
 def test_ssl_context_prefers_certifi_bundle(monkeypatch):
-    """Внутри Houdini системной связки корневых сертификатов нет, и HTTPS без
-    явного bundle падает на CERTIFICATE_VERIFY_FAILED. Проверяем, что контекст
-    строится именно из certifi, а не из системного умолчания."""
+    """Inside Houdini there's no system root CA bundle, and HTTPS without an
+    explicit bundle fails with CERTIFICATE_VERIFY_FAILED. Check that the
+    context is built from certifi, not from the system default."""
     monkeypatch.setattr(network, "_ssl_context", None)
     monkeypatch.delenv(network.CA_BUNDLE_ENV, raising=False)
 
@@ -30,8 +30,8 @@ def test_ssl_context_prefers_certifi_bundle(monkeypatch):
 
 
 def test_ca_bundle_env_wins(monkeypatch, tmp_path):
-    """Студия с перехватывающим прокси подсовывает свою связку — она должна
-    побеждать certifi, иначе панель там просто не выйдет в сеть."""
+    """A studio with an intercepting proxy supplies its own bundle — it must
+    win over certifi, otherwise the panel simply can't reach the network there."""
     monkeypatch.setattr(network, "_ssl_context", None)
     bundle = tmp_path / "corporate.pem"
     bundle.write_text("")

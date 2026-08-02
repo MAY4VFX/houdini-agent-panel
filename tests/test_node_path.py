@@ -1,8 +1,8 @@
-"""PATH для npx-агента.
+"""PATH for the npx agent.
 
-Отдельным файлом, потому что это регрессия, найденная только живым запуском:
-все юнит-тесты на npx были зелёными, а агент на машине без Node умирал до
-первого байта.
+Kept as a separate file because this is a regression that was only found by
+a live run: every npx unit test was green, but the agent on a machine
+without Node died before its first byte.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def test_path_with_node_puts_our_node_first():
 
 
 def test_path_with_node_does_not_duplicate_itself():
-    """Повторный запуск агента не должен наращивать PATH до бесконечности."""
+    """Restarting the agent shouldn't make PATH grow forever."""
     once = node.path_with_node(Path("/data/node/bin/node"), "/usr/bin")
     twice = node.path_with_node(Path("/data/node/bin/node"), once)
 
@@ -29,8 +29,8 @@ def test_path_with_node_does_not_duplicate_itself():
 
 
 def test_path_with_node_keeps_existing_tools():
-    """Агенту могут понадобиться git и прочее с машины — PATH дополняем,
-    а не подменяем."""
+    """The agent might need git and other tools from the machine — we
+    extend PATH, not replace it."""
     result = node.path_with_node(Path("/data/node/bin/node"), "/opt/homebrew/bin:/usr/bin")
 
     assert "/opt/homebrew/bin" in result.split(os.pathsep)

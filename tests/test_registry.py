@@ -1,4 +1,4 @@
-"""Тесты реестра ACP: разбор чужого JSON, выбор платформы, кеш."""
+"""Tests for the ACP registry: parsing someone else's JSON, platform selection, caching."""
 
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ def test_parse_registry_returns_featured_six_by_real_ids():
 
 def test_parse_registry_skips_broken_entry_without_losing_others():
     entries = registry.parse_registry(_sample_payload())
-    # "id": 12345 (не строка) — запись должна быть пропущена молча.
+    # "id": 12345 (not a string) — the entry should be silently skipped.
     assert all(isinstance(e.id, str) for e in entries)
-    # но остальные восемь агентов из фикстуры обязаны разобраться.
+    # but the other eight agents in the fixture must still come through.
     ids = {e.id for e in entries}
     assert ids == {
         "claude-acp",
@@ -86,7 +86,7 @@ def test_parse_binary_distribution_opencode_has_all_five_contract_keys():
     ):
         dist = opencode.binaries[key]
         assert dist.archive.startswith("https://")
-        assert dist.sha256  # opencode несёт sha256 везде
+        assert dist.sha256  # opencode carries sha256 for every platform
 
 
 def test_parse_binary_distribution_missing_sha256_defaults_to_empty_string():
@@ -105,7 +105,7 @@ def test_kimi_has_no_darwin_x86_64_build():
     kimi = entries["kimi"]
     assert kimi.distribution_for("darwin-x86_64") is None
     reason = kimi.unavailable_reason("darwin-x86_64")
-    assert reason  # непустая причина обязана быть, а не тихий None
+    assert reason  # there must be a non-empty reason, not a silent None
     assert "darwin-x86_64" in reason
 
 
@@ -120,7 +120,7 @@ def test_kimi_has_darwin_aarch64_build():
 def test_npx_distribution_for_ignores_platform_key():
     entries = _by_id(registry.parse_registry(_sample_payload()))
     claude = entries["claude-acp"]
-    # npx-агент ставится вне зависимости от платформы — Node сам разводит архитектуры.
+    # an npx agent installs regardless of platform — Node sorts out the architecture itself.
     assert claude.distribution_for("windows-x86_64") is claude.npx
     assert claude.unavailable_reason("windows-x86_64") == ""
 
@@ -128,7 +128,7 @@ def test_npx_distribution_for_ignores_platform_key():
 def test_unavailable_reason_for_agent_without_any_distribution():
     entry = registry.AgentEntry(id="x", name="X", version="1.0.0")
     assert entry.distribution_for("darwin-aarch64") is None
-    assert "нет способа установки" in entry.unavailable_reason("darwin-aarch64")
+    assert "no installation method" in entry.unavailable_reason("darwin-aarch64")
 
 
 # --- platform_key ------------------------------------------------------------
@@ -157,7 +157,7 @@ def test_platform_key_unknown_system_raises(monkeypatch):
         registry.platform_key()
 
 
-# --- fetch_registry: кеш и сеть ----------------------------------------------
+# --- fetch_registry: cache and network ----------------------------------------
 
 
 def test_fetch_registry_uses_fetcher_and_writes_cache(fetcher):
@@ -177,7 +177,7 @@ def test_fetch_registry_fresh_cache_skips_network(fetcher):
     registry.fetch_registry(fetch=fetcher)
     assert len(fetcher.calls) == 1
 
-    # второй вызов в пределах max_age не должен снова стучаться в сеть.
+    # a second call within max_age must not hit the network again.
     entries = registry.fetch_registry(fetch=fetcher, max_age=86400.0)
     assert len(fetcher.calls) == 1
     assert len(entries) == 8
@@ -196,7 +196,7 @@ def test_fetch_registry_offline_with_any_age_cache_returns_stale(fetcher):
     fetcher.add_json(registry.REGISTRY_URL, _sample_payload())
     registry.fetch_registry(fetch=fetcher)
 
-    # состариваем кеш искусственно, чтобы max_age точно не считал его свежим.
+    # artificially age the cache, so max_age definitely won't consider it fresh.
     cache_path = paths.cache_dir() / "registry.json"
     wrapper = json.loads(cache_path.read_text("utf-8"))
     wrapper["fetched_at"] -= 10 * 86400.0
@@ -210,19 +210,19 @@ def test_fetch_registry_offline_with_any_age_cache_returns_stale(fetcher):
 
         def __call__(self, url, *, timeout=30.0):
             self.calls.append(url)
-            raise NetworkError("нет сети")
+            raise NetworkError("no network")
 
     offline = OfflineFetcher()
     entries = registry.fetch_registry(fetch=offline, max_age=1.0)
     assert len(entries) == 8
-    assert offline.calls == [registry.REGISTRY_URL]  # сеть реально пробовали
+    assert offline.calls == [registry.REGISTRY_URL]  # the network was actually tried
 
 
 def test_fetch_registry_no_cache_no_network_raises(fetcher):
     from houdini_agent_panel.network import NetworkError
 
     def always_fails(url, *, timeout=30.0):
-        raise NetworkError("нет сети")
+        raise NetworkError("no network")
 
     with pytest.raises(registry.RegistryError):
         registry.fetch_registry(fetch=always_fails)

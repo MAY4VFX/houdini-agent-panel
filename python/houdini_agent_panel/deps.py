@@ -1,9 +1,9 @@
-"""Установка зависимостей панели в собственный Python самой Houdini.
+"""Installing the panel's dependencies into Houdini's own Python.
 
-Houdini 20.5 несёт Python 3.11, Houdini 22 — 3.13, и у каждого свой ABI для
-`pydantic_core` (см. architecture.md §0) — поэтому зависимости ставятся не в
-Python инсталлятора, а через `hython -m pip install --target` в дерево,
-привязанное к версии Python конкретной Houdini.
+Houdini 20.5 ships Python 3.11, Houdini 22 ships 3.13, and each has its own
+ABI for `pydantic_core` (see architecture.md §0) — so dependencies aren't
+installed into the installer's own Python, but via `hython -m pip install
+--target` into a tree bound to that particular Houdini's Python version.
 """
 
 from __future__ import annotations
@@ -17,20 +17,21 @@ from typing import Sequence
 
 from fxhoudinimcp.install import printable_argv
 
-#: Таймаут на разовый запуск hython — только напечатать версию Python.
+#: Timeout for a one-off hython run — just printing the Python version.
 _VERSION_TIMEOUT = 30.0
-#: Таймаут на pip install — колёса с бинарными расширениями бывают тяжёлыми.
+#: Timeout for pip install — wheels with binary extensions can be heavy.
 _INSTALL_TIMEOUT = 600.0
 
-#: Корни поиска, вынесены в переменные модуля ради тестируемости: юнит-тесты
-#: подменяют их на директории в tmp_path вместо реальных `/Applications` и т.п.
+#: Search roots, pulled out into module-level variables for testability:
+#: unit tests replace them with directories under tmp_path instead of the
+#: real `/Applications` etc.
 _MAC_APPLICATIONS_ROOT = Path("/Applications/Houdini")
 _LINUX_OPT_ROOT = Path("/opt")
 _WINDOWS_PROGRAM_FILES = Path("C:/Program Files/Side Effects Software")
 
 
 class DepsError(RuntimeError):
-    """hython не запустился, не поставил зависимости или отдал непонятный вывод."""
+    """hython failed to start, failed to install dependencies, or produced unreadable output."""
 
 
 def _system() -> str:
@@ -42,11 +43,11 @@ def _system() -> str:
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
-    """Ключ сортировки по номеру сборки Houdini, зашитому в путь.
+    """Sort key based on the Houdini build number embedded in the path.
 
-    "Houdini20.5.589" должен обыграть "Houdini20.5.445" — сравниваем как
-    кортеж чисел, а не как строку (иначе "589" < "445" лексикографически ни при
-    чём, но "20.5.9" < "20.5.10" сломалось бы).
+    "Houdini20.5.589" must beat "Houdini20.5.445" — we compare as a tuple of
+    numbers, not as a string (otherwise "589" < "445" lexicographically
+    would matter for nothing, but "20.5.9" < "20.5.10" would break).
     """
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", path.as_posix())
     if not match:
@@ -55,21 +56,22 @@ def _version_key(path: Path) -> tuple[int, ...]:
 
 
 def _hfs_hython(hfs: Path) -> Path:
-    # Через _system(), а не напрямую os.name/sys.platform — так тесты могут
-    # подменить одну функцию, не трогая os.name глобально (pathlib сам
-    # смотрит на os.name, чтобы решить WindowsPath или PosixPath строить, и
-    # его подмена на чужой ОС ломает создание Path прямо в тесте).
+    # Through _system(), not os.name/sys.platform directly — this way tests
+    # can patch a single function without touching os.name globally
+    # (pathlib itself looks at os.name to decide whether to build a
+    # WindowsPath or PosixPath, and patching it on a different OS breaks
+    # Path construction right there in the test).
     name = "hython.exe" if _system() == "windows" else "hython"
     return hfs / "bin" / name
 
 
 def find_hython(houdini_version: str) -> Path | None:
-    """Найти `hython` нужной версии Houdini (например "20.5").
+    """Find `hython` for a given Houdini version (e.g. "20.5").
 
-    `$HFS` уважается в первую очередь: если художник (или Houdini, из-под
-    которой запущен сам инсталлятор) уже указал каталог установки явно, ему
-    доверяем больше, чем угадыванию по стандартным путям. Если кандидатов
-    несколько — берём самый свежий билд.
+    `$HFS` is honored first: if the artist (or the Houdini the installer
+    itself is running under) has already pointed at an install directory
+    explicitly, we trust that more than guessing from standard paths. If
+    there are several candidates, we take the newest build.
     """
     hfs = os.environ.get("HFS")
     if hfs:
@@ -105,20 +107,20 @@ def _candidate_hythons(houdini_version: str) -> list[Path]:
 
 
 def python_version_of(hython: Path, *, timeout: float = _VERSION_TIMEOUT) -> tuple[int, int] | None:
-    """Версия Python внутри `hython`, например (3, 11).
+    """The Python version inside `hython`, e.g. (3, 11).
 
-    hython печатает в stderr предупреждение про setuptools при каждом старте —
-    это не ошибка, поэтому смотрим только на stdout.
+    hython prints a setuptools warning to stderr on every startup — that's
+    not an error, so we only look at stdout.
     """
     argv = [str(hython), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise DepsError(f"не удалось запустить {hython}: {exc}") from exc
+        raise DepsError(f"failed to run {hython}: {exc}") from exc
 
     if result.returncode != 0:
         raise DepsError(
-            f"{hython} завершился с кодом {result.returncode}: {result.stderr.strip()}"
+            f"{hython} exited with code {result.returncode}: {result.stderr.strip()}"
         )
 
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -142,15 +144,16 @@ def install_deps(
 ) -> list[str]:
     """`hython -m pip install --upgrade --target <target> <requirement>`.
 
-    `--upgrade`, потому что повторная установка новой версии панели поверх
-    старого дерева deps — обычный сценарий (обновление панели), а не разовая
-    установка.
+    `--upgrade`, because reinstalling a new panel version over an existing
+    deps tree is the normal scenario (updating the panel), not a one-time
+    install.
 
-    `find_links` и `offline` разведены сознательно, хотя изначально это был
-    один флаг. «Возьми колесо панели из этой папки» и «не ходи в интернет
-    вообще» — разные намерения, и склеивание их ломало главный сценарий
-    разработки: собрал колесо локально, ставишь его, а зависимости (`acp`,
-    `pydantic`) взять неоткуда, потому что `--no-index` закрыл и их тоже.
+    `find_links` and `offline` are deliberately kept separate, even though
+    they started out as a single flag. "Take the panel's wheel from this
+    folder" and "don't touch the internet at all" are different intents,
+    and merging them broke the main development scenario: you build a wheel
+    locally and install it, but there's nowhere to get its dependencies
+    (`acp`, `pydantic`) from, because `--no-index` shut those off too.
     """
     argv: list[str] = [
         str(hython), "-m", "pip", "install", "--upgrade", "--target", str(target), requirement,
@@ -165,11 +168,11 @@ def install_deps(
         return []
 
     target.mkdir(parents=True, exist_ok=True)
-    out(f"Ставлю зависимости: {printable_argv(argv)}")
+    out(f"Installing dependencies: {printable_argv(argv)}")
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise DepsError(f"pip install не запустился: {exc}") from exc
+        raise DepsError(f"pip install failed to start: {exc}") from exc
 
     lines = [line for line in result.stdout.splitlines() if line]
     for line in lines:
@@ -178,18 +181,18 @@ def install_deps(
     if result.returncode != 0:
         for line in result.stderr.splitlines():
             out(line)
-        raise DepsError(f"pip install завершился с кодом {result.returncode}")
+        raise DepsError(f"pip install exited with code {result.returncode}")
 
     return lines
 
 
 def deps_ready(target: Path) -> bool:
-    """Похоже ли дерево `target` на уже поставленные зависимости панели.
+    """Does the `target` tree look like the panel's dependencies are already installed?
 
-    Проверяем два маркера: `acp` (ACP SDK, `agent-client-protocol`) и сам
-    `houdini_agent_panel` — оба обязаны появиться после успешного `pip
-    install --target`, и их отсутствие — надёжный признак прерванной
-    установки.
+    We check for two markers: `acp` (the ACP SDK, `agent-client-protocol`)
+    and `houdini_agent_panel` itself — both must appear after a successful
+    `pip install --target`, and their absence is a reliable sign of an
+    interrupted install.
     """
     return (target / "acp").is_dir() and (target / "houdini_agent_panel").is_dir()
 

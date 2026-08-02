@@ -1,21 +1,21 @@
-"""Настоящий минимальный ACP-агент для тестов `AcpClient`.
+"""A real, minimal ACP agent for `AcpClient` tests.
 
-Единственный честный способ проверить протокольный слой панели — говорить с
-настоящим `acp.run_agent`, а не с макетом: JSON-RPC сериализация, дискриминаторы
-pydantic, порядок сообщений — всё это легко сломать заглушкой незаметно для
-себя. Поэтому этот файл запускается отдельным процессом
-(`sys.executable tests/fake_agent.py`), как обычный ACP-агент через stdio.
+The only honest way to test the panel's protocol layer is to talk to a real
+`acp.run_agent`, not a mock: JSON-RPC serialization, pydantic discriminators,
+message ordering — all of that is easy to break with a stub without
+noticing. So this file runs as a separate process
+(`sys.executable tests/fake_agent.py`), like a regular ACP agent over stdio.
 
-Поведение выбирается переменной окружения ``FAKE_AGENT_SCENARIO``:
+Behavior is selected via the ``FAKE_AGENT_SCENARIO`` environment variable:
 
-- ``stream`` (по умолчанию) — обычный стриминг ответа несколькими чанками.
-- ``auth`` — `prompt` кидает `auth_required`, пока не позвали `authenticate`;
-  умеет и `logout` — проверяет цикл «требует вход → вошли → вышли → снова
-  требует вход» (issue #6).
-- ``permission`` — просит разрешение перед ответом, эхает выбранную опцию.
-- ``modes`` — предлагает `availableModes`/`currentModeId`, слушает `set_session_mode`.
-- ``plan`` — шлёт план и `tool_call`/`tool_call_update` перед ответом.
-- ``slow`` — висит в `prompt`, пока не придёт `session/cancel` (для теста отмены).
+- ``stream`` (default) — a normal multi-chunk streamed reply.
+- ``auth`` — `prompt` raises `auth_required` until `authenticate` is called;
+  also supports `logout` — verifies the "login required -> logged in ->
+  logged out -> login required again" cycle (issue #6).
+- ``permission`` — asks for permission before replying, echoes the chosen option.
+- ``modes`` — offers `availableModes`/`currentModeId`, listens for `set_session_mode`.
+- ``plan`` — sends a plan and `tool_call`/`tool_call_update` before replying.
+- ``slow`` — hangs in `prompt` until a `session/cancel` arrives (for the cancel test).
 """
 
 from __future__ import annotations
@@ -64,15 +64,15 @@ def _thought_chunk(text: str, message_id: str) -> AgentThoughtChunk:
 
 
 def _split(text: str, parts: int) -> list[str]:
-    size = max(1, -(-len(text) // parts))  # ceil-деление, чтобы не терять хвост
+    size = max(1, -(-len(text) // parts))  # ceiling division, so we don't lose the tail
     return [text[i : i + size] for i in range(0, len(text), size)] or [text]
 
 
 class FakeAgent:
-    """Реализует `acp.interfaces.Agent` через duck-typing (протокол, не ABC)."""
+    """Implements `acp.interfaces.Agent` via duck typing (a protocol, not an ABC)."""
 
     def __init__(self) -> None:
-        self._client = None  # заполняется в on_connect настоящим Client-прокси
+        self._client = None  # filled in on_connect with the real Client proxy
         self._authenticated = SCENARIO != "auth"
         self._sessions: dict[str, str | None] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -91,12 +91,13 @@ class FakeAgent:
         if SCENARIO == "auth":
             auth_methods = [
                 AuthMethodAgent(
-                    id=_AUTH_METHOD_ID, name="API Key", description="тестовый метод входа"
+                    id=_AUTH_METHOD_ID, name="API Key", description="test login method"
                 )
             ]
-            # LogoutCapabilities() — пустой, но не None объект: именно так
-            # агент объявляет "умею logout" (см. client.py::_agent_info_from
-            # и docs/architecture.md §6 — None здесь означало бы "не умею").
+            # LogoutCapabilities() is an empty but non-None object: that's
+            # exactly how an agent declares "I support logout" (see
+            # client.py::_agent_info_from and docs/architecture.md §6 —
+            # None here would mean "I don't support it").
             auth_caps = AgentAuthCapabilities(logout=LogoutCapabilities())
         prompt_caps = PromptCapabilities(image=True, audio=False, embedded_context=True)
         return acp.InitializeResponse(
@@ -114,8 +115,8 @@ class FakeAgent:
         return None
 
     async def logout(self, **kwargs) -> None:
-        """Агент логически возвращается в состояние "требует вход" — ровно
-        то, что `AcpClient.do_logout` и ожидает после успешного вызова."""
+        """The agent logically returns to the "login required" state — exactly
+        what `AcpClient.do_logout` expects after a successful call."""
         self._authenticated = False
 
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
@@ -160,12 +161,12 @@ class FakeAgent:
         }.get(SCENARIO, self._prompt_stream)
         return await handler(session_id, text)
 
-    # --- сценарии --------------------------------------------------------
+    # --- scenarios --------------------------------------------------------
 
     async def _prompt_stream(self, session_id: str, text: str):
-        reply = f"эхо: {text}" if text else "привет"
+        reply = f"echo: {text}" if text else "hi there"
         await self._client.session_update(
-            session_id=session_id, update=_thought_chunk("думаю...", "t1")
+            session_id=session_id, update=_thought_chunk("thinking...", "t1")
         )
         for chunk in _split(reply, 3):
             update = _message_chunk(chunk, "m1")
@@ -184,25 +185,25 @@ class FakeAgent:
         )
         outcome = response.outcome
         if getattr(outcome, "outcome", None) == "selected":
-            reply = f"разрешение: {outcome.option_id}"
+            reply = f"permission: {outcome.option_id}"
         else:
-            reply = "разрешение: отменено"
+            reply = "permission: cancelled"
         await self._client.session_update(session_id=session_id, update=_message_chunk(reply, "m1"))
         return acp.PromptResponse(stop_reason="end_turn")
 
     async def _prompt_plan(self, session_id: str, text: str):
         await self._client.session_update(
             session_id=session_id,
-            update=update_plan([plan_entry("шаг 1", status="in_progress"), plan_entry("шаг 2")]),
+            update=update_plan([plan_entry("step 1", status="in_progress"), plan_entry("step 2")]),
         )
         await self._client.session_update(
             session_id=session_id,
-            update=start_tool_call("tc1", "Читаю scene.py", kind="read", status="in_progress"),
+            update=start_tool_call("tc1", "Reading scene.py", kind="read", status="in_progress"),
         )
         await asyncio.sleep(0)
         tool_update = update_tool_call("tc1", status="completed")
         await self._client.session_update(session_id=session_id, update=tool_update)
-        done = _message_chunk("готово", "m1")
+        done = _message_chunk("done", "m1")
         await self._client.session_update(session_id=session_id, update=done)
         return acp.PromptResponse(stop_reason="end_turn")
 
@@ -219,17 +220,18 @@ class FakeAgent:
 
 
 async def _main() -> None:
-    # Обычно тут было бы просто `await acp.run_agent(FakeAgent())`. Но
-    # agent-client-protocol 0.12.0 объявляет AGENT_METHODS["logout"] и схему
-    # LogoutRequest/LogoutResponse, а маршрут для "logout" в
-    # build_agent_router() (используется и `run_agent`, и `AgentSideConnection`
-    # изнутри) не регистрирует вовсе — проверено чтением
-    # acp/agent/router.py: там построчно route_request на каждый метод, и
-    # "logout" среди них просто нет. Значит ЛЮБОЙ агент на этой версии SDK
-    # получил бы method_not_found на настоящий логаут, что бы он сам ни
-    # реализовывал. Поэтому здесь разворачиваем `run_agent` вручную (это его
-    # ровно тот же код) и дозаписываем недостающий маршрут публичным методом
-    # роутера, чтобы сценарий "auth" мог по-честному проверить логаут.
+    # Normally this would just be `await acp.run_agent(FakeAgent())`. But
+    # agent-client-protocol 0.12.0 declares AGENT_METHODS["logout"] and the
+    # LogoutRequest/LogoutResponse schema, yet the route for "logout" in
+    # build_agent_router() (used internally by both `run_agent` and
+    # `AgentSideConnection`) isn't registered at all — verified by reading
+    # acp/agent/router.py: it's route_request calls for every method,
+    # line by line, and "logout" simply isn't among them. That means ANY
+    # agent on this SDK version would get method_not_found on a real
+    # logout, no matter what it implements itself. So here we unroll
+    # `run_agent` by hand (this is exactly its own code) and add the
+    # missing route via the router's public method, so the "auth" scenario
+    # can genuinely exercise logout.
     agent = FakeAgent()
     output_stream, input_stream = await stdio_streams(limit=50 * 1024 * 1024)
     conn = AgentSideConnection(agent, input_stream, output_stream, listening=False)

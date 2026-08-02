@@ -1,9 +1,9 @@
-"""Адрес фида.
+"""The feed address.
 
-Отдельным файлом, потому что это не про разбор оповещений, а про то, куда
-панель вообще стучится — и это выяснилось только живым запросом: на
-приватном репозитории `raw.githubusercontent.com` отдаёт анонимному
-клиенту 404, то есть фид молча не работает.
+Kept as a separate file because this isn't about parsing announcements, but
+about where the panel reaches out to at all — and that only came to light
+through a live request: on a private repository, `raw.githubusercontent.com`
+returns 404 to an anonymous client, meaning the feed silently doesn't work.
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ def test_feed_url_defaults_to_the_repository(monkeypatch):
 
 
 def test_feed_url_can_be_overridden(monkeypatch):
-    """Студия за перехватывающим прокси, зеркало внутри периметра или сам
-    разработчик до публикации репозитория — все они должны уметь указать
-    свой адрес, не пересобирая пакет."""
+    """A studio behind an intercepting proxy, a mirror inside the perimeter,
+    or the developer themself before the repository goes public — all of
+    them need to be able to point at their own address without rebuilding
+    the package."""
     monkeypatch.setenv(announcements.FEED_URL_ENV, "https://studio.example/feed.json")
     assert announcements.feed_url() == "https://studio.example/feed.json"
 
