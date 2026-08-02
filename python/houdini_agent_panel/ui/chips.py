@@ -7,7 +7,8 @@ popup surface so the OS/Qt style can never leak into the panel.
 
 from __future__ import annotations
 
-from ..sessions import SessionMode, SessionState
+from ..sessions import SessionMode
+from .conversations import sidebar_icon
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _RAIL_WIDTH = 736
@@ -35,14 +36,11 @@ class ChoiceButton(QtWidgets.QWidget):
         self._button.clicked.connect(self._toggle_popup)
         layout.addWidget(self._button)
 
-        self._popup = QtWidgets.QFrame(
-            None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint
-        )
-        self._popup.setObjectName("choicePopup")
-        self.destroyed.connect(self._popup.deleteLater)
-        self._popup_layout = QtWidgets.QVBoxLayout(self._popup)
-        self._popup_layout.setContentsMargins(5, 5, 5, 5)
-        self._popup_layout.setSpacing(2)
+        # A hidden Qt.Popup is still a native top-level surface.  Creating
+        # several eagerly makes macOS occasionally composite one for a frame
+        # during activation/re-layout.  It must not exist until the click.
+        self._popup: QtWidgets.QFrame | None = None
+        self._popup_layout: QtWidgets.QVBoxLayout | None = None
 
         self.setStyleSheet(
             "QToolButton#choiceTrigger, QToolButton#choiceTriggerAccent {"
@@ -57,7 +55,7 @@ class ChoiceButton(QtWidgets.QWidget):
             " background: palette(alternate-base);"
             "}"
         )
-        self._popup.setStyleSheet(
+        self._popup_stylesheet = (
             "QFrame#choicePopup {"
             " background: #262626;"
             " border: 1px solid #3a3a3a;"
@@ -76,6 +74,33 @@ class ChoiceButton(QtWidgets.QWidget):
             f"QPushButton[checkedChoice=\"true\"] {{ color: {_AMBER}; background: #332a20; }}"
         )
         self._sync_text()
+
+    def _ensure_popup(self) -> QtWidgets.QFrame:
+        if self._popup is not None:
+            return self._popup
+        popup = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        popup.setObjectName("choicePopup")
+        popup.setStyleSheet(self._popup_stylesheet)
+        popup.installEventFilter(self)
+        layout = QtWidgets.QVBoxLayout(popup)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
+        self._popup = popup
+        self._popup_layout = layout
+        return popup
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+        if watched is self._popup and event.type() == QtCore.QEvent.Hide:
+            QtCore.QTimer.singleShot(0, self._release_popup)
+        return super().eventFilter(watched, event)
+
+    def _release_popup(self) -> None:
+        popup = self._popup
+        if popup is None or popup.isVisible():
+            return
+        self._popup = None
+        self._popup_layout = None
+        popup.deleteLater()
 
     # QComboBox-like data API, intentionally tiny and fully under our control.
     def clear(self) -> None:
@@ -116,25 +141,28 @@ class ChoiceButton(QtWidgets.QWidget):
         self._button.setText(f"{label}  ⌄" if label else "")
 
     def _toggle_popup(self) -> None:
-        if self._popup.isVisible():
-            self._popup.hide()
+        popup = self._ensure_popup()
+        if popup.isVisible():
+            popup.hide()
             return
         self._rebuild_popup()
         width = max(self._button.width(), 180)
-        self._popup.setFixedWidth(width)
-        self._popup.adjustSize()
+        popup.setFixedWidth(width)
+        popup.adjustSize()
         point = self._button.mapToGlobal(QtCore.QPoint(0, self._button.height() + 5))
         screen = QtWidgets.QApplication.screenAt(point)
         below_screen = (
             screen is not None
-            and point.y() + self._popup.height() > screen.availableGeometry().bottom()
+            and point.y() + popup.height() > screen.availableGeometry().bottom()
         )
         if below_screen:
-            point.setY(self._button.mapToGlobal(QtCore.QPoint(0, 0)).y() - self._popup.height() - 5)
-        self._popup.move(point)
-        self._popup.show()
+            point.setY(self._button.mapToGlobal(QtCore.QPoint(0, 0)).y() - popup.height() - 5)
+        popup.move(point)
+        popup.show()
 
     def _rebuild_popup(self) -> None:
+        if self._popup is None or self._popup_layout is None:
+            return
         while self._popup_layout.count():
             item = self._popup_layout.takeAt(0)
             widget = item.widget()
@@ -148,7 +176,8 @@ class ChoiceButton(QtWidgets.QWidget):
 
     def _choose(self, index: int) -> None:
         self.setCurrentIndex(index)
-        self._popup.hide()
+        if self._popup is not None:
+            self._popup.hide()
         self.activated.emit(index)
 
 
@@ -157,8 +186,7 @@ class HeaderBar(QtWidgets.QWidget):
 
     manage_agents_clicked = Signal()
     agent_selected = Signal(str)
-    session_selected = Signal(str)
-    new_session_clicked = Signal()
+    conversations_clicked = Signal()
     settings_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -175,6 +203,14 @@ class HeaderBar(QtWidgets.QWidget):
         layout.setSpacing(5)
         outer.addWidget(self._rail)
 
+        self._conversations_button = QtWidgets.QToolButton(self._rail)
+        self._conversations_button.setObjectName("contextIcon")
+        self._conversations_button.setIcon(sidebar_icon())
+        self._conversations_button.setIconSize(QtCore.QSize(18, 18))
+        self._conversations_button.setToolTip("Conversations")
+        self._conversations_button.clicked.connect(self.conversations_clicked)
+        layout.addWidget(self._conversations_button)
+
         self._agent_button = QtWidgets.QToolButton(self._rail)
         self._agent_button.setObjectName("contextButton")
         self._agent_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
@@ -190,17 +226,6 @@ class HeaderBar(QtWidgets.QWidget):
         self._cwd_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addWidget(self._cwd_label)
         layout.addStretch(1)
-
-        self._session_combo = ChoiceButton(self._rail)
-        self._session_combo.activated.connect(self._on_session_activated)
-        layout.addWidget(self._session_combo)
-
-        self._new_session_button = QtWidgets.QToolButton(self._rail)
-        self._new_session_button.setObjectName("contextIcon")
-        self._new_session_button.setText("+")
-        self._new_session_button.setToolTip("New conversation")
-        self._new_session_button.clicked.connect(self.new_session_clicked)
-        layout.addWidget(self._new_session_button)
 
         self._settings_button = QtWidgets.QToolButton(self._rail)
         self._settings_button.setObjectName("contextIcon")
@@ -227,15 +252,9 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_items: list[tuple[str, str]] = []
         self._agent_current_id: str | None = None
 
-        self._agent_popup = QtWidgets.QFrame(
-            None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint
-        )
-        self._agent_popup.setObjectName("agentPopup")
-        self.destroyed.connect(self._agent_popup.deleteLater)
-        self._agent_popup_layout = QtWidgets.QVBoxLayout(self._agent_popup)
-        self._agent_popup_layout.setContentsMargins(5, 5, 5, 5)
-        self._agent_popup_layout.setSpacing(2)
-        self._agent_popup.setStyleSheet(
+        self._agent_popup: QtWidgets.QFrame | None = None
+        self._agent_popup_layout: QtWidgets.QVBoxLayout | None = None
+        self._agent_popup_stylesheet = (
             "QFrame#agentPopup {"
             " background: #262626;"
             " border: 1px solid #3a3a3a;"
@@ -256,6 +275,33 @@ class HeaderBar(QtWidgets.QWidget):
             "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
             f"QPushButton[checkedChoice=\"true\"] {{ color: {_AMBER}; background: #332a20; }}"
         )
+
+    def _ensure_agent_popup(self) -> QtWidgets.QFrame:
+        if self._agent_popup is not None:
+            return self._agent_popup
+        popup = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        popup.setObjectName("agentPopup")
+        popup.setStyleSheet(self._agent_popup_stylesheet)
+        popup.installEventFilter(self)
+        layout = QtWidgets.QVBoxLayout(popup)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
+        self._agent_popup = popup
+        self._agent_popup_layout = layout
+        return popup
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+        if watched is self._agent_popup and event.type() == QtCore.QEvent.Hide:
+            QtCore.QTimer.singleShot(0, self._release_agent_popup)
+        return super().eventFilter(watched, event)
+
+    def _release_agent_popup(self) -> None:
+        popup = self._agent_popup
+        if popup is None or popup.isVisible():
+            return
+        self._agent_popup = None
+        self._agent_popup_layout = None
+        popup.deleteLater()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -292,26 +338,11 @@ class HeaderBar(QtWidgets.QWidget):
         self._cwd_label.setText(path)
         self._cwd_label.setToolTip(path)
 
-    def set_sessions(self, states: list[SessionState], current: str | None) -> None:
-        self._session_combo.blockSignals(True)
-        try:
-            self._session_combo.clear()
-            for state in states:
-                self._session_combo.addItem(state.title, state.session_id)
-            index = self._session_combo.findData(current)
-            if index >= 0:
-                self._session_combo.setCurrentIndex(index)
-        finally:
-            self._session_combo.blockSignals(False)
-
-    def _on_session_activated(self, index: int) -> None:
-        session_id = self._session_combo.itemData(index)
-        if session_id:
-            self.session_selected.emit(session_id)
-
     # --- agent chip menu -------------------------------------------------
 
     def _rebuild_agent_popup(self) -> None:
+        if self._agent_popup is None or self._agent_popup_layout is None:
+            return
         while self._agent_popup_layout.count():
             item = self._agent_popup_layout.takeAt(0)
             widget = item.widget()
@@ -338,34 +369,37 @@ class HeaderBar(QtWidgets.QWidget):
         self._toggle_agent_popup()
 
     def _toggle_agent_popup(self) -> None:
-        if self._agent_popup.isVisible():
-            self._agent_popup.hide()
+        popup = self._ensure_agent_popup()
+        if popup.isVisible():
+            popup.hide()
             return
         self._rebuild_agent_popup()
         width = max(self._agent_button.width(), 200)
-        self._agent_popup.setFixedWidth(width)
-        self._agent_popup.adjustSize()
+        popup.setFixedWidth(width)
+        popup.adjustSize()
         point = self._agent_button.mapToGlobal(QtCore.QPoint(0, self._agent_button.height() + 5))
         screen = QtWidgets.QApplication.screenAt(point)
         below_screen = (
             screen is not None
-            and point.y() + self._agent_popup.height() > screen.availableGeometry().bottom()
+            and point.y() + popup.height() > screen.availableGeometry().bottom()
         )
         if below_screen:
             point.setY(
                 self._agent_button.mapToGlobal(QtCore.QPoint(0, 0)).y()
-                - self._agent_popup.height()
+                - popup.height()
                 - 5
             )
-        self._agent_popup.move(point)
-        self._agent_popup.show()
+        popup.move(point)
+        popup.show()
 
     def _choose_agent(self, agent_id: str) -> None:
-        self._agent_popup.hide()
+        if self._agent_popup is not None:
+            self._agent_popup.hide()
         self.agent_selected.emit(agent_id)
 
     def _choose_manage(self) -> None:
-        self._agent_popup.hide()
+        if self._agent_popup is not None:
+            self._agent_popup.hide()
         self.manage_agents_clicked.emit()
 
 

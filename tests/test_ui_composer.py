@@ -342,6 +342,26 @@ def test_slash_popup_shows_and_filters(qapp):
     assert names == ["model", "mode"]
 
 
+def test_slash_popup_is_scrollbar_free_panel_overlay(qapp):
+    host = QtWidgets.QWidget()
+    host.resize(800, 700)
+    composer = Composer(host)
+    composer.setGeometry(32, 520, 736, 160)
+    host.show()
+    composer.show()
+    composer.set_commands(_commands())
+
+    _type_text(composer._text_edit, "/")
+
+    assert composer._popup.parentWidget() is host
+    assert composer._popup.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarAlwaysOff
+    assert composer._popup.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAlwaysOff
+    assert composer._popup.y() >= 0
+    assert composer._popup.geometry().bottom() < composer._text_edit.mapTo(
+        host, QtCore.QPoint()
+    ).y()
+
+
 def test_slash_popup_hidden_without_matching_commands(qapp):
     composer = Composer()
     composer.show()

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 _MIN_LINES = 1
 _MAX_LINES = 6
-_MAX_POPUP_HEIGHT = 160
+_MAX_POPUP_HEIGHT = 360
 _DEFAULT_PLACEHOLDER = "Что изменить в сцене?"
 _RAIL_WIDTH = 736
 
@@ -86,18 +86,46 @@ class _CommandPopup(QtWidgets.QListWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("commandPalette")
         self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setUniformItemSizes(True)
+        self.setSpacing(1)
+        self.setStyleSheet(
+            "QListWidget#commandPalette {"
+            " background: #282828; border: 1px solid #414141; border-radius: 15px;"
+            " padding: 5px; outline: none;"
+            "}"
+            "QListWidget#commandPalette::item {"
+            " min-height: 34px; border: none; border-radius: 8px;"
+            "}"
+            "QListWidget#commandPalette::item:selected { background: #3a3a3a; }"
+        )
         self.hide()
 
     def set_commands(self, commands: list[Any]) -> None:
         self.clear()
         for cmd in commands:
-            label = f"/{cmd.name}"
-            if cmd.description:
-                label += f" — {cmd.description}"
-            item = QtWidgets.QListWidgetItem(label)
+            item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, cmd.name)
+            item.setSizeHint(QtCore.QSize(0, 34))
             self.addItem(item)
+            row = QtWidgets.QWidget(self)
+            row.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 0, 10, 0)
+            row_layout.setSpacing(18)
+            name = QtWidgets.QLabel(f"/{cmd.name}", row)
+            name.setStyleSheet("color: #e5e3df; background: transparent;")
+            row_layout.addWidget(name)
+            row_layout.addStretch(1)
+            description = QtWidgets.QLabel(cmd.description or "", row)
+            description.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            description.setStyleSheet("color: #8f8c87; background: transparent;")
+            row_layout.addWidget(description)
+            self.setItemWidget(item, row)
         if self.count():
             self.setCurrentRow(0)
 
@@ -170,6 +198,26 @@ def _attachment_label(block: dict) -> str:
     return "📎 вложение"
 
 
+class _ComposerSurface(QtWidgets.QFrame):
+    """The rounded input card. A click anywhere on it starts typing.
+
+    The text edit only occupies part of the card — there is padding around
+    it and a row of controls below. A click on that padding used to land on
+    the frame and do nothing, so the field looked like it needed a
+    double-click to wake up. Anywhere that looks like the input field has to
+    behave like it.
+    """
+
+    def __init__(self, target: QtWidgets.QWidget, parent=None) -> None:
+        super().__init__(parent)
+        self._target = target
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        super().mousePressEvent(event)
+        if self._target.isEnabled():
+            self._target.setFocus(QtCore.Qt.MouseFocusReason)
+
+
 class Composer(QtWidgets.QWidget):
     """Низ панели: growing-поле, «+», микрофон, чип режима, счётчик, отправка/стоп."""
 
@@ -177,6 +225,7 @@ class Composer(QtWidgets.QWidget):
     cancelled = Signal()
     mode_selected = Signal(str)
     model_selected = Signal(str)
+    attachment_rejected = Signal(str)
     buddy_selected = Signal(str)
 
     def __init__(self, parent=None) -> None:
@@ -257,7 +306,7 @@ class Composer(QtWidgets.QWidget):
         action_row.addWidget(self._voice_button)
         action_row.addWidget(self._send_button)
 
-        self._surface = QtWidgets.QFrame(self)
+        self._surface = _ComposerSurface(self._text_edit, self)
         self._surface.setObjectName("composerSurface")
         self._surface.setMinimumHeight(99)
         surface_layout = QtWidgets.QVBoxLayout(self._surface)
@@ -434,19 +483,53 @@ class Composer(QtWidgets.QWidget):
         """
         if self._info is None:
             return False
-        block = build_attachment_block(Path(path), self._info)
+        try:
+            block = build_attachment_block(Path(path), self._info)
+        except OSError:
+            # Unreadable file (permissions, a dead symlink, a network share
+            # that went away) must not look the same as "the agent refused".
+            return False
         if block is None:
             return False
         self._attachments.append(block)
         self._refresh_attachments_bar()
         return True
 
+    def _attachment_filter(self) -> str:
+        """A file filter that matches what this agent actually accepts.
+
+        Without it the dialog offers every file on disk and then the panel
+        silently drops whatever the agent can't take — which reads as "the
+        attach button is broken".
+        """
+        if self._info is None:
+            return "All files (*)"
+        images = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tif *.tiff)"
+        if self._info.supports_embedded_context:
+            # The agent takes embedded resources, so anything goes; images
+            # are listed first because that's the common case.
+            return f"All files (*);;{images}"
+        if self._info.supports_image:
+            return f"{images};;All files (*)"
+        return "All files (*)"
+
     def _on_attach_clicked(self) -> None:
         if self._info is None:
+            self.attachment_rejected.emit("Connect an agent before attaching files.")
             return
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Прикрепить файлы")
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Attach files", "", self._attachment_filter()
+        )
+        rejected: list[str] = []
         for raw_path in paths:
-            self.add_attachment(Path(raw_path))
+            if not self.add_attachment(Path(raw_path)):
+                rejected.append(Path(raw_path).name)
+        if rejected:
+            # Never drop a file without a word. The agent's capabilities are
+            # the reason, and the artist has no way to guess them.
+            self.attachment_rejected.emit(
+                "This agent can't take: " + ", ".join(rejected)
+            )
 
     def _remove_attachment(self, index: int) -> None:
         if 0 <= index < len(self._attachments):
@@ -581,11 +664,21 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.popup_active = False
 
     def _position_popup(self) -> None:
-        edit_pos = self._text_edit.mapTo(self, QtCore.QPoint(0, 0))
+        # The palette belongs to the panel overlay rather than the short
+        # composer widget.  Otherwise its upper rows are clipped at the
+        # composer's edge and Qt exposes scrollbars for the remaining sliver.
+        overlay = self.parentWidget() or self
+        if self._popup.parentWidget() is not overlay:
+            self._popup.setParent(overlay)
+        edit_pos = self._text_edit.mapTo(overlay, QtCore.QPoint(0, 0))
         edit_geo = QtCore.QRect(edit_pos, self._text_edit.size())
-        row_height = self._popup.sizeHintForRow(0) if self._popup.count() else 20
-        height = min(row_height * max(self._popup.count(), 1) + 4, _MAX_POPUP_HEIGHT)
-        self._popup.setGeometry(edit_geo.x(), edit_geo.y() - height, edit_geo.width(), height)
+        row_height = self._popup.sizeHintForRow(0) if self._popup.count() else 34
+        desired = row_height * max(self._popup.count(), 1) + 12
+        available = max(row_height + 12, edit_geo.y() - 8)
+        height = min(desired, _MAX_POPUP_HEIGHT, available)
+        self._popup.setGeometry(
+            edit_geo.x(), edit_geo.y() - height - 8, edit_geo.width(), height
+        )
 
     def _on_popup_navigate(self, delta: int) -> None:
         self._popup.move_selection(delta)

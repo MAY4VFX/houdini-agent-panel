@@ -28,6 +28,7 @@ from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .composer import Composer
+from .conversations import ConversationDrawer
 from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
@@ -239,15 +240,19 @@ class AgentPanel(QtWidgets.QWidget):
         layout.addWidget(self._blocking)
         layout.addWidget(self._composer)
 
+        self._conversations = ConversationDrawer(self)
+
         self._header.manage_agents_clicked.connect(self._open_agent_management)
         self._header.agent_selected.connect(self._on_agent_chosen)
+        self._header.conversations_clicked.connect(self._conversations.toggle)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
-        self._header.new_session_clicked.connect(self._start_new_session)
-        self._header.session_selected.connect(self._pool.set_current)
+        self._conversations.new_session_clicked.connect(self._start_new_session)
+        self._conversations.session_selected.connect(self._pool.set_current)
 
         self._composer.submitted.connect(self._on_submitted)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
+        self._composer.attachment_rejected.connect(self._note)
         self._composer.buddy_selected.connect(self._on_buddy_selected)
 
         self._notice.action_clicked.connect(self._on_notice_action)
@@ -581,7 +586,7 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _refresh_sessions(self) -> None:
         current = self._pool.current()
-        self._header.set_sessions(
+        self._conversations.set_sessions(
             self._pool.all(), current.session_id if current else None
         )
 
@@ -649,6 +654,9 @@ class AgentPanel(QtWidgets.QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._position_permission_popover()
+        self._conversations.sync_parent_geometry()
+        if self._conversations.isVisible():
+            self._conversations.raise_()
 
     def _start_new_session(self) -> None:
         client = shared_client()

@@ -57,6 +57,7 @@ def install(
     find_links: str | None = None,
     offline: bool = False,
     skip_deps: bool = False,
+    source: Path | None = None,
     dry_run: bool = False,
     fetch: Fetcher | None = None,
     out=print,
@@ -100,6 +101,8 @@ def install(
 
         tag = paths.python_tag(pyver)
         out(f"  python {pyver[0]}.{pyver[1]} -> {tag}")
+        if source is not None:
+            out(f"  dev mode: Houdini will import {source / 'python'}")
         target = paths.deps_dir(tag)
 
         if skip_deps:
@@ -119,7 +122,9 @@ def install(
                 out(f"  dependency install failed: {exc}")
                 continue
 
-        payload = houdini_package.package_json(deps=target, installer_python=installer_python)
+        payload = houdini_package.package_json(
+            deps=target, installer_python=installer_python, source=source
+        )
         package_path = package_dir / houdini_package.PACKAGE_NAME
         if dry_run:
             out(f"  [dry-run] would write {package_path}")

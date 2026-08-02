@@ -11,6 +11,8 @@ out of the directory name (for `deps.py`).
 
 from __future__ import annotations
 
+import os
+
 import json
 import platform
 import re
@@ -33,6 +35,7 @@ def package_json(
     deps: Path,
     installer_python: str,
     plugin: Path | None = None,
+    source: Path | None = None,
 ) -> str:
     """Build the package json in exactly the format from architecture.md §0.
 
@@ -48,13 +51,37 @@ def package_json(
     (e.g. ``--skip-deps``/a dev run straight from source) — in that case
     the path is written as an absolute one instead of through the
     variable.
+
+    ``source`` turns on dev mode: the path to a repository checkout, whose
+    ``python/`` goes on ``PYTHONPATH`` ahead of the deps tree and whose
+    plugin tree becomes ``path``. Everything else stays as it is — compiled
+    dependencies still come from ``deps``.
     """
-    path_value = plugin.as_posix() if plugin is not None else "$HAP_DEPS/houdini_agent_panel/houdini"
+    if source is not None:
+        # Dev mode: Houdini imports the checkout, not the installed copy.
+        #
+        # Without this, editing the repo changes nothing you can see: Houdini
+        # keeps loading the wheel from the deps tree, and the panel on screen
+        # is a different build from the one in the editor — which is exactly
+        # how an afternoon disappears comparing two versions of the same
+        # widget.
+        #
+        # The deps tree stays on the path behind the checkout: `acp` and
+        # `pydantic` carry compiled extensions built for this Houdini's
+        # Python, and those still have to come from there.
+        package_root = (source / "python").as_posix()
+        python_path = f"{package_root}{os.pathsep}$HAP_DEPS"
+        path_value = (source / "python" / "houdini_agent_panel" / "houdini").as_posix()
+    else:
+        python_path = "$HAP_DEPS"
+        path_value = (
+            plugin.as_posix() if plugin is not None else "$HAP_DEPS/houdini_agent_panel/houdini"
+        )
     payload = {
         "env": [
             {"HAP_DEPS": deps.as_posix()},
             {"HAP_PYTHON": installer_python},
-            {"PYTHONPATH": {"value": "$HAP_DEPS", "method": "prepend"}},
+            {"PYTHONPATH": {"value": python_path, "method": "prepend"}},
         ],
         "path": path_value,
     }

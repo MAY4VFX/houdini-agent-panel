@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from . import houdini_package
@@ -53,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not install the panel's dependencies into Houdini's Python, only the package json",
     )
     install_parser.add_argument(
+        "--dev",
+        metavar="REPO",
+        nargs="?",
+        const=".",
+        default=None,
+        help=(
+            "Point Houdini at a repository checkout instead of the installed package, "
+            "so edits show up after reopening the panel tab (defaults to the current directory)"
+        ),
+    )
+    install_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only show the plan, don't change anything on disk",
@@ -84,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             find_links=args.find_links,
             offline=args.offline,
             skip_deps=args.skip_deps,
+            source=Path(args.dev).expanduser().resolve() if args.dev else None,
             dry_run=args.dry_run,
         )
 
