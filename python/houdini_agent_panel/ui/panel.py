@@ -242,6 +242,12 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._conversations = ConversationDrawer(self)
 
+        # The panel forwards focus to the composer: Houdini activates the pane
+        # tab and grants focus to the panel widget, not to anything inside it.
+        # Without this that focus lands nowhere and typing needs another click.
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFocusProxy(self._composer)
+
         self._header.manage_agents_clicked.connect(self._open_agent_management)
         self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.conversations_clicked.connect(self._conversations.toggle)

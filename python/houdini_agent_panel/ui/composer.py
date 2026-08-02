@@ -185,17 +185,43 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
     return None
 
 
+#: Attachment chips sit inside the input card — they must never drive its height.
+_ATTACHMENT_CHIP_HEIGHT = 28
+_ATTACHMENT_THUMBNAIL = 20
+
+
+def _attachment_thumbnail(block: dict) -> "QtGui.QPixmap | None":
+    """A small preview for an image block, None for anything else."""
+    if block.get("type") != "image":
+        return None
+    data = block.get("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        raw = base64.b64decode(data)
+    except (ValueError, TypeError):
+        return None
+    pixmap = QtGui.QPixmap()
+    if not pixmap.loadFromData(raw):
+        return None
+    return pixmap.scaled(
+        _ATTACHMENT_THUMBNAIL,
+        _ATTACHMENT_THUMBNAIL,
+        QtCore.Qt.KeepAspectRatio,
+        QtCore.Qt.SmoothTransformation,
+    )
+
+
 def _attachment_label(block: dict) -> str:
     kind = block.get("type")
     if kind == "image":
-        return "🖼 изображение"
+        return "Image"
     if kind == "audio":
-        return "🎙 аудио"
+        return "Audio"
     if kind == "resource":
         uri = (block.get("resource") or {}).get("uri", "")
-        name = uri.rsplit("/", 1)[-1] if uri else "файл"
-        return f"📎 {name}"
-    return "📎 вложение"
+        return uri.rsplit("/", 1)[-1] if uri else "File"
+    return "Attachment"
 
 
 class _ComposerSurface(QtWidgets.QFrame):
@@ -211,6 +237,14 @@ class _ComposerSurface(QtWidgets.QFrame):
     def __init__(self, target: QtWidgets.QWidget, parent=None) -> None:
         super().__init__(parent)
         self._target = target
+        # A focus proxy is what actually survives Houdini. Intercepting the
+        # mouse press alone wasn't enough: Houdini's pane tab eats the first
+        # click to activate itself, so the event never reached this widget
+        # and the field looked like it needed a double-click. A proxy makes
+        # Qt route focus to the input whenever anything hands focus to the
+        # card, no matter which click delivered it.
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.setFocusProxy(target)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         super().mousePressEvent(event)
@@ -240,8 +274,15 @@ class Composer(QtWidgets.QWidget):
 
         # --- вложения (строка чипов над полем, видна только если есть что показать)
         self._attachments_bar = QtWidgets.QWidget()
+        # Without a vertical Maximum the bar takes every spare pixel the
+        # column has and the whole input card balloons to fill the panel —
+        # which is exactly what attaching a file used to do.
+        self._attachments_bar.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum
+        )
         self._attachments_layout = QtWidgets.QHBoxLayout(self._attachments_bar)
-        self._attachments_layout.setContentsMargins(0, 0, 0, 0)
+        self._attachments_layout.setContentsMargins(0, 0, 0, 4)
+        self._attachments_layout.setSpacing(6)
         self._attachments_bar.setVisible(False)
 
         # --- поле ввода
@@ -320,6 +361,12 @@ class Composer(QtWidgets.QWidget):
         main_layout.setContentsMargins(0, 42, 0, 14)
         main_layout.setAlignment(QtCore.Qt.AlignHCenter)
         main_layout.addWidget(self._surface, 0, QtCore.Qt.AlignHCenter)
+
+        # Houdini hands focus to the panel, not to a specific widget inside
+        # it. Without a proxy that focus lands nowhere and the artist has to
+        # click again to start typing.
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setFocusProxy(self._text_edit)
 
         self._buddy = _BuddySprite(self)
         self._buddy.clicked.connect(self.buddy_selected.emit)
@@ -546,17 +593,44 @@ class Composer(QtWidgets.QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         for index, block in enumerate(self._attachments):
-            chip = QtWidgets.QWidget()
-            chip_layout = QtWidgets.QHBoxLayout(chip)
-            chip_layout.setContentsMargins(4, 0, 4, 0)
-            chip_layout.addWidget(QtWidgets.QLabel(_attachment_label(block)))
-            remove = QtWidgets.QToolButton()
-            remove.setText("✕")
-            remove.setAutoRaise(True)
-            remove.clicked.connect(lambda checked=False, i=index: self._remove_attachment(i))
-            chip_layout.addWidget(remove)
-            self._attachments_layout.addWidget(chip)
+            self._attachments_layout.addWidget(self._build_attachment_chip(index, block))
+        # A trailing stretch keeps chips packed to the left instead of
+        # spreading across the whole card.
+        self._attachments_layout.addStretch(1)
         self._attachments_bar.setVisible(bool(self._attachments))
+
+    def _build_attachment_chip(self, index: int, block: dict) -> QtWidgets.QWidget:
+        """One attachment: a thumbnail for images, a name for everything else.
+
+        An image attached with no visible preview leaves the artist guessing
+        whether the click even registered — the point of the chip is to prove
+        the file is really going along.
+        """
+        chip = QtWidgets.QFrame()
+        chip.setObjectName("attachmentChip")
+        chip.setFixedHeight(_ATTACHMENT_CHIP_HEIGHT)
+        layout = QtWidgets.QHBoxLayout(chip)
+        layout.setContentsMargins(4, 2, 2, 2)
+        layout.setSpacing(6)
+
+        thumbnail = _attachment_thumbnail(block)
+        if thumbnail is not None:
+            preview = QtWidgets.QLabel()
+            preview.setPixmap(thumbnail)
+            preview.setFixedSize(thumbnail.size())
+            layout.addWidget(preview)
+
+        label = QtWidgets.QLabel(_attachment_label(block))
+        label.setToolTip(_attachment_label(block))
+        layout.addWidget(label)
+
+        remove = QtWidgets.QToolButton()
+        remove.setText("✕")
+        remove.setAutoRaise(True)
+        remove.setToolTip("Remove attachment")
+        remove.clicked.connect(lambda checked=False, i=index: self._remove_attachment(i))
+        layout.addWidget(remove)
+        return chip
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:  # noqa: N802
         if self._info is not None and event.mimeData().hasUrls():
