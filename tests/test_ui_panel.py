@@ -301,7 +301,14 @@ def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     """
     widget = _make_panel(qapp)
 
-    panel_mod._shared_client = None  # имитируем пересоздание после смены агента
+    # Имитируем то, что делает смена агента: старый клиент гасится, новый
+    # создаётся. Именно гасится, а не бросается — иначе его рабочий поток
+    # остаётся крутиться без владельца, и Qt справедливо ругается
+    # «QThread: Destroyed while thread is still running». В Houdini такой
+    # осиротевший поток переживает закрытие панели.
+    old = panel_mod.shared_client()
+    old.stop()
+    panel_mod._shared_client = None
     fresh = panel_mod.shared_client()
 
     seen: list = []
