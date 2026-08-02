@@ -100,6 +100,70 @@ class _RefreshWorker(QtCore.QThread):
         self.done.emit(result, entries)
 
 
+
+
+#: Имена шестёрки на случай, когда реестр ещё не приехал. Не источник правды —
+#: реестр главнее, это только чтобы чип не показывал голый id первые секунды.
+_FALLBACK_LABELS = {
+    "claude-acp": "Claude Agent",
+    "codex-acp": "Codex",
+    "grok-build": "Grok Build",
+    "opencode": "OpenCode",
+    "gemini": "Gemini CLI",
+    "kimi": "Kimi CLI",
+}
+
+
+class _LaunchPrepWorker(QtCore.QThread):
+    """Готовит LaunchSpec в стороне от главного потока.
+
+    Здесь живёт всё медленное, что было в старом _launch_spec: поход в реестр
+    и ensure_node с возможной закачкой портативного Node. На главном потоке
+    этому не место — GUI-Houdini не наследует PATH шелла, homebrew-node ей не
+    виден, и закачка при первом запуске почти гарантирована.
+    """
+
+    ready = Signal(object, str)   # LaunchSpec, человеческое имя
+    prep_failed = Signal(str)
+    note = Signal(str)
+
+    def __init__(self, agent_id: str, current: settings_mod.Settings, parent=None) -> None:
+        super().__init__(parent)
+        self._agent_id = agent_id
+        self._settings = current
+
+    def run(self) -> None:  # pragma: no cover - тонкая обёртка, логика в runtime
+        from .. import registry, runtime
+
+        agent_id = self._agent_id
+        try:
+            for custom in self._settings.custom_agents:
+                if custom.id == agent_id:
+                    self.ready.emit(runtime.custom_launch_spec(custom), custom.name or agent_id)
+                    return
+            entry = None
+            for candidate in registry.fetch_registry():
+                if candidate.id == agent_id:
+                    entry = candidate
+                    break
+            if entry is None:
+                self.prep_failed.emit(
+                    f"Агента {agent_id} нет ни в реестре, ни среди своих."
+                )
+                return
+            from .. import node as node_module
+
+            if entry.needs_node and node_module.find_system_node() is None:
+                self.note.emit(
+                    f"{entry.name}: системного Node не видно, приношу портативный — "
+                    "первый запуск может занять минуту…"
+                )
+            spec = runtime.launch_spec(entry)
+            self.ready.emit(spec, entry.name)
+        except Exception as exc:  # noqa: BLE001 - причина уходит в ленту
+            self.prep_failed.emit(f"Не удалось подготовить агента {agent_id}: {exc}")
+
+
 class AgentPanel(QtWidgets.QWidget):
     """То, что возвращает ``onCreateInterface()``."""
 
@@ -117,6 +181,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._permission_views: dict[str, PermissionView] = {}
         self._permission_popover: PermissionRow | None = None
         self._refresh_worker: _RefreshWorker | None = None
+        self._launch_worker: _LaunchPrepWorker | None = None
+        self._registry_entries: list = []
+        self._pending_agent_label: str = ""
         self._closed = False
 
         self._build()
@@ -248,26 +315,55 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_TRANSCRIPT)
 
     def _start_agent(self, agent_id: str) -> None:
-        try:
-            spec = self._launch_spec(agent_id)
-        except Exception as exc:  # noqa: BLE001 - причина уходит в ленту
-            self._note(f"Не удалось подготовить агента {agent_id}: {exc}")
-            self._show_page(self.PAGE_AGENTS)
-            return
-        self._note(f"Запускаю {agent_id}…")
+        """Запустить агента, не заморозив Houdini.
+
+        Подготовка спека — это поход в реестр и, если системного Node нет,
+        закачка портативного (44 МБ). GUI-Houdini на macOS не наследует PATH
+        шелла, так что node из homebrew она не видит и закачка — не редкий
+        случай, а типичный первый запуск. Всё это раньше шло на главном
+        потоке, и Houdini висела мёртво всю закачку — для художника это
+        неотличимо от «панель не работает». Теперь подготовка в фоне, панель
+        живёт и рассказывает, что происходит.
+        """
+        if self._launch_worker is not None and self._launch_worker.isRunning():
+            return  # уже готовим — повторный клик не должен плодить закачки
+        self._pending_agent_label = self._display_label(agent_id)
+        self._note(f"Готовлю {self._pending_agent_label}…")
+        worker = _LaunchPrepWorker(agent_id, self._settings, self)
+        worker.note.connect(self._note)
+        worker.ready.connect(self._on_launch_ready)
+        worker.prep_failed.connect(self._on_launch_prep_failed)
+        self._launch_worker = worker
+        worker.start()
+
+    def _on_launch_ready(self, spec: Any, label: str) -> None:
+        self._launch_worker = None
+        if label:
+            self._pending_agent_label = label
+        self._note(f"Запускаю {self._pending_agent_label}…")
         shared_client().start(spec, cwd=scene.hip_dir())
 
-    def _launch_spec(self, agent_id: str):
-        from .. import registry, runtime
+    def _on_launch_prep_failed(self, message: str) -> None:
+        self._launch_worker = None
+        self._note(message)
+        self._show_page(self.PAGE_AGENTS)
 
+    def _display_label(self, agent_id: str) -> str:
+        """Человеческое имя агента для чипа и ленты.
+
+        Художник выбирает «Claude Agent», а не «@agentclientprotocol/
+        claude-agent-acp» — идентификаторы пакетов остаются в логах. Сеть
+        отсюда не зовём никогда: имя нужно мгновенно и на главном потоке,
+        поэтому реестр берётся только из уже приехавших данных, а для
+        шестёрки есть статичные имена на случай, когда реестр ещё не пришёл.
+        """
         for custom in self._settings.custom_agents:
             if custom.id == agent_id:
-                return runtime.custom_launch_spec(custom)
-        entries = registry.fetch_registry()
-        for entry in entries:
+                return custom.name or agent_id
+        for entry in self._registry_entries:
             if entry.id == agent_id:
-                return runtime.launch_spec(entry)
-        raise LookupError(f"агента {agent_id} нет ни в реестре, ни среди своих")
+                return entry.name
+        return _FALLBACK_LABELS.get(agent_id, agent_id)
 
     # ------------------------------------------------------------- client
 
@@ -303,7 +399,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._client_wiring = wiring
 
     def _on_connected(self, info: Any) -> None:
-        self._header.set_agent(info.name, None)
+        # В чипе — имя, которое выбирал художник, а не имя npm-пакета из
+        # initialize ("@agentclientprotocol/claude-agent-acp").
+        self._header.set_agent(self._pending_agent_label or info.name, None)
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
         if self._pool.current() is None:
@@ -589,6 +687,8 @@ class AgentPanel(QtWidgets.QWidget):
         # Экран «Агенты» сам в сеть не ходит: его `refresh_from_registry`
         # синхронный, а значит на главном потоке заморозил бы Houdini ровно на
         # время таймаута, если сети нет. Записи приезжают уже готовыми.
+        if entries:
+            self._registry_entries = list(entries)
         agents_view = getattr(self, "_agents_view", None)
         if agents_view is not None and entries:
             from .. import registry
@@ -725,6 +825,11 @@ class AgentPanel(QtWidgets.QWidget):
             worker.requestInterruption()
             worker.wait(2000)
             self._refresh_worker = None
+
+        launch = self._launch_worker
+        if launch is not None:
+            launch.wait(3000)
+            self._launch_worker = None
 
         for signal, slot in getattr(self, "_client_wiring", ()):
             try:
