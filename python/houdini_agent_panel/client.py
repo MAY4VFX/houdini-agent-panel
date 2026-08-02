@@ -21,12 +21,37 @@ Qt event loop), и реализация ACP `Client`-протокола (`sessio
 («владеет циклом, процессом агента, соединением» и «живёт на рабочем
 потоке») естественно сходятся в одном объекте: то, что обслуживает колбэки
 агента, физически и есть тот самый рабочий поток.
+
+**Houdini подменяет asyncio (`haio`, см. docs/facts/houdini.md §9).** Внутри
+Houdini `asyncio.get_event_loop_policy()` отдаёт `haio.HoudiniEventLoopPolicy`,
+и через неё:
+
+1. `asyncio.new_event_loop()` возвращает `haio.HoudiniEventLoop`, чей
+   `run_forever()` требует главный поток — на нашем рабочем `QThread` он
+   валится `RuntimeError`. Лечится тем, что класс цикла берётся напрямую
+   классом, а не через политику: `asyncio.SelectorEventLoop()` (POSIX) /
+   `asyncio.ProactorEventLoop()` (Windows).
+2. `acp.spawn_agent_process()` не работает вообще: он построен на
+   `asyncio.create_subprocess_exec`, а тот на POSIX идёт за child watcher'ом
+   через ГЛОБАЛЬНУЮ политику (`get_event_loop_policy().get_child_watcher()`),
+   и `haio` бросает оттуда `NotImplementedError` — независимо от того, какой
+   именно объект цикла мы используем сами. Обход: поднимать процесс обычным
+   `subprocess.Popen` (не идёт за child watcher'ом вообще) и заводить его
+   каналы в цикл через `connect_read_pipe`/`connect_write_pipe` — этому
+   публичному API watcher не нужен — а связку отдавать в `acp.connect_to_agent`
+   (документированная байтовая форма подключения, см. facts/acp-sdk.md §1).
+
+Это верно и вне Houdini (стоковая политика тоже прекрасно живёт с
+`SelectorEventLoop()`, взятым напрямую), так что мы всегда идём этим путём,
+не разветвляя код на «под Houdini» и «в тестах».
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -194,12 +219,23 @@ class AcpWorker(QtCore.QThread):
         # главном — до start()), а не в run(): submit() может понадобиться
         # раньше, чем поток реально стартовал, и ссылка на loop должна быть
         # валидна сразу после конструктора.
-        self.loop = asyncio.new_event_loop()
+        #
+        # Класс цикла берём НАПРЯМУЮ, а не через asyncio.new_event_loop():
+        # внутри Houdini та идёт через подменённую политику `haio`, чей
+        # run_forever() требует главный поток (см. докстринг модуля и
+        # docs/facts/houdini.md §9). Прямая конструкция обходит политику
+        # целиком и работает одинаково что под Houdini, что вне неё.
+        if sys.platform == "win32":
+            self.loop: asyncio.AbstractEventLoop = asyncio.ProactorEventLoop()
+        else:
+            self.loop = asyncio.SelectorEventLoop()
         self._ready = threading.Event()
 
         self._conn: acp.ClientSideConnection | None = None
-        self._process = None
-        self._stack: contextlib.AsyncExitStack | None = None
+        self._process: subprocess.Popen | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._reader: asyncio.StreamReader | None = None
+        self._stderr_reader: asyncio.StreamReader | None = None
         self._stderr_task: asyncio.Task | None = None
         self._exit_watch_task: asyncio.Task | None = None
         self._closing = False
@@ -292,20 +328,42 @@ class AcpWorker(QtCore.QThread):
     async def do_start(self, spec: "LaunchSpec", cwd: str) -> None:
         self._closing = False
         try:
-            self._stack = contextlib.AsyncExitStack()
-            conn, process = await self._stack.enter_async_context(
-                acp.spawn_agent_process(
-                    self,
-                    spec.command,
-                    *spec.args,
-                    env=spec.env,
-                    cwd=cwd,
-                    transport_kwargs={"limit": _STDIO_BUFFER_LIMIT},
-                )
+            # `acp.spawn_agent_process` не годится внутри Houdini (см.
+            # докстринг модуля) — поднимаем процесс и заводим его каналы в
+            # цикл сами, тем же публичным путём, что и она изнутри, минус
+            # шаг, которому нужен child watcher.
+            env = dict(acp.default_environment())
+            env.update(spec.env)
+            process = subprocess.Popen(
+                [spec.command, *spec.args],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=cwd,
             )
-            self._conn = conn
             self._process = process
-            self._stderr_task = self.loop.create_task(self._pump_stderr(process))
+
+            reader = asyncio.StreamReader(limit=_STDIO_BUFFER_LIMIT, loop=self.loop)
+            reader_protocol = asyncio.StreamReaderProtocol(reader, loop=self.loop)
+            await self.loop.connect_read_pipe(lambda: reader_protocol, process.stdout)
+
+            write_transport, write_protocol = await self.loop.connect_write_pipe(
+                lambda: asyncio.streams.FlowControlMixin(loop=self.loop), process.stdin
+            )
+            writer = asyncio.StreamWriter(write_transport, write_protocol, reader, self.loop)
+
+            stderr_reader = asyncio.StreamReader(limit=_STDIO_BUFFER_LIMIT, loop=self.loop)
+            stderr_protocol = asyncio.StreamReaderProtocol(stderr_reader, loop=self.loop)
+            await self.loop.connect_read_pipe(lambda: stderr_protocol, process.stderr)
+
+            self._reader = reader
+            self._writer = writer
+            self._stderr_reader = stderr_reader
+            conn = acp.connect_to_agent(self, writer, reader)
+            self._conn = conn
+
+            self._stderr_task = self.loop.create_task(self._pump_stderr())
             self._exit_watch_task = self.loop.create_task(self._watch_process_exit(process))
 
             init = await conn.initialize(
@@ -322,15 +380,26 @@ class AcpWorker(QtCore.QThread):
         self.connected.emit(self._agent_info)
 
     async def do_stop(self) -> None:
+        """Та же лестница останова, что раньше делал `spawn_agent_process.__aexit__`:
+        закрыть ACP-соединение, потом stdin (EOF → drain → close), потом
+        подождать/добить процесс. Переносим её сюда вручную — вместе с
+        `spawn_agent_process` ушёл и её автоматический вызов."""
         self._closing = True
         for task in (self._stderr_task, self._exit_watch_task):
             if task is not None:
                 task.cancel()
-        if self._stack is not None:
-            await self._stack.aclose()
-            self._stack = None
-        self._conn = None
+
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                await self._conn.close()
+            self._conn = None
+
+        await self._close_writer()
+        await self._terminate_process()
+
         self._process = None
+        self._reader = None
+        self._stderr_reader = None
         self._agent_info = None
 
     async def do_authenticate(self, method_id: str) -> None:
@@ -415,39 +484,91 @@ class AcpWorker(QtCore.QThread):
         self.auth_required.emit(methods)
         return True
 
-    async def _pump_stderr(self, process) -> None:
+    async def _pump_stderr(self) -> None:
         """Читает stderr агента непрерывно — незачитанный пайп переполнится
-        и подвесит процесс агента (см. docs/facts/acp-sdk.md §1)."""
-        if process.stderr is None:
+        и подвесит процесс агента (см. docs/facts/acp-sdk.md §1).
+
+        `process.stderr` от `subprocess.Popen` — обычный блокирующий файловый
+        объект; читать его напрямую в корутине значило бы блокировать весь
+        цикл. Поэтому у stderr свой `StreamReader`, заведённый через
+        `connect_read_pipe` в `do_start`, точно как у stdout."""
+        if self._stderr_reader is None:
             return
         try:
             while True:
-                line = await process.stderr.readline()
+                line = await self._stderr_reader.readline()
                 if not line:
                     break
                 self.log_line.emit(line.decode(errors="replace").rstrip("\n"))
         except asyncio.CancelledError:
             pass
 
-    async def _watch_process_exit(self, process) -> None:
+    async def _watch_process_exit(self, process: subprocess.Popen) -> None:
+        # Popen.wait() блокирующий (os.waitpid под капотом) — в executor'е,
+        # чтобы не подвесить цикл на весь процесс жизни агента.
         try:
-            code = await process.wait()
+            code = await self._await_process(process)
         except asyncio.CancelledError:
             return
         if not self._closing:
             self.disconnected.emit(f"agent-процесс неожиданно завершился (код {code})")
 
+    async def _await_process(self, process: subprocess.Popen) -> int:
+        return await self.loop.run_in_executor(None, process.wait)
+
+    async def _close_writer(self) -> None:
+        writer = self._writer
+        self._writer = None
+        if writer is None:
+            return
+        try:
+            writer.write_eof()
+        except (AttributeError, OSError, RuntimeError):
+            writer.close()
+        with contextlib.suppress(Exception):
+            await writer.drain()
+        with contextlib.suppress(Exception):
+            writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+    async def _terminate_process(self) -> None:
+        """Та же лестница, что у `spawn_stdio_transport`: подождать,
+        `terminate()`, подождать ещё, `kill()`. Зависший агент не имеет права
+        держать закрытие Houdini — отсюда таймауты на каждом шаге."""
+        process = self._process
+        if process is None:
+            return
+        try:
+            await asyncio.wait_for(self._await_process(process), timeout=2.0)
+            return
+        except asyncio.TimeoutError:
+            pass
+        process.terminate()
+        try:
+            await asyncio.wait_for(self._await_process(process), timeout=2.0)
+            return
+        except asyncio.TimeoutError:
+            pass
+        process.kill()
+        with contextlib.suppress(Exception):
+            await self._await_process(process)
+
     async def _cleanup(self) -> None:
-        if self._stderr_task is not None:
-            self._stderr_task.cancel()
-        if self._exit_watch_task is not None:
-            self._exit_watch_task.cancel()
-        if self._stack is not None:
+        """Откат частично поднятого старта — то же самое, что `do_stop`,
+        но без ожидания «штатного» останова (`_conn` мог даже не появиться)."""
+        for task in (self._stderr_task, self._exit_watch_task):
+            if task is not None:
+                task.cancel()
+        if self._conn is not None:
             with contextlib.suppress(Exception):
-                await self._stack.aclose()
-            self._stack = None
-        self._conn = None
+                await self._conn.close()
+            self._conn = None
+        await self._close_writer()
+        await self._terminate_process()
         self._process = None
+        self._reader = None
+        self._stderr_reader = None
 
 
 #: Сигналы, форвардящиеся 1:1 с воркера на фасад (см. AcpClient.__init__).

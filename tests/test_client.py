@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -335,3 +337,67 @@ def test_stop_is_clean_and_reports_running_false(qapp, make_client, tmp_path):
     assert client.is_running() is False
     assert client.agent_info() is None
     assert disconnected.calls and disconnected.calls[0] == ("",)
+
+
+# --- регрессия: Houdini подменяет asyncio-политику своей `haio` -------------
+#
+# docs/facts/houdini.md §9: внутри Houdini `asyncio.new_event_loop()` (через
+# активную политику) отдаёт `haio.HoudiniEventLoop`, чей `run_forever()`
+# требует главный поток, а `asyncio.create_subprocess_exec` там же валится
+# на `get_child_watcher()` -> NotImplementedError. Вне Houdini политика
+# стоковая, и оба вызова работают — поэтому обычные тесты этого не ловят.
+# Здесь подставляем политику с ровно тем же поведением и гоняем настоящего
+# fake_agent.py под ней: `AcpClient` обязан работать, потому что цикл берётся
+# классом напрямую (в обход политики), а процесс поднимается `subprocess.Popen`
+# (в обход child watcher'а) — см. докстринг client.py.
+
+
+class _HaioLikeEventLoop(asyncio.SelectorEventLoop):
+    """Имитирует единственное наблюдаемое поведение haio, которое нас касается:
+    `run_forever()` вне главного потока — RuntimeError."""
+
+    def run_forever(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("Current thread is not the main thread")
+        super().run_forever()
+
+
+class _HaioLikeEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+    def new_event_loop(self) -> asyncio.AbstractEventLoop:
+        return _HaioLikeEventLoop()
+
+    def get_child_watcher(self):
+        raise NotImplementedError("haio does not support child watchers")
+
+
+@pytest.fixture
+def haio_like_policy():
+    """Подменяет глобальную политику asyncio на время теста и возвращает её
+    обратно — иначе сломаются все тесты, идущие после этого в том же прогоне
+    pytest (политика глобальна на процесс)."""
+    original = asyncio.get_event_loop_policy()
+    asyncio.set_event_loop_policy(_HaioLikeEventLoopPolicy())
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop_policy(original)
+
+
+def test_client_works_under_a_haio_like_event_loop_policy(
+    qapp, haio_like_policy, tmp_path, make_client
+):
+    """Красный без обхода из client.py: `asyncio.new_event_loop()` схлопотал
+    бы `_HaioLikeEventLoop`, чей `run_forever()` падает на рабочем потоке —
+    `connected` никогда бы не пришёл, тест упал бы по таймауту."""
+    client = make_client()
+    connected = _connect(qapp, client, "stream", tmp_path)
+    assert connected.calls[0][0].name == "fake-agent"
+
+    session_id = _new_session(qapp, client, tmp_path)
+
+    finished = _Recorder(client.turn_finished)
+    messages = _Recorder(client.message_chunk)
+    client.prompt(session_id, [{"type": "text", "text": "hi"}])
+    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "эхо: hi")
+
+    assert finished.calls[0] == (session_id, "end_turn")

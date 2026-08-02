@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Callable, Protocol
@@ -22,6 +24,43 @@ from typing import Callable, Protocol
 USER_AGENT = "houdini-agent-panel"
 
 DEFAULT_TIMEOUT = 30.0
+
+#: Своя связка корневых сертификатов для студий с перехватывающим прокси.
+CA_BUNDLE_ENV = "HAP_CA_BUNDLE"
+
+_ssl_context: ssl.SSLContext | None = None
+
+
+def ssl_context() -> ssl.SSLContext:
+    """Контекст TLS, который работает и внутри Houdini.
+
+    Python, который приносит с собой Houdini, собран без связки корневых
+    сертификатов: любой HTTPS оттуда падает с
+    ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate``
+    (проверено запуском в Houdini 22.0.368). А панель ходит в сеть именно
+    оттуда — за реестром, агентами, Node, версиями и оповещениями. Без этого
+    у неё не работает ни одна сетевая функция.
+
+    Поэтому связку берём у ``certifi``: он и так приезжает вместе с
+    зависимостями. Отключать проверку сертификатов — не вариант: мы по этим
+    соединениям качаем исполняемые файлы.
+    """
+    global _ssl_context
+    if _ssl_context is not None:
+        return _ssl_context
+
+    override = os.environ.get(CA_BUNDLE_ENV)
+    if override and os.path.exists(override):
+        _ssl_context = ssl.create_default_context(cafile=override)
+        return _ssl_context
+
+    try:
+        import certifi
+
+        _ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 - вне Houdini системная связка обычно есть
+        _ssl_context = ssl.create_default_context()
+    return _ssl_context
 
 
 class NetworkError(RuntimeError):
@@ -41,7 +80,7 @@ def urlopen_fetch(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> bytes:
     """Забрать URL целиком. Годится для JSON, не годится для архивов."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as response:
             return response.read()
     except urllib.error.HTTPError as exc:
         raise NetworkError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
@@ -65,7 +104,7 @@ def stream_fetch(
     """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as response:
             raw_length = response.headers.get("Content-Length")
             total = int(raw_length) if raw_length and raw_length.isdigit() else None
             done = 0
