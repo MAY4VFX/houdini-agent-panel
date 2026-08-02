@@ -195,6 +195,64 @@ def _chunk_text(content: Any) -> str:
     return content.text if getattr(content, "type", None) == "text" else ""
 
 
+@dataclass(frozen=True)
+class ConfigChoice:
+    value: str
+    name: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class ConfigOption:
+    """One agent-side setting: model, reasoning effort, fast mode and so on.
+
+    Agents expose these through `configOptions` in the `session/new` reply —
+    that is where the model picker actually lives in ACP. The panel draws
+    what the agent offers and nothing else: `category` tells the UI how to
+    group them (`model_config` and friends), and it is the agent's word, not
+    ours.
+    """
+
+    id: str
+    name: str
+    current_value: str
+    choices: tuple[ConfigChoice, ...] = ()
+    description: str = ""
+    category: str = ""
+
+
+def _config_options_from(raw) -> list[ConfigOption]:
+    """Flatten the SDK's config options, skipping anything not a select.
+
+    Booleans and future kinds are dropped deliberately rather than guessed
+    at: drawing a control we do not understand is worse than not drawing it.
+    """
+    result: list[ConfigOption] = []
+    for option in raw or []:
+        choices = getattr(option, "options", None)
+        if not choices:
+            continue
+        result.append(
+            ConfigOption(
+                id=getattr(option, "id", "") or "",
+                name=getattr(option, "name", "") or "",
+                current_value=str(getattr(option, "current_value", "") or ""),
+                choices=tuple(
+                    ConfigChoice(
+                        value=str(getattr(c, "value", "")),
+                        name=getattr(c, "name", "") or str(getattr(c, "value", "")),
+                        description=getattr(c, "description", "") or "",
+                    )
+                    for c in choices
+                ),
+                description=getattr(option, "description", "") or "",
+                category=getattr(option, "category", "") or "",
+            )
+        )
+    return result
+
+
+
 class AcpWorker(QtCore.QThread):
     """Lives on the worker thread. Owns the loop, the agent process, the connection.
 
@@ -217,6 +275,7 @@ class AcpWorker(QtCore.QThread):
     session_started = Signal(str, object)  # session_id, SessionState
     modes_changed = Signal(str, object)  # session_id, acp.schema.SessionModeState
     commands_changed = Signal(str, list)  # session_id, list[acp.schema.AvailableCommand]
+    config_options_changed = Signal(str, list)  # session_id, list[ConfigOption]
 
     # --- feed --------------------------------------------------------------
     message_chunk = Signal(str, str, str)  # session_id, message_id, text
@@ -325,9 +384,13 @@ class AcpWorker(QtCore.QThread):
             # directly. There is no `.usage` attribute, and reading one raised
             # AttributeError on every single token-counter update.
             self.usage_changed.emit(session_id, update)
+        elif kind == "config_option_update":
+            options = _config_options_from(getattr(update, "config_options", None))
+            if options:
+                self.config_options_changed.emit(session_id, options)
         # user_message_chunk — the panel already drew its own input when it
-        # sent it, so it doesn't need the agent's echo; config_option_update
-        # and session_info_update are out of scope for v1, silently ignored.
+        # sent it, so it doesn't need the agent's echo; session_info_update is
+        # out of scope for v1 and silently ignored.
 
     async def request_permission(
         self, session_id: str, tool_call: Any, options: list, **kwargs: Any
@@ -555,6 +618,13 @@ class AcpWorker(QtCore.QThread):
             available_commands=[],
         )
         self.session_started.emit(response.session_id, state)
+        # The model picker lives here in ACP: agents expose model, reasoning
+        # effort and fast mode as session config options, not as a dedicated
+        # protocol concept. Nobody read them before, so the chip stayed
+        # permanently hidden.
+        options = _config_options_from(getattr(response, "config_options", None))
+        if options:
+            self.config_options_changed.emit(response.session_id, options)
 
     async def do_prompt(self, session_id: str, blocks: list[dict]) -> None:
         if self._conn is None:
@@ -575,6 +645,19 @@ class AcpWorker(QtCore.QThread):
     async def do_cancel(self, session_id: str) -> None:
         if self._conn is not None:
             await self._conn.cancel(session_id=session_id)
+
+    async def do_set_config_option(self, session_id: str, config_id: str, value: str) -> None:
+        if self._conn is None:
+            return
+        try:
+            await self._conn.set_config_option(
+                config_id=config_id, session_id=session_id, value=value
+            )
+        except acp.RequestError as exc:
+            if not self._emit_if_auth_required(exc):
+                self.error.emit(session_id, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(session_id, str(exc))
 
     async def do_set_mode(self, session_id: str, mode_id: str) -> None:
         if self._conn is None:
@@ -699,6 +782,7 @@ _FORWARDED_SIGNALS = (
     "session_started",
     "modes_changed",
     "commands_changed",
+    "config_options_changed",
     "message_chunk",
     "thought_chunk",
     "tool_call",
@@ -729,6 +813,7 @@ class AcpClient(QtCore.QObject):
     session_started = Signal(str, object)
     modes_changed = Signal(str, object)
     commands_changed = Signal(str, list)
+    config_options_changed = Signal(str, list)
 
     message_chunk = Signal(str, str, str)
     thought_chunk = Signal(str, str, str)
@@ -809,6 +894,10 @@ class AcpClient(QtCore.QObject):
 
     def set_mode(self, session_id: str, mode_id: str) -> None:
         self._worker.submit(self._worker.do_set_mode(session_id, mode_id))
+
+    def set_config_option(self, session_id: str, config_id: str, value: str) -> None:
+        """Change an agent-side setting: model, reasoning effort, fast mode."""
+        self._worker.submit(self._worker.do_set_config_option(session_id, config_id, value))
 
     def answer_permission(self, request_key: str, option_id: str | None) -> None:
         """`option_id=None` — "cancelled", results in a `DeniedOutcome`."""
