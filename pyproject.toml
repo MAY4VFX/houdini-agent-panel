@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "houdini-agent-panel"
+version = "0.1.0"
+description = "Панель-чат с ACP-агентом внутри SideFX Houdini поверх fxhoudinimcp"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10,<3.15"
+authors = [{ name = "MAY4VFX" }]
+keywords = ["houdini", "vfx", "acp", "agent", "mcp"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+dependencies = [
+    "agent-client-protocol>=0.12,<0.13",
+    "fxhoudinimcp>=2.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/MAY4VFX/houdini-agent-panel"
+Issues = "https://github.com/MAY4VFX/houdini-agent-panel/issues"
+
+[project.scripts]
+houdini-agent-panel = "houdini_agent_panel.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "PySide6>=6.5",
+]
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["houdini_agent_panel*"]
+
+[tool.setuptools.package-data]
+houdini_agent_panel = ["houdini/**/*", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
