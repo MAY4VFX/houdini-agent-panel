@@ -73,7 +73,7 @@ def printable_argv(argv: list[str]) -> str:
     return " ".join(f'"{part}"' if " " in part else part for part in argv)
 ```
 Просто джойнит argv в строку, оборачивая в кавычки части с пробелами
-(например путь `/Users/may/Library/.../python` без пробелов останется
+(например путь `~/Library/.../python` без пробелов останется
 без кавычек). Никакой полноценной shell-эскейпинг-логики нет — только для
 показа человеку.
 

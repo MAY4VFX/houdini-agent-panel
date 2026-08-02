@@ -4,12 +4,10 @@ build/
 dist/
 wheels/
 *.egg-info
-.venv
 .DS_Store
-.claude/
 
 # dev
 .venv/
 logs/
-
-dist/
+.claude/
+.codex/

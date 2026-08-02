@@ -40,11 +40,12 @@ rm -rf dist && uv build -o dist
 uvx --from ./dist/houdini_agent_panel-*.whl python -m houdini_agent_panel install --find-links "$(pwd)/dist"
 
 # 5. Публикация
-UV_PUBLISH_TOKEN=$(grep -E '^PYPI_TOKEN=' ~/Github/may-hub/.env | cut -d= -f2-) uv publish dist/*
+UV_PUBLISH_TOKEN=$(grep -E '^PYPI_TOKEN=' "$SECRETS_ENV" | cut -d= -f2-) uv publish dist/*
 ```
 
-Токен живёт только в `~/Github/may-hub/.env` (chmod 600, вне git) и читается в
-момент использования — как и все остальные секреты в этом хозяйстве.
+Токен живёт в локальном файле секретов вне git (`$SECRETS_ENV` — путь к нему,
+chmod 600) и читается в момент использования. В репозиторий и в историю шелла
+он не попадает.
 
 ## Что проверить руками перед публикацией
 

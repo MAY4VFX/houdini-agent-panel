@@ -212,7 +212,7 @@ Panels при старте Houdini. Подтверждено расположе�
 {
     "env": [
         {
-            "FXHOUDINIMCP": "/Users/may/.local/share/uv/tools/fxhoudinimcp/lib/python3.12/site-packages/fxhoudinimcp/houdini"
+            "FXHOUDINIMCP": "~/.local/share/uv/tools/fxhoudinimcp/lib/python3.12/site-packages/fxhoudinimcp/houdini"
         }
     ],
     "path": "$FXHOUDINIMCP"
@@ -242,17 +242,17 @@ Panels при старте Houdini. Подтверждено расположе�
   "load_package_once": true,
   "env": [
     {
-      "CTENTACULO_LOCATION": "/Users/may/cerebro/ctentaculo"
+      "CTENTACULO_LOCATION": "~/cerebro/ctentaculo"
     },
     {
       "HOUDINI_MENU_PATH": {
-        "value": "&:/Users/may/cerebro/ctentaculo/tentaculo/api/ihoudini",
+        "value": "&:~/cerebro/ctentaculo/tentaculo/api/ihoudini",
         "method": "append"
       }
     },
     {
       "PYTHONPATH": {
-        "value": "/Users/may/cerebro/ctentaculo",
+        "value": "~/cerebro/ctentaculo",
         "method": "append"
       }
     }
