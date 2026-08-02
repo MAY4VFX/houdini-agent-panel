@@ -23,6 +23,7 @@ from .sessions import SessionMode, SessionState, Usage
 from .transcript_model import PermissionView, TranscriptModel
 from .ui.chips import HeaderBar
 from .ui.composer import Composer
+from .ui.permissions import PermissionRow
 from .ui.qt import QtCore, QtGui, QtWidgets
 from .ui.transcript import TranscriptView
 
@@ -68,7 +69,6 @@ class PreviewPanel(QtWidgets.QWidget):
         self.transcript = TranscriptView(self)
         self._seed_transcript()
         self.transcript.set_model(self._model)
-        self.transcript.permission_answered.connect(self._resolve_permission)
         layout.addWidget(self.transcript, 1)
 
         self.composer = Composer(self)
@@ -89,6 +89,11 @@ class PreviewPanel(QtWidgets.QWidget):
         self.composer.submitted.connect(self._submit)
         self.composer.cancelled.connect(self._finish_preview_turn)
         layout.addWidget(self.composer)
+        self.permission = PermissionRow(self._preview_permission, self)
+        self.permission.answered.connect(self._resolve_permission)
+        self.permission.show()
+        self.permission.raise_()
+        QtCore.QTimer.singleShot(0, self._position_permission)
         QtCore.QTimer.singleShot(0, self._start_visible_activity)
 
     def _seed_transcript(self) -> None:
@@ -113,16 +118,15 @@ class PreviewPanel(QtWidgets.QWidget):
                 locations=None,
             )
         )
-        self._model.apply_permission(
-            PermissionView(
-                "preview-permission",
-                "Разрешить изменить сцену?",
-                [
-                    ("reject_once", "Отклонить", "reject_once"),
-                    ("allow_once", "Разрешить один раз", "allow_once"),
-                ],
-            )
+        self._preview_permission = PermissionView(
+            "preview-permission",
+            "Разрешить изменить сцену?",
+            [
+                ("reject_once", "Отклонить", "reject_once"),
+                ("allow_once", "Разрешить один раз", "allow_once"),
+            ],
         )
+        self._model.apply_permission(self._preview_permission)
 
     def _submit(self, blocks: list[dict]) -> None:
         self._finish_preview_turn()
@@ -175,6 +179,23 @@ class PreviewPanel(QtWidgets.QWidget):
         entry = self._model.resolve_permission(request_key, option_id or None)
         if entry is not None:
             self.transcript.refresh(entry.id)
+        self.permission.hide()
+
+    def _position_permission(self) -> None:
+        anchor = self.composer.popover_anchor_rect(self)
+        width = min(400, max(280, anchor.width() - 96))
+        self.permission.setFixedWidth(width)
+        self.permission.adjustSize()
+        self.permission.move(
+            anchor.center().x() - width // 2,
+            anchor.top() - self.permission.height() - 10,
+        )
+        self.permission.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "permission"):
+            self._position_permission()
 
 
 def _run_window() -> int:

@@ -177,6 +177,7 @@ class Composer(QtWidgets.QWidget):
     cancelled = Signal()
     mode_selected = Signal(str)
     model_selected = Signal(str)
+    buddy_selected = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -272,6 +273,7 @@ class Composer(QtWidgets.QWidget):
         main_layout.addWidget(self._surface, 0, QtCore.Qt.AlignHCenter)
 
         self._buddy = _BuddySprite(self)
+        self._buddy.clicked.connect(self.buddy_selected.emit)
         self._buddy.raise_()
 
         self.setStyleSheet(
@@ -312,10 +314,13 @@ class Composer(QtWidgets.QWidget):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._surface.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
-        surface_at = self._surface.mapTo(self, QtCore.QPoint(0, 0))
+        # Layout геометрию применяет уже после resizeEvent, поэтому X считаем
+        # из того же center rule напрямую, а не читаем устаревший mapTo().
+        surface_x = (self.width() - self._surface.width()) // 2
+        surface_y = self._surface.y()
         self._buddy.move(
-            surface_at.x() + self._surface.width() - self._buddy.width() - 20,
-            surface_at.y() - self._buddy.height() + 12,
+            surface_x + self._surface.width() - self._buddy.width() - 20,
+            surface_y - self._buddy.height() + 12,
         )
         self._buddy.raise_()
 
@@ -360,6 +365,11 @@ class Composer(QtWidgets.QWidget):
 
     def trigger_buddy(self) -> None:
         self._buddy.start_action()
+
+    def popover_anchor_rect(self, target: QtWidgets.QWidget) -> QtCore.QRect:
+        """Composer surface in coordinates of an external overlay host."""
+        top_left = self._surface.mapTo(target, QtCore.QPoint(0, 0))
+        return QtCore.QRect(top_left, self._surface.size())
 
     def enable_preview_microphone(self) -> None:
         """Показать affordance в standalone preview без выдуманной capability."""

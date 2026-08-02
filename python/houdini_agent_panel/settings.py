@@ -56,6 +56,7 @@ class Settings:
     telemetry: bool = False
     telemetry_consent_asked: bool = False
     whisper_endpoint: str = ""
+    buddy: str = "crag"
     custom_agents: list[CustomAgent] = field(default_factory=list)
     installed_agents: dict[str, InstalledAgent] = field(default_factory=dict)
     seen_announcements: list[str] = field(default_factory=list)

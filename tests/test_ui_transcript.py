@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from houdini_agent_panel.transcript_model import PermissionView, TranscriptModel
-from houdini_agent_panel.ui.permissions import PermissionRow
 from houdini_agent_panel.ui.qt import QtCore, QtGui
 from houdini_agent_panel.ui.transcript import TranscriptView
 
@@ -299,7 +298,7 @@ def test_plan_row_replaces_steps_in_place_on_update(qapp):
 # --- разрешения --------------------------------------------------------------
 
 
-def test_permission_row_is_embedded_and_forwards_answered_signal(qapp):
+def test_permission_is_not_embedded_in_transcript(qapp):
     view, model = _view_and_model()
     perm_view = PermissionView(
         request_key="req1", tool_title="rm -rf", options=[("allow_once", "Allow", "allow_once")]
@@ -307,31 +306,19 @@ def test_permission_row_is_embedded_and_forwards_answered_signal(qapp):
     entry = model.apply_permission(perm_view)
     view.refresh(entry.id)
 
-    row = view._rows[entry.id]
-    assert isinstance(row, PermissionRow)
-
-    seen = []
-    view.permission_answered.connect(lambda key, option_id: seen.append((key, option_id)))
-    row._buttons["allow_once"].click()
-
-    assert seen == [("req1", "allow_once")]
+    assert entry.id not in view._rows
 
 
-def test_permission_row_updated_in_place_when_resolved_externally(qapp):
+def test_resolved_permission_stays_out_of_transcript(qapp):
     view, model = _view_and_model()
     perm_view = PermissionView(
         request_key="req1", tool_title="rm -rf", options=[("allow_once", "Allow", "allow_once")]
     )
     entry = model.apply_permission(perm_view)
     view.refresh(entry.id)
-    row_before = view._rows[entry.id]
-
     model.resolve_permission("req1", "allow_once")
     view.refresh(entry.id)
-
-    row_after = view._rows[entry.id]
-    assert row_after is row_before  # история решения не потеряна пересозданием
-    assert all(not b.isEnabled() for b in row_after._buttons.values())
+    assert entry.id not in view._rows
 
 
 # --- автопрокрутка -------------------------------------------------------------

@@ -66,6 +66,19 @@ def test_two_panels_share_one_client_and_one_pool(qapp):
     second.shutdown()
 
 
+def test_buddy_selection_is_saved_and_restored(qapp):
+    from houdini_agent_panel import settings as settings_mod
+
+    first = _make_panel(qapp)
+    first._composer.buddy_selected.emit("squid")
+    assert settings_mod.load().buddy == "squid"
+    first.shutdown()
+
+    second = _make_panel(qapp)
+    assert second._composer._buddy._key == "squid"
+    second.shutdown()
+
+
 def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
     """Самое дорогое место интеграции.
 
@@ -116,6 +129,9 @@ def test_shutdown_is_idempotent(qapp):
 
 def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monkeypatch):
     widget = _make_panel(qapp)
+    widget.resize(900, 700)
+    widget.show()
+    qapp.processEvents()
     client = panel_mod.shared_client()
 
     state = _session()
@@ -145,11 +161,18 @@ def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monke
     entries = widget._model(state.session_id).entries()
     permission_entries = [entry for entry in entries if entry.kind == "permission"]
     assert len(permission_entries) == 1
+    assert widget._permission_popover is not None
+    anchor = widget._composer.popover_anchor_rect(widget)
+    popover = widget._permission_popover
+    assert abs(popover.geometry().center().x() - anchor.center().x()) <= 1
+    assert popover.geometry().bottom() < anchor.top()
+    assert "req-1" not in widget._transcript._rows
 
     widget._on_permission_answered("req-1", "allow_once")
 
     assert answered == [("req-1", "allow_once")]
     assert permission_entries[0].permission.answered == "allow_once"
+    assert widget._permission_popover is None
 
     widget.shutdown()
 

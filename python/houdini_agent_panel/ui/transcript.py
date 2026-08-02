@@ -16,8 +16,7 @@ import re
 
 from ..transcript_model import Entry, TranscriptModel
 from . import theme
-from .permissions import PermissionRow
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets
 from .thinking import ThinkingIndicator
 
 #: Сколько пикселей до низа ещё считается «внизу» — маленький запас на
@@ -60,8 +59,6 @@ def _split_markdown_segments(text: str) -> list[tuple[str, str]]:
 
 
 class TranscriptView(QtWidgets.QScrollArea):
-    permission_answered = Signal(str, str)  # request_key, option_id ("" = отменено)
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -113,6 +110,8 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._rows.clear()
 
         for entry in self._model.entries():
+            if entry.kind == "permission":
+                continue
             row = self._make_row(entry)
             self._rows[entry.id] = row
             self._layout.insertWidget(len(self._rows) - 1, row)
@@ -120,6 +119,14 @@ class TranscriptView(QtWidgets.QScrollArea):
     def _refresh_one(self, entry_id: str) -> None:
         entries = self._model.entries()
         entry = next((e for e in entries if e.id == entry_id), None)
+
+        if entry is not None and entry.kind == "permission":
+            row = self._rows.pop(entry_id, None)
+            if row is not None:
+                self._layout.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+            return
 
         if entry is None:
             # Протокол сегодня записи не удаляет, но не падаем, если это
@@ -140,7 +147,11 @@ class TranscriptView(QtWidgets.QScrollArea):
         # Записи из TranscriptModel всегда добавляются в конец и не
         # переставляются, так что позиция среди уже отрисованных строк
         # совпадает с индексом записи в полном списке модели.
-        index = entries.index(entry)
+        index = sum(
+            1
+            for candidate in entries[: entries.index(entry)]
+            if candidate.kind != "permission"
+        )
         row = self._make_row(entry)
         self._rows[entry.id] = row
         self._layout.insertWidget(index, row)
@@ -154,16 +165,9 @@ class TranscriptView(QtWidgets.QScrollArea):
             return _ToolCallRow(entry)
         if entry.kind == "plan":
             return _PlanRow(entry)
-        if entry.kind == "permission":
-            row = PermissionRow(entry.permission)
-            row.answered.connect(self.permission_answered)
-            return row
         return _MessageRow(entry)
 
     def _update_row(self, row: QtWidgets.QWidget, entry: Entry) -> None:
-        if isinstance(row, PermissionRow):
-            row.apply_view(entry.permission)
-            return
         row.update_from(entry)
 
     # --- автопрокрутка -----------------------------------------------------

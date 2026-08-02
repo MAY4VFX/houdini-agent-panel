@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Protocol
 
-from .qt import QtCore, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal
 
 
 def _import_qtmultimedia():
@@ -194,10 +194,29 @@ class VoiceButton(QtWidgets.QToolButton):
         self._tmp_path: Path | None = None
         self._upload_thread: _UploadWorker | None = None
 
-        self.setText("\U0001f399")  # 🎙
+        self.setText("")
+        self.setFixedSize(28, 28)
+        self.setToolTip("Голосовой ввод")
         self.setCheckable(True)
         self.setVisible(False)
         self.clicked.connect(self._on_clicked)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        """Draw a crisp platform-independent mic instead of an emoji glyph."""
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        color = self.palette().color(QtGui.QPalette.ButtonText)
+        if self._recording:
+            color = self.palette().color(QtGui.QPalette.Highlight)
+        pen = QtGui.QPen(color, 1.4)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRoundedRect(QtCore.QRectF(10.5, 5.0, 7.0, 11.0), 3.5, 3.5)
+        painter.drawArc(QtCore.QRectF(7.5, 8.5, 13.0, 11.0), 180 * 16, 180 * 16)
+        painter.drawLine(QtCore.QPointF(14.0, 19.5), QtCore.QPointF(14.0, 22.0))
+        painter.drawLine(QtCore.QPointF(10.5, 22.0), QtCore.QPointF(17.5, 22.0))
 
     # --- публичное -----------------------------------------------------
 

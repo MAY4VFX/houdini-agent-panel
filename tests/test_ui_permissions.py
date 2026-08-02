@@ -24,7 +24,8 @@ def _view(**overrides) -> PermissionView:
 def test_buttons_built_in_order_from_options(qapp):
     row = PermissionRow(_view())
     assert list(row._buttons.keys()) == ["allow_once", "allow_always", "reject_once"]
-    assert row.maximumWidth() == 482
+    assert row.maximumWidth() == 400
+    assert row.minimumWidth() == 280
 
 
 def test_button_labels_match_option_names_exactly(qapp):

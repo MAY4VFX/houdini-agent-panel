@@ -71,3 +71,34 @@ def test_buddy_action_finishes_and_returns_to_idle(qapp):
 
     assert buddy._action_elapsed is None
     assert buddy._key == "squid"
+
+
+def test_buddy_uses_distinct_idle_think_and_action_cycles(qapp):
+    buddy = thinking._BuddySprite()
+    buddy.set_buddy("pig")
+
+    buddy.advance(0)
+    assert buddy._current_pose() == ("idle", 0)
+    buddy.advance(thinking._THINK_START_MS + thinking._THINK_FRAME_MS)
+    assert buddy._current_pose() == ("think", 1)
+    buddy.start_action()
+    assert buddy._current_pose() == ("action", 0)
+
+    assert set(buddy._frames) == {"idle", "think", "action"}
+    assert all(len(frames) == 4 for frames in buddy._frames.values())
+    assert not any(frame.isNull() for frames in buddy._frames.values() for frame in frames)
+
+
+def test_click_cycles_buddy_and_emits_selection(qapp):
+    from PySide6 import QtCore, QtTest
+
+    buddy = thinking._BuddySprite()
+    buddy.set_buddy("crag")
+    buddy.show()
+    selected = []
+    buddy.clicked.connect(selected.append)
+
+    QtTest.QTest.mouseClick(buddy, QtCore.Qt.LeftButton)
+
+    assert buddy._key == "pig"
+    assert selected == ["pig"]

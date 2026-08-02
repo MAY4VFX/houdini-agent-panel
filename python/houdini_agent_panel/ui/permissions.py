@@ -1,12 +1,12 @@
-"""`PermissionRow` — строка запроса разрешения в ленте (docs/architecture.md §10).
+"""Компактный popover запроса разрешения над composer.
 
 Кнопки строятся строго из `view.options`, в порядке, присланном агентом:
 своих кнопок не добавляем (в том числе кнопку «отмена» — если агенту нужна
 такая опция, он пришлёт её сам), чужие не переименовываем. `kind` каждой
 опции влияет только на акцент (не текст, не порядок): `reject_*` получают
 цвет ошибки из `theme` (по форме, не по хардкод-цвету — см. `theme.status_color`),
-`*_always` — жирное начертание. Ответив, строка не исчезает и не превращается
-в кнопки заново — она остаётся в ленте историей решения человека.
+`*_always` — жирное начертание. Решение хранит TranscriptModel, а сам
+интерактивный popover исчезает сразу после ответа.
 """
 
 from __future__ import annotations
@@ -21,17 +21,18 @@ class PermissionRow(QtWidgets.QWidget):
 
     def __init__(self, view: PermissionView, parent=None) -> None:
         super().__init__(parent)
-        self.setObjectName("permissionCard")
+        self.setObjectName("permissionPopover")
         self.setAttribute(theme.QtCore.Qt.WA_StyledBackground, True)
-        self.setMaximumWidth(482)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(400)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self._view = view
         self._answered: str | None = view.answered
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(13, 11, 13, 11)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
         self._title_label = QtWidgets.QLabel(view.tool_title, self)
         self._title_label.setWordWrap(True)
@@ -44,6 +45,7 @@ class PermissionRow(QtWidgets.QWidget):
         for option_id, name, kind in view.options:
             button = QtWidgets.QPushButton(name, self)  # текст — ровно то, что прислал агент
             button.setFlat(True)
+            button.setMinimumHeight(26)
             font = button.font()
             if kind.endswith("_always"):
                 font.setBold(True)
@@ -67,26 +69,34 @@ class PermissionRow(QtWidgets.QWidget):
             self._apply_answered(self._answered)
 
         self.setStyleSheet(
-            "QWidget#permissionCard {"
+            "QWidget#permissionPopover {"
             " background: palette(base);"
             " border: 1px solid palette(mid);"
-            " border-radius: 10px;"
+            " border-radius: 12px;"
             "}"
-            "QWidget#permissionCard QPushButton {"
+            "QWidget#permissionPopover QPushButton {"
             " border: 1px solid palette(mid);"
-            " border-radius: 7px;"
-            " padding: 5px 9px;"
+            " border-radius: 6px;"
+            " padding: 3px 8px;"
             " background: palette(alternate-base);"
             "}"
-            "QWidget#permissionCard QPushButton:hover {"
+            "QWidget#permissionPopover QPushButton:hover {"
             " background: palette(button);"
             "}"
-            "QWidget#permissionCard QPushButton[permissionPrimary=\"true\"] {"
+            "QWidget#permissionPopover QPushButton[permissionPrimary=\"true\"] {"
             " border-color: transparent;"
             " color: #24180c;"
             " background: #e5a047;"
             "}"
         )
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 7)
+        shadow.setColor(QtGui.QColor(0, 0, 0, 115))
+        self.setGraphicsEffect(shadow)
+
+    def request_key(self) -> str:
+        return self._view.request_key
 
     def apply_view(self, view: PermissionView) -> None:
         """Обновить строку по свежему `PermissionView` (например `answered` пришёл извне).
