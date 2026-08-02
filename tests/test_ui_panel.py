@@ -290,3 +290,27 @@ def test_consent_strip_does_not_block_input(qapp):
     assert widget._transcript.isEnabled()
 
     widget.shutdown()
+
+
+def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
+    """Кнопки входа не должны говорить с покойником.
+
+    Клиент общий и пересоздаётся при смене агента. Прямая подписка
+    `view.method_chosen.connect(shared_client().authenticate)` навсегда
+    запомнила бы тот экземпляр, что был в момент сборки виджета.
+    """
+    widget = _make_panel(qapp)
+
+    panel_mod._shared_client = None  # имитируем пересоздание после смены агента
+    fresh = panel_mod.shared_client()
+
+    seen: list = []
+    monkeypatch.setattr(fresh, "authenticate", lambda mid: seen.append(("auth", mid)))
+    monkeypatch.setattr(fresh, "logout", lambda: seen.append(("logout",)))
+
+    widget._auth_view.method_chosen.emit("oauth")
+    widget._auth_view.logout_requested.emit()
+    qapp.processEvents()
+
+    assert seen == [("auth", "oauth"), ("logout",)]
+    widget.shutdown()

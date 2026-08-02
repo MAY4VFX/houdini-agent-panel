@@ -193,7 +193,12 @@ class AgentPanel(QtWidgets.QWidget):
 
         view = AuthView(self)
         self._auth_view = view
-        view.method_chosen.connect(shared_client().authenticate)
+        # Через свои методы, а не напрямую в shared_client().authenticate:
+        # прямая подписка навсегда запомнила бы ТОТ экземпляр клиента, что
+        # существовал в момент сборки виджета. После смены агента клиент
+        # пересоздаётся, и кнопки входа молча начали бы говорить с покойником.
+        view.method_chosen.connect(self._on_auth_method_chosen)
+        view.logout_requested.connect(self._on_logout_requested)
         return view
 
     def _show_page(self, index: int) -> None:
@@ -539,6 +544,20 @@ class AgentPanel(QtWidgets.QWidget):
         if announcement_id and announcement_id not in self._settings.seen_announcements:
             self._settings.seen_announcements.append(announcement_id)
             settings_mod.save(self._settings)
+
+    def _on_auth_method_chosen(self, method_id: str) -> None:
+        shared_client().authenticate(method_id)
+
+    def _on_logout_requested(self) -> None:
+        """Выход возвращает панель туда же, откуда пришёл вход.
+
+        Клиент после успешного logout поднимает `auth_required` с теми же
+        методами, что были в `initialize`, — экран входа покажется сам, и
+        отдельной ветки здесь не нужно. Если агент выйти не смог, придёт
+        `error`, и человек останется там же, где был: молча делать вид, что
+        вышли, нельзя.
+        """
+        shared_client().logout()
 
     def _ask_telemetry_consent_once(self) -> None:
         """Спросить про телеметрию ровно один раз за всё время.

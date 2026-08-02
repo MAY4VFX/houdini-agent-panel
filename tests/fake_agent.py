@@ -9,7 +9,9 @@ pydantic, порядок сообщений — всё это легко сло�
 Поведение выбирается переменной окружения ``FAKE_AGENT_SCENARIO``:
 
 - ``stream`` (по умолчанию) — обычный стриминг ответа несколькими чанками.
-- ``auth`` — `prompt` кидает `auth_required`, пока не позвали `authenticate`.
+- ``auth`` — `prompt` кидает `auth_required`, пока не позвали `authenticate`;
+  умеет и `logout` — проверяет цикл «требует вход → вошли → вышли → снова
+  требует вход» (issue #6).
 - ``permission`` — просит разрешение перед ответом, эхает выбранную опцию.
 - ``modes`` — предлагает `availableModes`/`currentModeId`, слушает `set_session_mode`.
 - ``plan`` — шлёт план и `tool_call`/`tool_call_update` перед ответом.
@@ -22,21 +24,27 @@ import asyncio
 import os
 
 import acp
+from acp.agent.connection import AgentSideConnection
 from acp.exceptions import RequestError
 from acp.helpers import plan_entry, start_tool_call, text_block, update_plan, update_tool_call
+from acp.meta import AGENT_METHODS
 from acp.schema import (
+    AgentAuthCapabilities,
     AgentCapabilities,
     AgentMessageChunk,
     AgentThoughtChunk,
     AuthMethodAgent,
     CurrentModeUpdate,
     Implementation,
+    LogoutCapabilities,
+    LogoutRequest,
     PermissionOption,
     PromptCapabilities,
     SessionMode,
     SessionModeState,
     ToolCallUpdate,
 )
+from acp.stdio import stdio_streams
 
 SCENARIO = os.environ.get("FAKE_AGENT_SCENARIO", "stream")
 
@@ -79,17 +87,22 @@ class FakeAgent:
         self, protocol_version, client_capabilities=None, client_info=None, **kwargs
     ):
         auth_methods = []
+        auth_caps = None
         if SCENARIO == "auth":
             auth_methods = [
                 AuthMethodAgent(
                     id=_AUTH_METHOD_ID, name="API Key", description="тестовый метод входа"
                 )
             ]
+            # LogoutCapabilities() — пустой, но не None объект: именно так
+            # агент объявляет "умею logout" (см. client.py::_agent_info_from
+            # и docs/architecture.md §6 — None здесь означало бы "не умею").
+            auth_caps = AgentAuthCapabilities(logout=LogoutCapabilities())
         prompt_caps = PromptCapabilities(image=True, audio=False, embedded_context=True)
         return acp.InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
-                load_session=False, prompt_capabilities=prompt_caps
+                load_session=False, prompt_capabilities=prompt_caps, auth=auth_caps
             ),
             auth_methods=auth_methods,
             agent_info=Implementation(name="fake-agent", version="0.0.1"),
@@ -99,6 +112,11 @@ class FakeAgent:
         if SCENARIO == "auth" and method_id == _AUTH_METHOD_ID:
             self._authenticated = True
         return None
+
+    async def logout(self, **kwargs) -> None:
+        """Агент логически возвращается в состояние "требует вход" — ровно
+        то, что `AcpClient.do_logout` и ожидает после успешного вызова."""
+        self._authenticated = False
 
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
         self._session_counter += 1
@@ -201,7 +219,26 @@ class FakeAgent:
 
 
 async def _main() -> None:
-    await acp.run_agent(FakeAgent())
+    # Обычно тут было бы просто `await acp.run_agent(FakeAgent())`. Но
+    # agent-client-protocol 0.12.0 объявляет AGENT_METHODS["logout"] и схему
+    # LogoutRequest/LogoutResponse, а маршрут для "logout" в
+    # build_agent_router() (используется и `run_agent`, и `AgentSideConnection`
+    # изнутри) не регистрирует вовсе — проверено чтением
+    # acp/agent/router.py: там построчно route_request на каждый метод, и
+    # "logout" среди них просто нет. Значит ЛЮБОЙ агент на этой версии SDK
+    # получил бы method_not_found на настоящий логаут, что бы он сам ни
+    # реализовывал. Поэтому здесь разворачиваем `run_agent` вручную (это его
+    # ровно тот же код) и дозаписываем недостающий маршрут публичным методом
+    # роутера, чтобы сценарий "auth" мог по-честному проверить логаут.
+    agent = FakeAgent()
+    output_stream, input_stream = await stdio_streams(limit=50 * 1024 * 1024)
+    conn = AgentSideConnection(agent, input_stream, output_stream, listening=False)
+    router = conn._conn._handler
+    router.route_request(AGENT_METHODS["logout"], LogoutRequest, agent, "logout")
+    try:
+        await conn.listen()
+    finally:
+        await asyncio.shield(conn.close())
 
 
 if __name__ == "__main__":

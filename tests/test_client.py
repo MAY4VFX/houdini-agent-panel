@@ -198,6 +198,50 @@ def test_prompt_before_auth_emits_auth_required_then_succeeds_after(qapp, make_c
     assert finished.calls[0] == (session_id, "end_turn")
 
 
+def test_logout_cycle_requires_auth_again(qapp, make_client, tmp_path):
+    """issue #6: вход работает, выход — тоже. Полный цикл «требует вход →
+    вошли → вышли → снова требует вход»."""
+    client = make_client()
+    connected = _connect(qapp, client, "auth", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    # Агент объявил AgentAuthCapabilities(logout=LogoutCapabilities()) —
+    # не None, значит supports_logout обязан быть True (правило UI: агент
+    # не умеет — кнопка выхода не рисуется, а тут умеет).
+    assert connected.calls[0][0].supports_logout is True
+
+    auth_required = _Recorder(client.auth_required)
+    finished = _Recorder(client.turn_finished)
+
+    # 1. Требует вход.
+    client.prompt(session_id, [{"type": "text", "text": "hi"}])
+    _pump_until(qapp, lambda: auth_required.calls)
+    methods_before = [m.id for m in auth_required.calls[0][0]]
+    assert methods_before == ["apikey"]
+
+    # 2. Вошли.
+    client.authenticate("apikey")
+    client.prompt(session_id, [{"type": "text", "text": "hi"}])
+    _pump_until(qapp, lambda: finished.calls)
+    assert finished.calls[0] == (session_id, "end_turn")
+
+    # 3. Вышли — переиспользуем auth_required как сигнал «агент разлогинен»:
+    # экран входа должен показаться снова с теми же authMethods.
+    auth_required.calls.clear()
+    client.logout()
+    _pump_until(qapp, lambda: auth_required.calls)
+    assert [m.id for m in auth_required.calls[0][0]] == methods_before
+
+    # соединение не должно было упасть из-за логаута
+    assert client.is_running() is True
+
+    # 4. Снова требует вход.
+    finished.calls.clear()
+    client.prompt(session_id, [{"type": "text", "text": "hi"}])
+    _pump_until(qapp, lambda: len(auth_required.calls) >= 2)
+    assert not finished.calls, "prompt не должен пройти без повторного входа"
+
+
 # --- разрешения ---------------------------------------------------------------
 
 
