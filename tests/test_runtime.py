@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import hashlib
 import io
 import tarfile
@@ -183,7 +184,12 @@ def test_install_agent_npx_ensures_node_and_writes_manifest(monkeypatch):
 
     assert spec.command == str(fake_node)
     assert spec.args == ["/fake/npx-cli.js", "--yes", "@test/agent@1.0.0", "--acp"]
-    assert spec.env == {"FOO": "bar"}
+    assert spec.env["FOO"] == "bar"
+
+    # PATH до нашего Node обязателен: npx-cli.js порождает дочерние процессы
+    # командой `node` и ищет её в PATH. Без этого агент на машине без Node
+    # умирает до первого байта — регрессия, пойманная только живым запуском.
+    assert spec.env["PATH"].split(os.pathsep)[0] == str(fake_node.parent)
     assert runtime.is_installed(entry)
     assert runtime.installed_version(entry.id) == "1.0.0"
 
