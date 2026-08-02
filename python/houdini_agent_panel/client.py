@@ -142,6 +142,11 @@ def _agent_info_from(init: Any) -> AgentInfo:
         supports_audio=bool(prompt_caps.audio),
         supports_embedded_context=bool(prompt_caps.embedded_context),
         supports_load_session=bool(caps.load_session),
+        # Контракт AgentAuthCapabilities.logout ровно такой: отсутствие поля
+        # или None значит "агент не умеет", а LogoutCapabilities() (пустой,
+        # но не None объект) значит "умеет" (docs/facts/acp-sdk.md,
+        # acp/schema.py:3747-3754). Проверяем именно `is not None` — это
+        # прямое соответствие контракту, а не догадка через truthiness.
         supports_logout=auth_caps is not None and getattr(auth_caps, "logout", None) is not None,
         auth_methods=tuple(
             AuthMethod(id=m.id, name=m.name, description=getattr(m, "description", None) or "")
@@ -410,6 +415,27 @@ class AcpWorker(QtCore.QThread):
         except acp.RequestError as exc:
             self.error.emit("", str(exc))
 
+    async def do_logout(self) -> None:
+        """`ClientSideConnection` в agent-client-protocol 0.12.0 не оборачивает
+        `logout` отдельным методом (в отличие от `authenticate`), хотя
+        `AGENT_METHODS["logout"]` и схема `LogoutRequest`/`LogoutResponse`
+        объявлены — проверено чтением `acp/client/connection.py`. Шлём тем
+        же низкоуровневым `send_request`, которым изнутри пользуются все
+        остальные методы класса."""
+        if self._conn is None:
+            return
+        try:
+            await self._conn._conn.send_request(acp.AGENT_METHODS["logout"], {})
+        except acp.RequestError as exc:
+            self.error.emit("", str(exc))
+            return
+        # Успешный логаут возвращает агента в состояние "до входа" — экран
+        # входа должен появиться снова с теми же authMethods, что при
+        # initialize. Отдельный сигнал не заводим: это то же самое состояние,
+        # что и "нужен логин", панель уже умеет его показывать.
+        methods = list(self._agent_info.auth_methods) if self._agent_info else []
+        self.auth_required.emit(methods)
+
     async def do_new_session(self, cwd: str, mcp_servers: list[dict]) -> None:
         if self._conn is None:
             self.error.emit("", "нет соединения с агентом")
@@ -673,6 +699,11 @@ class AcpClient(QtCore.QObject):
 
     def authenticate(self, method_id: str) -> None:
         self._worker.submit(self._worker.do_authenticate(method_id))
+
+    def logout(self) -> None:
+        """Только если `agent_info().supports_logout` — иначе агент не
+        объявлял этот метод, и его вызов гарантированно ляжет ошибкой."""
+        self._worker.submit(self._worker.do_logout())
 
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None:
         self._worker.submit(self._worker.do_new_session(cwd, mcp_servers))
