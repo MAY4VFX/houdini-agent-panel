@@ -27,7 +27,28 @@ from .network import Fetcher, fetch_json
 from .settings import Settings
 from .updates import compare_versions
 
-FEED_URL = "https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/feed/announcements.json"
+#: Адрес фида по умолчанию.
+#:
+#: Работает только пока репозиторий публичный: `raw.githubusercontent.com`
+#: анонимным запросам отдаёт 404 на приватные репозитории, а панель ходит
+#: сюда без токена и не должна его иметь. Проверено запросом — на приватном
+#: репозитории это ровно 404, а не ошибка доступа, так что и диагностировать
+#: со стороны панели нечего.
+DEFAULT_FEED_URL = (
+    "https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/feed/announcements.json"
+)
+
+#: Чем студия (или сам разработчик до публикации репозитория) переопределяет
+#: адрес фида, не пересобирая пакет.
+FEED_URL_ENV = "HAP_FEED_URL"
+
+
+def feed_url() -> str:
+    return os.environ.get(FEED_URL_ENV) or DEFAULT_FEED_URL
+
+
+#: Оставлено для обратной совместимости с кодом и тестами, читавшими константу.
+FEED_URL = DEFAULT_FEED_URL
 
 _KNOWN_SEVERITIES = ("info", "blocking")
 _CACHE_FILE_NAME = "announcements.json"
@@ -285,7 +306,7 @@ def check(
     if not force:
         items = _read_cache(now)
     if items is None:
-        payload = fetch_json(FEED_URL, fetch=fetch)
+        payload = fetch_json(feed_url(), fetch=fetch)
         items = parse_feed(payload)
         _write_cache(now, items)
 
