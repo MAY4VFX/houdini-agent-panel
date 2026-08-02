@@ -61,6 +61,21 @@ class _InstallWorker(QtCore.QThread):
         self.succeeded.emit(spec)
 
 
+def _installed_record(agent_id: str, current_settings) -> "settings_module.InstalledAgent | None":
+    """What's actually installed, judged by the manifest on disk.
+
+    Settings are only consulted for the extra detail they carry (when it was
+    installed, which kind); the manifest decides whether it's there at all.
+    """
+    version = runtime.installed_version(agent_id)
+    if version is None:
+        return None
+    known = current_settings.installed_agents.get(agent_id)
+    if known is not None and known.version == version:
+        return known
+    return settings_module.InstalledAgent(agent_id=agent_id, version=version, kind="binary")
+
+
 def _state_text(installed, update: "Update | None") -> str:
     if installed is None:
         return "not installed"
@@ -229,11 +244,22 @@ class AgentsView(QtWidgets.QWidget):
         self.set_agents(entries)
 
     def _rebuild_registry_rows(self) -> None:
+        """Rebuild the registry rows.
+
+        "Installed" is answered by the manifest on disk (`runtime`), not by
+        `settings.installed_agents`. There used to be two sources of truth
+        and they disagreed: an agent installed by the CLI (`--agents
+        opencode`) writes a manifest but no settings entry, so the row said
+        "not installed" — and clicking Install found the manifest, returned
+        instantly with no download, and only then wrote the settings. From
+        the outside that looked exactly like "it installs in no time and
+        never remembers".
+        """
         _clear_layout(self._rows_layout)
         current_settings = settings_module.load()
         for entry in self._entries:
             reason = entry.unavailable_reason()
-            installed = current_settings.installed_agents.get(entry.id)
+            installed = _installed_record(entry.id, current_settings)
             update = self._updates_by_target.get(entry.id)
             row = _AgentRow(
                 title=f"{entry.name} {entry.version}",

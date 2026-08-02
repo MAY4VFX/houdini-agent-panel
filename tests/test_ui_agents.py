@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import hashlib
 import io
 import zipfile
@@ -11,6 +13,25 @@ from PySide6 import QtTest, QtWidgets
 from houdini_agent_panel import settings as settings_module
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 from houdini_agent_panel.ui.agents import AgentsView
+
+
+
+def _mark_installed(agent_id: str, version: str) -> None:
+    """Mark an agent as installed the way the panel actually decides it.
+
+    The manifest on disk is the single source of truth — settings only carry
+    extra detail. Faking installed state through settings alone used to pass
+    while the real UI showed "not installed", which is precisely the bug
+    these tests are here to catch.
+    """
+    from houdini_agent_panel import paths
+
+    manifest = paths.agent_dir(agent_id) / "manifest.json"
+    manifest.write_text(
+        json.dumps({"agent_id": agent_id, "version": version, "kind": "binary"}),
+        "utf-8",
+    )
+
 
 
 def _zip_bytes(cmd_name: str = "myagent", content: bytes = b"echo hi\n") -> bytes:
@@ -117,6 +138,7 @@ def test_installed_agent_has_no_use_button(qapp, monkeypatch):
     current.installed_agents["agent-a"] = settings_module.InstalledAgent(
         agent_id="agent-a", version="1.0.0", kind="binary", installed_at="now"
     )
+    _mark_installed("agent-a", "1.0.0")
     settings_module.save(current)
 
     view = AgentsView()
@@ -140,6 +162,7 @@ def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):
     current.installed_agents["agent-a"] = settings_module.InstalledAgent(
         agent_id="agent-a", version="1.0.0", kind="binary", installed_at="now"
     )
+    _mark_installed("agent-a", "1.0.0")
     settings_module.save(current)
 
     view = AgentsView()

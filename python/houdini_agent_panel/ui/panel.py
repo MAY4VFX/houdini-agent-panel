@@ -46,6 +46,17 @@ def shared_client() -> acp_client.AcpClient:
     global _shared_client
     if _shared_client is None:
         _shared_client = acp_client.AcpClient()
+        # Everything the client reports goes to the on-disk log. Without this
+        # the panel is undiagnosable on someone else's machine: the log file
+        # existed but held only the startup header, never a word about the
+        # agent itself.
+        try:
+            from .. import logbook
+
+            logbook.setup()
+            logbook.attach_client(_shared_client)
+        except Exception:  # noqa: BLE001 - a log has no right to break the panel
+            pass
     return _shared_client
 
 
@@ -338,6 +349,11 @@ class AgentPanel(QtWidgets.QWidget):
         if self._launch_worker is not None and self._launch_worker.isRunning():
             return  # already preparing — a repeat click must not pile up downloads
         self._pending_agent_label = self._display_label(agent_id)
+        # Update the chip immediately, not after `connected`: switching agents
+        # is the moment the artist most wants confirmation that the click
+        # landed, and a failed launch used to leave the chip naming the
+        # previous agent — which reads as "nothing happened".
+        self._header.set_agent(self._pending_agent_label, None)
         self._note(f"Preparing {self._pending_agent_label}…")
         worker = _LaunchPrepWorker(agent_id, self._settings, self)
         worker.note.connect(self._note)

@@ -1,49 +1,50 @@
-"""ACP-клиент поверх `agent-client-protocol`, обёрнутый в Qt-сигналы.
+"""ACP client on top of `agent-client-protocol`, wrapped in Qt signals.
 
-Самая рискованная часть проекта (см. docs/architecture.md §6): SDK
-асинхронный, Qt синхронный, агент — чужой процесс. Правила, которых держится
-этот файл:
+The riskiest part of the project (see docs/architecture.md §6): the SDK is
+async, Qt is synchronous, and the agent is someone else's process. Rules this
+file holds to:
 
-- asyncio-цикл живёт на своём `QThread` (`AcpWorker`), `hou` из него не
-  трогаем никогда — вся работа со сценой идёт через отдельный процесс fx.
-- Наружу из воркера — только Qt-сигналы (доставка в другой поток — забота
-  Qt: очередь сигналов автоматически становится потокобезопасной, когда
-  объект-получатель живёт в другом потоке, чем поток, из которого позвали
-  `.emit()`). Внутрь — только `AcpWorker.submit()`
+- The asyncio loop lives on its own `QThread` (`AcpWorker`); we never touch
+  `hou` from it — all scene work goes through the separate fx process.
+- Out of the worker — only Qt signals (delivery to another thread is Qt's
+  concern: the signal queue automatically becomes thread-safe when the
+  receiving object lives on a different thread than the one `.emit()` was
+  called from). Into it — only via `AcpWorker.submit()`
   (`asyncio.run_coroutine_threadsafe`).
-- `qasync` не используем: свой раннер цикла на выделенном `QThread` проще и
-  не тянет лишнюю зависимость.
+- We don't use `qasync`: our own loop runner on a dedicated `QThread` is
+  simpler and doesn't pull in an extra dependency.
 
-`AcpWorker` — это одновременно и раннер цикла (`run()` переопределён вместо
-Qt event loop), и реализация ACP `Client`-протокола (`session_update`,
-`request_permission`, `on_connect` дёргаются самим `acp` изнутри корутин,
-работающих на этом же цикле) — оба назначения из докстринга архитектуры
-(«владеет циклом, процессом агента, соединением» и «живёт на рабочем
-потоке») естественно сходятся в одном объекте: то, что обслуживает колбэки
-агента, физически и есть тот самый рабочий поток.
+`AcpWorker` is both the loop runner (`run()` is overridden instead of the Qt
+event loop) and the implementation of the ACP `Client` protocol
+(`session_update`, `request_permission`, `on_connect` are called by `acp`
+itself from coroutines running on this same loop) — the two roles from the
+architecture docstring ("owns the loop, the agent process, the connection"
+and "lives on the worker thread") naturally converge into one object: the
+thing that services the agent's callbacks physically is that worker thread.
 
-**Houdini подменяет asyncio (`haio`, см. docs/facts/houdini.md §9).** Внутри
-Houdini `asyncio.get_event_loop_policy()` отдаёт `haio.HoudiniEventLoopPolicy`,
-и через неё:
+**Houdini swaps out asyncio (`haio`, see docs/facts/houdini.md §9).** Inside
+Houdini, `asyncio.get_event_loop_policy()` returns
+`haio.HoudiniEventLoopPolicy`, and through it:
 
-1. `asyncio.new_event_loop()` возвращает `haio.HoudiniEventLoop`, чей
-   `run_forever()` требует главный поток — на нашем рабочем `QThread` он
-   валится `RuntimeError`. Лечится тем, что класс цикла берётся напрямую
-   классом, а не через политику: `asyncio.SelectorEventLoop()` (POSIX) /
+1. `asyncio.new_event_loop()` returns `haio.HoudiniEventLoop`, whose
+   `run_forever()` requires the main thread — on our worker `QThread` it
+   raises `RuntimeError`. Fixed by taking the loop class directly instead of
+   going through the policy: `asyncio.SelectorEventLoop()` (POSIX) /
    `asyncio.ProactorEventLoop()` (Windows).
-2. `acp.spawn_agent_process()` не работает вообще: он построен на
-   `asyncio.create_subprocess_exec`, а тот на POSIX идёт за child watcher'ом
-   через ГЛОБАЛЬНУЮ политику (`get_event_loop_policy().get_child_watcher()`),
-   и `haio` бросает оттуда `NotImplementedError` — независимо от того, какой
-   именно объект цикла мы используем сами. Обход: поднимать процесс обычным
-   `subprocess.Popen` (не идёт за child watcher'ом вообще) и заводить его
-   каналы в цикл через `connect_read_pipe`/`connect_write_pipe` — этому
-   публичному API watcher не нужен — а связку отдавать в `acp.connect_to_agent`
-   (документированная байтовая форма подключения, см. facts/acp-sdk.md §1).
+2. `acp.spawn_agent_process()` doesn't work at all: it's built on
+   `asyncio.create_subprocess_exec`, which on POSIX goes through the child
+   watcher via the GLOBAL policy
+   (`get_event_loop_policy().get_child_watcher()`), and `haio` raises
+   `NotImplementedError` from there — regardless of which loop object we use
+   ourselves. Workaround: spawn the process with plain `subprocess.Popen`
+   (doesn't go through the child watcher at all) and hook its pipes into the
+   loop via `connect_read_pipe`/`connect_write_pipe` — that public API
+   doesn't need a watcher — then hand the pair to `acp.connect_to_agent`
+   (the documented byte-stream connection form, see facts/acp-sdk.md §1).
 
-Это верно и вне Houdini (стоковая политика тоже прекрасно живёт с
-`SelectorEventLoop()`, взятым напрямую), так что мы всегда идём этим путём,
-не разветвляя код на «под Houdini» и «в тестах».
+This is also true outside Houdini (the stock policy is perfectly happy with
+`SelectorEventLoop()` taken directly too), so we always take this path
+instead of branching the code into "under Houdini" and "in tests".
 """
 
 from __future__ import annotations
@@ -82,23 +83,24 @@ from .sessions import SessionMode as _SessionMode
 from .sessions import SessionState
 from .ui.qt import QtCore, Signal
 
-if TYPE_CHECKING:  # только для типов — runtime.py не обязан существовать при импорте
+if TYPE_CHECKING:  # types only — runtime.py doesn't need to exist at import time
     from .runtime import LaunchSpec
 
-#: Лимит буфера stdio-транспорта. 64 КБ по умолчанию у asyncio — картинка в
-#: base64 в session/update его переполнит и повесит соединение (см.
-#: docs/facts/acp-sdk.md §1). Столько же выставляет агентская сторона SDK
-#: (`run_agent`) по умолчанию — держим клиента симметричным.
+#: stdio transport buffer limit. asyncio's default is 64 KB — a base64 image
+#: in a session/update will overflow it and hang the connection (see
+#: docs/facts/acp-sdk.md §1). The agent side of the SDK (`run_agent`) sets
+#: the exact same value by default — keeping the client symmetric.
 _STDIO_BUFFER_LIMIT = 50 * 1024 * 1024
 
-#: Код ошибки "нужен логин" — соглашение самого ACP (application-specific
-#: диапазон JSON-RPC, не стандартный -32700..-32603).
-#: Потолок ожидания ответа на `initialize`. Щедрый намеренно: npx-агент при
-#: первом запуске сначала выкачивает свой пакет, и минута там — норма, а не
-#: признак поломки. Но потолок обязан быть: без него панель ждёт вечно.
+#: "login required" error code — ACP's own convention (application-specific
+#: JSON-RPC range, not the standard -32700..-32603).
+#: Ceiling for waiting on an `initialize` reply. Deliberately generous: an
+#: npx agent on first launch downloads its own package first, and a minute
+#: there is normal, not a sign of breakage. But there has to be a ceiling:
+#: without one the panel waits forever.
 _CONNECT_TIMEOUT = 180.0
 
-#: Сколько последних строк stderr агента показывать в сообщении об ошибке.
+#: How many of the agent's last stderr lines to show in the error message.
 _STDERR_TAIL_LINES = 12
 
 _AUTH_REQUIRED_CODE = -32000
@@ -121,10 +123,12 @@ class AuthMethod:
 
 @dataclass(frozen=True)
 class AgentInfo:
-    """Плоский снимок `initialize`, чтобы UI не тянул pydantic-модели ACP.
+    """Flat snapshot of `initialize`, so the UI doesn't have to pull in ACP's
+    pydantic models.
 
-    `supports_*` — единственный источник правды о том, рисовать ли кнопку
-    вложений/микрофон/т.п.: агент не умеет — контрол не рисуется.
+    `supports_*` is the single source of truth for whether to draw the
+    attachment button/microphone/etc.: the agent doesn't support it — the
+    control doesn't get drawn.
     """
 
     name: str
@@ -151,11 +155,12 @@ def _agent_info_from(init: Any) -> AgentInfo:
         supports_audio=bool(prompt_caps.audio),
         supports_embedded_context=bool(prompt_caps.embedded_context),
         supports_load_session=bool(caps.load_session),
-        # Контракт AgentAuthCapabilities.logout ровно такой: отсутствие поля
-        # или None значит "агент не умеет", а LogoutCapabilities() (пустой,
-        # но не None объект) значит "умеет" (docs/facts/acp-sdk.md,
-        # acp/schema.py:3747-3754). Проверяем именно `is not None` — это
-        # прямое соответствие контракту, а не догадка через truthiness.
+        # The AgentAuthCapabilities.logout contract is exactly this: a
+        # missing field or None means "the agent doesn't support it", and
+        # LogoutCapabilities() (an empty but non-None object) means "it
+        # does" (docs/facts/acp-sdk.md, acp/schema.py:3747-3754). We check
+        # `is not None` specifically — that's a direct match to the
+        # contract, not a guess via truthiness.
         supports_logout=auth_caps is not None and getattr(auth_caps, "logout", None) is not None,
         auth_methods=tuple(
             AuthMethod(id=m.id, name=m.name, description=getattr(m, "description", None) or "")
@@ -165,7 +170,7 @@ def _agent_info_from(init: Any) -> AgentInfo:
 
 
 def _build_mcp_servers(entries: list[dict]) -> list[McpServerStdio]:
-    """`scene.mcp_servers()` -> объекты, которые понимает `new_session`."""
+    """`scene.mcp_servers()` -> objects that `new_session` understands."""
     return [
         McpServerStdio(
             name=entry["name"],
@@ -178,11 +183,11 @@ def _build_mcp_servers(entries: list[dict]) -> list[McpServerStdio]:
 
 
 def _build_content_block(block: dict) -> Any:
-    """Готовый ACP-блок из словаря `Composer.submitted`."""
+    """Build an ACP content block from a `Composer.submitted` dict."""
     kind = block.get("type")
     cls = _CONTENT_BLOCK_TYPES.get(kind)
     if cls is None:
-        raise ValueError(f"неизвестный тип контент-блока: {kind!r}")
+        raise ValueError(f"unknown content block type: {kind!r}")
     return cls(**block)
 
 
@@ -191,29 +196,29 @@ def _chunk_text(content: Any) -> str:
 
 
 class AcpWorker(QtCore.QThread):
-    """Живёт на рабочем потоке. Владеет циклом, процессом агента, соединением.
+    """Lives on the worker thread. Owns the loop, the agent process, the connection.
 
-    `run()` переопределён: вместо `QThread`'ного event loop крутит
-    `asyncio`-цикл (`loop.run_forever()`). Методы `session_update` /
-    `request_permission` / `on_connect` реализуют ACP `Client` через
-    duck-typing (протокол — не ABC, наследоваться не обязательно, см.
-    docs/facts/acp-sdk.md §2) и вызываются самим `acp` изнутри корутин,
-    работающих на этом же цикле.
+    `run()` is overridden: instead of `QThread`'s event loop it spins an
+    `asyncio` loop (`loop.run_forever()`). The methods `session_update` /
+    `request_permission` / `on_connect` implement the ACP `Client` via duck
+    typing (the protocol is not an ABC, subclassing isn't required, see
+    docs/facts/acp-sdk.md §2) and are called by `acp` itself from coroutines
+    running on this same loop.
     """
 
-    # --- жизненный цикл соединения ---------------------------------------
+    # --- connection lifecycle ---------------------------------------
     connected = Signal(object)  # AgentInfo
-    disconnected = Signal(str)  # причина, "" при штатном стопе
-    failed = Signal(str)  # текст для человека
+    disconnected = Signal(str)  # reason, "" on a normal stop
+    failed = Signal(str)  # human-readable text
     auth_required = Signal(list)  # list[AuthMethod]
-    log_line = Signal(str)  # stderr агента
+    log_line = Signal(str)  # agent stderr
 
-    # --- сессии -----------------------------------------------------------
+    # --- sessions -----------------------------------------------------------
     session_started = Signal(str, object)  # session_id, SessionState
     modes_changed = Signal(str, object)  # session_id, acp.schema.SessionModeState
     commands_changed = Signal(str, list)  # session_id, list[acp.schema.AvailableCommand]
 
-    # --- лента --------------------------------------------------------------
+    # --- feed --------------------------------------------------------------
     message_chunk = Signal(str, str, str)  # session_id, message_id, text
     thought_chunk = Signal(str, str, str)
     tool_call = Signal(str, object)  # session_id, acp.schema.ToolCallStart
@@ -221,24 +226,25 @@ class AcpWorker(QtCore.QThread):
     plan_changed = Signal(str, list)  # session_id, list[acp.schema.PlanEntry]
     usage_changed = Signal(str, object)  # session_id, acp.schema.Usage
     turn_finished = Signal(str, str)  # session_id, stop_reason
-    error = Signal(str, str)  # session_id (может быть ""), текст
+    error = Signal(str, str)  # session_id (may be ""), text
 
-    # --- разрешения ---------------------------------------------------------
+    # --- permissions ---------------------------------------------------------
     permission_requested = Signal(str, str, object, list)
     # request_key, session_id, ToolCallUpdate, list[PermissionOption]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # Цикл создаётся здесь (на потоке-владельце AcpWorker, т.е. пока ещё
-        # главном — до start()), а не в run(): submit() может понадобиться
-        # раньше, чем поток реально стартовал, и ссылка на loop должна быть
-        # валидна сразу после конструктора.
+        # The loop is created here (on AcpWorker's owning thread, i.e. still
+        # the main thread — before start()), not in run(): submit() may be
+        # needed before the thread has actually started, and the loop
+        # reference must be valid right after the constructor.
         #
-        # Класс цикла берём НАПРЯМУЮ, а не через asyncio.new_event_loop():
-        # внутри Houdini та идёт через подменённую политику `haio`, чей
-        # run_forever() требует главный поток (см. докстринг модуля и
-        # docs/facts/houdini.md §9). Прямая конструкция обходит политику
-        # целиком и работает одинаково что под Houdini, что вне неё.
+        # We take the loop class DIRECTLY, not via asyncio.new_event_loop():
+        # inside Houdini that goes through the swapped-in `haio` policy,
+        # whose run_forever() requires the main thread (see the module
+        # docstring and docs/facts/houdini.md §9). Direct construction
+        # bypasses the policy entirely and works the same under Houdini and
+        # outside it.
         if sys.platform == "win32":
             self.loop: asyncio.AbstractEventLoop = asyncio.ProactorEventLoop()
         else:
@@ -253,22 +259,22 @@ class AcpWorker(QtCore.QThread):
         self._stderr_task: asyncio.Task | None = None
         self._exit_watch_task: asyncio.Task | None = None
         self._closing = False
-        #: Резолвится кодом возврата, когда процесс агента умер. По ней
-        #: `initialize` понимает, что ответа уже не будет, вместо того чтобы
-        #: ждать его вечно.
+        #: Resolved with the return code once the agent process dies. This
+        #: is how `initialize` learns that a reply will never arrive,
+        #: instead of waiting for it forever.
         self._exited: asyncio.Future | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES * 4)
 
         self._agent_info: AgentInfo | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
-        # Кэш availableModes на сессию — current_mode_update несёт только
-        # новый currentModeId, а modes_changed обязан отдавать полный
-        # SessionModeState (см. docs/architecture.md §6).
+        # Cache of availableModes per session — current_mode_update only
+        # carries the new currentModeId, while modes_changed must hand out a
+        # full SessionModeState (see docs/architecture.md §6).
         self._session_modes: dict[str, list] = {}
 
-    # --- инфраструктура цикла ------------------------------------------------
+    # --- loop plumbing ------------------------------------------------
 
-    def run(self) -> None:  # noqa: D102 - переопределение QThread.run
+    def run(self) -> None:  # noqa: D102 - overrides QThread.run
         asyncio.set_event_loop(self.loop)
         self._ready.set()
         self.loop.run_forever()
@@ -278,17 +284,18 @@ class AcpWorker(QtCore.QThread):
         self._ready.wait(timeout)
 
     def submit(self, coro) -> "asyncio.Future":
-        """Запланировать корутину на цикле воркера из ЛЮБОГО другого потока."""
+        """Schedule a coroutine on the worker's loop from ANY other thread."""
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def request_loop_stop(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
 
-    # --- ACP Client protocol (вызывается `acp` из корутин на этом же цикле) --
+    # --- ACP Client protocol (called by `acp` from coroutines on this same loop) --
 
     def on_connect(self, conn: Any) -> None:
-        # `conn` нам уже известен как результат `spawn_agent_process` —
-        # отдельно сохранять нечего, это чисто протокольный колбэк.
+        # `conn` is already known to us as the result of `spawn_agent_process`
+        # — nothing extra to store here, this is a purely protocol-level
+        # callback.
         pass
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
@@ -314,10 +321,13 @@ class AcpWorker(QtCore.QThread):
             )
             self.modes_changed.emit(session_id, state)
         elif kind == "usage_update":
-            self.usage_changed.emit(session_id, update.usage)
-        # user_message_chunk — панель уже нарисовала свой ввод сама при
-        # отправке, эхо от агента ей не нужно; config_option_update и
-        # session_info_update — вне охвата v1, тихо игнорируем.
+            # The update IS the usage report — `used`/`size`/`cost` live on it
+            # directly. There is no `.usage` attribute, and reading one raised
+            # AttributeError on every single token-counter update.
+            self.usage_changed.emit(session_id, update)
+        # user_message_chunk — the panel already drew its own input when it
+        # sent it, so it doesn't need the agent's echo; config_option_update
+        # and session_info_update are out of scope for v1, silently ignored.
 
     async def request_permission(
         self, session_id: str, tool_call: Any, options: list, **kwargs: Any
@@ -333,7 +343,7 @@ class AcpWorker(QtCore.QThread):
         return acp.RequestPermissionResponse(outcome=outcome)
 
     def resolve_permission(self, request_key: str, option_id: str | None) -> None:
-        """Вызывается из ГЛАВНОГО потока — резолвит Future из чужого потока."""
+        """Called from the MAIN thread — resolves a Future from another thread."""
 
         def _resolve() -> None:
             future = self._pending_permissions.pop(request_key, None)
@@ -342,15 +352,15 @@ class AcpWorker(QtCore.QThread):
 
         self.loop.call_soon_threadsafe(_resolve)
 
-    # --- операции, планируемые фасадом через submit() ------------------------
+    # --- operations scheduled by the facade via submit() ------------------------
 
     async def do_start(self, spec: "LaunchSpec", cwd: str) -> None:
         self._closing = False
         try:
-            # `acp.spawn_agent_process` не годится внутри Houdini (см.
-            # докстринг модуля) — поднимаем процесс и заводим его каналы в
-            # цикл сами, тем же публичным путём, что и она изнутри, минус
-            # шаг, которому нужен child watcher.
+            # `acp.spawn_agent_process` doesn't work inside Houdini (see the
+            # module docstring) — we spawn the process and hook its pipes
+            # into the loop ourselves, the same public way it does
+            # internally, minus the step that needs a child watcher.
             env = dict(acp.default_environment())
             env.update(spec.env)
             process = subprocess.Popen(
@@ -389,7 +399,7 @@ class AcpWorker(QtCore.QThread):
             init = await self._initialize_or_fail(conn)
             if init is None:
                 return
-        except Exception as exc:  # noqa: BLE001 - что угодно на старте -> failed, не краш
+        except Exception as exc:  # noqa: BLE001 - anything at startup -> failed, not a crash
             await self._cleanup()
             self.failed.emit(self._describe_failure(str(exc)))
             return
@@ -399,22 +409,23 @@ class AcpWorker(QtCore.QThread):
 
 
     async def _initialize_or_fail(self, conn) -> "Any | None":
-        """`initialize`, но не в вечность.
+        """`initialize`, but not forever.
 
-        Голый `await conn.initialize(...)` — это то, из-за чего панель у
-        художника писала «Запускаю claude-acp…» и висела бесконечно. Агент
-        умирал сразу после старта (в том случае — из-за пути к npx, которого
-        не существовало), процесс закрывал каналы, ответа на `initialize` уже
-        не могло быть ни при каких обстоятельствах, а мы всё ждали.
+        A bare `await conn.initialize(...)` is what made the panel print
+        "Launching claude-acp…" for an artist and then hang indefinitely.
+        The agent had died right after starting (in that case, because of an
+        npx path that didn't exist), the process closed its pipes, a reply
+        to `initialize` could no longer arrive under any circumstances, and
+        we just kept waiting.
 
-        Ждём теперь три исхода сразу: ответ, смерть процесса и общий потолок
-        времени. Возвращаем None, если соединения не вышло, — сигнал `failed`
-        при этом уже отправлен.
+        We now wait for three outcomes at once: a reply, the process dying,
+        and an overall time ceiling. Returns None if the connection didn't
+        come up — the `failed` signal has already been emitted in that case.
         """
         init_task = self.loop.create_task(
             conn.initialize(
                 protocol_version=acp.PROTOCOL_VERSION,
-                client_capabilities=ClientCapabilities(),  # fs/terminal не объявляем
+                client_capabilities=ClientCapabilities(),  # we don't declare fs/terminal
                 client_info=Implementation(name="houdini-agent-panel", version=__version__),
             )
         )
@@ -432,11 +443,11 @@ class AcpWorker(QtCore.QThread):
 
         if self._exited in done:
             code = self._exited.result()
-            reason = f"агент завершился с кодом {code}, не ответив на initialize"
+            reason = f"agent exited with code {code} without replying to initialize"
         else:
             reason = (
-                f"агент не ответил на initialize за {int(_CONNECT_TIMEOUT)} с "
-                "и, похоже, не запустился"
+                f"agent did not reply to initialize within {int(_CONNECT_TIMEOUT)}s "
+                "and appears to have failed to start"
             )
 
         await self._cleanup()
@@ -444,11 +455,11 @@ class AcpWorker(QtCore.QThread):
         return None
 
     def _describe_failure(self, reason: str) -> str:
-        """К причине — хвост stderr агента.
+        """Append the agent's stderr tail to the reason.
 
-        Без него сообщение «агент завершился с кодом 1» не говорит человеку
-        ничего, а вся суть обычно ровно там: не найден файл, нет прав, не
-        хватает переменной окружения.
+        Without it, a message like "agent exited with code 1" tells a human
+        nothing, while the whole story is usually right there: a missing
+        file, missing permissions, a missing environment variable.
         """
         tail = [line for line in self._stderr_tail if line.strip()]
         if not tail:
@@ -456,10 +467,10 @@ class AcpWorker(QtCore.QThread):
         return reason + "\n\n" + "\n".join(tail[-_STDERR_TAIL_LINES:])
 
     async def do_stop(self) -> None:
-        """Та же лестница останова, что раньше делал `spawn_agent_process.__aexit__`:
-        закрыть ACP-соединение, потом stdin (EOF → drain → close), потом
-        подождать/добить процесс. Переносим её сюда вручную — вместе с
-        `spawn_agent_process` ушёл и её автоматический вызов."""
+        """The same shutdown ladder that `spawn_agent_process.__aexit__` used
+        to do: close the ACP connection, then stdin (EOF -> drain -> close),
+        then wait for/kill the process. We carry it here by hand — when
+        `spawn_agent_process` went away, so did its automatic call to it."""
         self._closing = True
         for task in (self._stderr_task, self._exit_watch_task):
             if task is not None:
@@ -487,12 +498,13 @@ class AcpWorker(QtCore.QThread):
             self.error.emit("", str(exc))
 
     async def do_logout(self) -> None:
-        """`ClientSideConnection` в agent-client-protocol 0.12.0 не оборачивает
-        `logout` отдельным методом (в отличие от `authenticate`), хотя
-        `AGENT_METHODS["logout"]` и схема `LogoutRequest`/`LogoutResponse`
-        объявлены — проверено чтением `acp/client/connection.py`. Шлём тем
-        же низкоуровневым `send_request`, которым изнутри пользуются все
-        остальные методы класса."""
+        """`ClientSideConnection` in agent-client-protocol 0.12.0 doesn't wrap
+        `logout` in its own method (unlike `authenticate`), even though
+        `AGENT_METHODS["logout"]` and the `LogoutRequest`/`LogoutResponse`
+        schema are declared — verified by reading
+        `acp/client/connection.py`. We send it via the same low-level
+        `send_request` that every other method on the class uses
+        internally."""
         if self._conn is None:
             return
         try:
@@ -500,16 +512,17 @@ class AcpWorker(QtCore.QThread):
         except acp.RequestError as exc:
             self.error.emit("", str(exc))
             return
-        # Успешный логаут возвращает агента в состояние "до входа" — экран
-        # входа должен появиться снова с теми же authMethods, что при
-        # initialize. Отдельный сигнал не заводим: это то же самое состояние,
-        # что и "нужен логин", панель уже умеет его показывать.
+        # A successful logout returns the agent to its "pre-login" state —
+        # the login screen should reappear with the same authMethods as at
+        # initialize. We don't add a separate signal for this: it's the
+        # same state as "login required", which the panel already knows how
+        # to show.
         methods = list(self._agent_info.auth_methods) if self._agent_info else []
         self.auth_required.emit(methods)
 
     async def do_new_session(self, cwd: str, mcp_servers: list[dict]) -> None:
         if self._conn is None:
-            self.error.emit("", "нет соединения с агентом")
+            self.error.emit("", "no connection to the agent")
             return
         try:
             servers = _build_mcp_servers(mcp_servers)
@@ -534,7 +547,7 @@ class AcpWorker(QtCore.QThread):
 
         state = SessionState(
             session_id=response.session_id,
-            title="Новый разговор",
+            title="New conversation",
             cwd=cwd,
             created_at=time.time(),
             current_mode_id=current_mode_id,
@@ -545,7 +558,7 @@ class AcpWorker(QtCore.QThread):
 
     async def do_prompt(self, session_id: str, blocks: list[dict]) -> None:
         if self._conn is None:
-            self.error.emit(session_id, "нет соединения с агентом")
+            self.error.emit(session_id, "no connection to the agent")
             return
         content = [_build_content_block(block) for block in blocks]
         try:
@@ -572,7 +585,7 @@ class AcpWorker(QtCore.QThread):
             if not self._emit_if_auth_required(exc):
                 self.error.emit(session_id, str(exc))
 
-    # --- внутреннее -----------------------------------------------------------
+    # --- internals -----------------------------------------------------------
 
     def _emit_if_auth_required(self, exc: "acp.RequestError") -> bool:
         if getattr(exc, "code", None) != _AUTH_REQUIRED_CODE:
@@ -582,13 +595,13 @@ class AcpWorker(QtCore.QThread):
         return True
 
     async def _pump_stderr(self) -> None:
-        """Читает stderr агента непрерывно — незачитанный пайп переполнится
-        и подвесит процесс агента (см. docs/facts/acp-sdk.md §1).
+        """Reads the agent's stderr continuously — an unread pipe fills up
+        and hangs the agent process (see docs/facts/acp-sdk.md §1).
 
-        `process.stderr` от `subprocess.Popen` — обычный блокирующий файловый
-        объект; читать его напрямую в корутине значило бы блокировать весь
-        цикл. Поэтому у stderr свой `StreamReader`, заведённый через
-        `connect_read_pipe` в `do_start`, точно как у stdout."""
+        `process.stderr` from `subprocess.Popen` is a plain blocking file
+        object; reading it directly in a coroutine would block the whole
+        loop. So stderr gets its own `StreamReader`, hooked up via
+        `connect_read_pipe` in `do_start`, exactly like stdout."""
         if self._stderr_reader is None:
             return
         try:
@@ -603,8 +616,9 @@ class AcpWorker(QtCore.QThread):
             pass
 
     async def _watch_process_exit(self, process: subprocess.Popen) -> None:
-        # Popen.wait() блокирующий (os.waitpid под капотом) — в executor'е,
-        # чтобы не подвесить цикл на весь процесс жизни агента.
+        # Popen.wait() is blocking (os.waitpid under the hood) — run it in
+        # an executor so it doesn't hang the loop for the agent's whole
+        # lifetime.
         try:
             code = await self._await_process(process)
         except asyncio.CancelledError:
@@ -614,7 +628,7 @@ class AcpWorker(QtCore.QThread):
         if exited is not None and not exited.done():
             exited.set_result(code)
         if not self._closing:
-            self.disconnected.emit(f"agent-процесс неожиданно завершился (код {code})")
+            self.disconnected.emit(f"agent process exited unexpectedly (code {code})")
 
     async def _await_process(self, process: subprocess.Popen) -> int:
         return await self.loop.run_in_executor(None, process.wait)
@@ -636,9 +650,9 @@ class AcpWorker(QtCore.QThread):
             await writer.wait_closed()
 
     async def _terminate_process(self) -> None:
-        """Та же лестница, что у `spawn_stdio_transport`: подождать,
-        `terminate()`, подождать ещё, `kill()`. Зависший агент не имеет права
-        держать закрытие Houdini — отсюда таймауты на каждом шаге."""
+        """The same ladder as `spawn_stdio_transport`: wait, `terminate()`,
+        wait some more, `kill()`. A hung agent has no right to hold up
+        Houdini's shutdown — hence the timeout at every step."""
         process = self._process
         if process is None:
             return
@@ -658,8 +672,9 @@ class AcpWorker(QtCore.QThread):
             await self._await_process(process)
 
     async def _cleanup(self) -> None:
-        """Откат частично поднятого старта — то же самое, что `do_stop`,
-        но без ожидания «штатного» останова (`_conn` мог даже не появиться)."""
+        """Roll back a partially started launch — the same thing as
+        `do_stop`, but without waiting for a "normal" stop (`_conn` may not
+        even have come up)."""
         for task in (self._stderr_task, self._exit_watch_task):
             if task is not None:
                 task.cancel()
@@ -674,7 +689,7 @@ class AcpWorker(QtCore.QThread):
         self._stderr_reader = None
 
 
-#: Сигналы, форвардящиеся 1:1 с воркера на фасад (см. AcpClient.__init__).
+#: Signals forwarded 1:1 from the worker to the facade (see AcpClient.__init__).
 _FORWARDED_SIGNALS = (
     "connected",
     "disconnected",
@@ -697,12 +712,12 @@ _FORWARDED_SIGNALS = (
 
 
 class AcpClient(QtCore.QObject):
-    """Фасад на ГЛАВНОМ потоке. Единственное, что видит UI.
+    """Facade on the MAIN thread. The only thing the UI sees.
 
-    Все сигналы ниже — те же самые, что и у `AcpWorker`, но AcpClient живёт в
-    главном потоке (никогда не двигается `moveToThread`), поэтому подписка
-    на его сигналы из UI не требует размышлений о потоках — они уже
-    форварднуты воркером.
+    All the signals below are the same ones `AcpWorker` has, but AcpClient
+    lives on the main thread (never moved with `moveToThread`), so
+    subscribing to its signals from the UI doesn't require thinking about
+    threads — they've already been forwarded by the worker.
     """
 
     connected = Signal(object)
@@ -732,11 +747,11 @@ class AcpClient(QtCore.QObject):
         self._agent_info: AgentInfo | None = None
         self._running = False
 
-        # Порядок связывания важен: Qt зовёт несколько слотов одного сигнала
-        # в порядке подключения. Внутреннее состояние (`_running`,
-        # `_agent_info`) обязано обновиться РАНЬШЕ, чем форвардинг долетит до
-        # внешних подписчиков — иначе слот UI, сработавший на `connected`,
-        # может увидеть ещё не обновлённый `is_running()`/`agent_info()`.
+        # Connection order matters: Qt calls multiple slots of the same
+        # signal in the order they were connected. Internal state
+        # (`_running`, `_agent_info`) must be updated BEFORE the forwarding
+        # reaches external subscribers — otherwise a UI slot reacting to
+        # `connected` might see a not-yet-updated `is_running()`/`agent_info()`.
         self._worker.connected.connect(self._on_connected)
         self._worker.disconnected.connect(self._on_stopped)
         self._worker.failed.connect(self._on_stopped)
@@ -746,15 +761,15 @@ class AcpClient(QtCore.QObject):
         self._worker.start()
         self._worker.wait_until_ready()
 
-    # --- жизненный цикл соединения -----------------------------------------
+    # --- connection lifecycle -----------------------------------------
 
     def start(self, spec: "LaunchSpec", *, cwd: str) -> None:
         self._worker.submit(self._worker.do_start(spec, cwd))
 
     def stop(self) -> None:
-        """Надёжный останов: закрыть соединение, дождаться процесса, погасить
-        цикл, join потока с таймаутом. Зависший агент не имеет права держать
-        закрытие Houdini — отсюда таймауты на каждом шаге."""
+        """Reliable stop: close the connection, wait for the process, stop
+        the loop, join the thread with a timeout. A hung agent has no right
+        to hold up Houdini's shutdown — hence the timeout at every step."""
         if not self._worker.isRunning():
             return
         future = self._worker.submit(self._worker.do_stop())
@@ -772,14 +787,15 @@ class AcpClient(QtCore.QObject):
     def agent_info(self) -> AgentInfo | None:
         return self._agent_info
 
-    # --- сессии ---------------------------------------------------------------
+    # --- sessions ---------------------------------------------------------------
 
     def authenticate(self, method_id: str) -> None:
         self._worker.submit(self._worker.do_authenticate(method_id))
 
     def logout(self) -> None:
-        """Только если `agent_info().supports_logout` — иначе агент не
-        объявлял этот метод, и его вызов гарантированно ляжет ошибкой."""
+        """Only if `agent_info().supports_logout` — otherwise the agent
+        never declared this method, and calling it is guaranteed to error
+        out."""
         self._worker.submit(self._worker.do_logout())
 
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None:
@@ -795,10 +811,10 @@ class AcpClient(QtCore.QObject):
         self._worker.submit(self._worker.do_set_mode(session_id, mode_id))
 
     def answer_permission(self, request_key: str, option_id: str | None) -> None:
-        """`option_id=None` — «отменено», уходит `DeniedOutcome`."""
+        """`option_id=None` — "cancelled", results in a `DeniedOutcome`."""
         self._worker.resolve_permission(request_key, option_id)
 
-    # --- внутреннее ----------------------------------------------------------
+    # --- internals ----------------------------------------------------------
 
     def _on_connected(self, info: AgentInfo) -> None:
         self._agent_info = info
