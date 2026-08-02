@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <!-- This file contains definitions of Python interfaces and the
+ interfaces menu.  It should not be hand-edited when it is being
+ used by the application.  Note, that two definitions of the
+ same interface or of the interfaces menu are not allowed
+ in a single file. -->
+  <interface name="hap::agent" label="Agent" icon="MISC_python" showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+# Панель ACP-агента. onCreateInterface() обязан вернуть QWidget при любом
+# раскладе: если зависимости панели не поставились (прервавшийся install)
+# или сам импорт панели упал по любой другой причине, художник должен увидеть
+# читаемую причину и подсказку, а не пустую серую панель без единого слова.
+
+# Табов одной панели может быть несколько, и каждый держит свой виджет.
+# Различаем их по paneTab из kwargs — так делают штатные панели SideFX
+# (см. LightLinker.pypanel).
+_panels = {}
+
+
+def _pane_key():
+    # kwargs — глобал, который Houdini кладёт в область видимости этого скрипта.
+    # Обращаться к нему по имени напрямую нельзя: при вызове из другого
+    # контекста получим NameError ровно в тот момент, когда панель и так уже
+    # в беде.
+    pane = (globals().get("kwargs") or {}).get("paneTab")
+    return id(pane) if pane is not None else None
+
+
+def onCreateInterface():
+    try:
+        from houdini_agent_panel.ui.panel import AgentPanel
+    except Exception as exc:  # noqa: BLE001 - причина уйдёт в текст на панели
+        return _error_widget(exc)
+
+    try:
+        panel = AgentPanel()
+    except Exception as exc:  # noqa: BLE001
+        return _error_widget(exc)
+
+    _panels[_pane_key()] = panel
+    return panel
+
+
+def onDestroyInterface():
+    # Именно закрытие таба. onDeactivateInterface для этого не годится: он
+    # срабатывает всякий раз, когда художник переключился на соседнюю вкладку
+    # пейна, и teardown на нём гасил бы живого агента посреди работы.
+    panel = _panels.pop(_pane_key(), None)
+    if panel is None:
+        return
+    shutdown = getattr(panel, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown()
+        except Exception as exc:  # noqa: BLE001
+            print("[houdini-agent-panel] ошибка при закрытии панели: %r" % (exc,))
+
+
+def _error_widget(exc):
+    try:
+        from houdini_agent_panel.ui.qt import QtWidgets
+    except Exception:  # noqa: BLE001 - последний рубеж: шим самой Houdini
+        from hutil.Qt import QtWidgets
+
+    message = (
+        "Houdini Agent Panel не запустилась.\n\n"
+        "%r\n\n"
+        "Открой терминал и выполни тем же Python, которым ставил панель:\n"
+        "python -m houdini_agent_panel doctor"
+    ) % (exc,)
+
+    widget = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(widget)
+    label = QtWidgets.QLabel(message)
+    label.setWordWrap(True)
+    # Текст ошибки нужно уметь выделить и скопировать в баг-репорт: переписывать
+    # трейсбек руками с экрана никто не станет.
+    try:
+        from houdini_agent_panel.ui.qt import Qt
+
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    except Exception:  # noqa: BLE001
+        pass
+    layout.addWidget(label)
+    layout.addStretch(1)
+    return widget
+]]></script>
+    <includeInPaneTabMenu menu_position="500" create_separator="false"/>
+    <help><![CDATA[]]></help>
+  </interface>
+</pythonPanelDocument>

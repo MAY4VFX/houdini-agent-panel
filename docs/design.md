@@ -33,7 +33,7 @@ SideFX официального решения не сделала. Показа
 | Codex | Apache-2.0 | npx | |
 | Gemini CLI | Apache-2.0 | npx | |
 | Grok Build | proprietary | npx | это и есть Grok CLI |
-| Kimi CLI | MIT | binary | **нет сборки под darwin-x86_64** |
+| Kimi CLI | MIT | binary | **нет сборки под darwin-x86_64** — панель обязана назвать причину, а не прятать агента |
 | OpenCode | MIT | binary | все платформы; путь для локальных и удалённых своих моделей |
 
 Плюс **«Свой агент»** — поле с командой и аргументами, говорим по ACP с тем, что у человека уже стоит. Ни скачивания, ни версий. Закрывает всё, чего нет в реестре.
@@ -49,7 +49,7 @@ SideFX официального решения не сделала. Показа
 - **ACP — только stdio.** Клиент поднимает процесс агента и говорит через stdin/stdout. Удалённых агентов протокол не предусматривает.
 - **Много сессий на одном соединении** — прямо заявлено в архитектуре ACP.
 - **Панели**: `.pypanel` — XML с `<interface>` и `<script>`, где `onCreateInterface()` возвращает Qt-виджет. В H22 таких 60 штук, механизм штатный.
-- **`hutil.PySide`** — шим самой Houdini: на H22 отдаёт PySide6, на 20.5 — PySide2. Один код на обе версии.
+- **`hutil.PySide`** — шим самой Houdini: на H22 отдаёт PySide6, на 20.5 — PySide2. Один код на обе версии. Уточнено при разведке: шим появился внутри 20.5.x не сразу — в 20.5.278 его нет (есть только `hutil.Qt`), в 20.5.445 уже есть. Поэтому импорт идёт через собственный модуль `ui/qt.py`: `hutil.PySide` → PySide6 → PySide2.
 - **Qt в H22**: `QtWidgets`, `QtNetwork`, `QtWebSockets`, `QtWebEngineWidgets` доступны.
 - **ACP SDK**: `agent-client-protocol` 0.12.0 на PyPI, `>=3.10,<3.15` — покрывает H20.5 (3.11) и H22 (3.13).
 - **Реестр**: `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Запись содержит `version` и `distribution`: `npx.package` либо `binary.<platform>` с `archive`, `cmd`, `args`, `sha256`.
@@ -60,7 +60,8 @@ SideFX официального решения не сделала. Показа
 - **Слеш-команды**: `available_commands_update`, вызов обычным текстом.
 - **Вложения**: контент-блоки `text`, `image` (cap `image`), `audio` (cap `audio`), embedded resource (cap `embeddedContext`), `resource_link`, @-упоминания.
 - **Лента**: `session/update` даёт `agent_message_chunk`, `plan`, `tool_call`, `tool_call_update`, `usage_update`. Виды вызова: `read`/`edit`/`delete`/`move`/`search`/`execute`/`think`/`fetch`/`other`. Статусы: `pending`/`in_progress`/`completed`/`failed`.
-- **Порт fx плавающий**: сервер занимает первый свободный из 8100..8115, бридж ищет «первый живой снизу вверх». Пин через `HOUDINI_PORT` отключает сканирование (`fxhoudinimcp/server.py:58`).
+- **Порт fx плавающий**: сервер занимает первый свободный из 8100..8115, бридж ищет «первый живой снизу вверх». Пин через `HOUDINI_PORT` отключает сканирование (`fxhoudinimcp/server.py:58`). Уточнено при разведке: панель живёт в том же процессе, что и сервер, поэтому свой порт она не ищет сканом, а берёт из `fxhoudinimcp_server.startup.get_port()`. Скан остаётся запасным вариантом и находит чужую Houdini, а не свою.
+- **Установка внутрь Houdini, а не на `PYTHONPATH`.** Выяснено при разведке и меняет план установки: `pydantic` тащит скомпилированный `pydantic_core`, у Python 3.11 (H20.5) и 3.13 (H22) разные ABI, поэтому положить site-packages installer-питона на `PYTHONPATH` Houdini нельзя. `hython` обеих версий несёт рабочий pip (проверено), так что инсталлятор ставит панель со всеми зависимостями в отдельное дерево на версию Python. Подробности — в [`architecture.md`](architecture.md) §0.
 - **cwd процесса Houdini — домашняя папка**, не проект. Поэтому `$HIP`.
 
 ### Ключевые решения

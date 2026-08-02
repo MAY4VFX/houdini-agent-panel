@@ -160,7 +160,22 @@ def onCreateInterface():
   узла" (то, что подсвечено в network editor / выбрано как контекст),
   `node` — `hou.Node` или `None`.
 - `onActivateInterface()` / `onDeactivateInterface()` — опциональны,
-  вызываются когда таб панели становится активным/неактивным.
+  вызываются когда таб панели становится активным/неактивным. Это
+  переключение вкладок, а НЕ закрытие: вешать на них освобождение ресурсов
+  нельзя.
+- `onDestroyInterface()` — опциональна, вот это и есть закрытие таба.
+  Встречается в 29 штатных панелях 22.0 (`PoseLibrary.pypanel` зовёт оттуда
+  `cleanup()`, `LightLinker.pypanel` обнуляет свой объект). Пересчёт по
+  установке: `onCreateInterface` — 35, `onDestroyInterface` — 29,
+  `onActivateInterface`/`onDeactivateInterface` — по 25, `onNodePathChanged` — 19.
+- В области видимости `<script>` доступен глобальный `kwargs`, и в нём лежит
+  `paneTab` — этим различаются несколько открытых табов одной панели.
+  Дословно из `LightLinker.pypanel`:
+  ```python
+  def onActivateInterface():
+      global theLightLinker
+      theLightLinker.activate(kwargs.get('paneTab', None))
+  ```
 
 Меню-теги — на выбор один из:
 - `<includeInToolbarMenu menu_position="N" create_separator="false"/>` —
