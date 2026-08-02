@@ -27,6 +27,7 @@ from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .composer import Composer
+from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
 
@@ -113,6 +114,8 @@ class AgentPanel(QtWidgets.QWidget):
         self._pool = sessions.pool()
         self._models: dict[str, TranscriptModel] = {}
         self._pending_permissions: dict[str, str] = {}
+        self._permission_views: dict[str, PermissionView] = {}
+        self._permission_popover: PermissionRow | None = None
         self._refresh_worker: _RefreshWorker | None = None
         self._closed = False
 
@@ -139,6 +142,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._consent = ConsentStrip(self)
         self._pages = QtWidgets.QStackedWidget(self)
         self._composer = Composer(self)
+        self._composer.set_buddy(self._settings.buddy)
         self._blocking = BlockingNotice(self)
 
         self._transcript = TranscriptView(self)
@@ -162,8 +166,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer.submitted.connect(self._on_submitted)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
-
-        self._transcript.permission_answered.connect(self._on_permission_answered)
+        self._composer.buddy_selected.connect(self._on_buddy_selected)
 
         self._notice.action_clicked.connect(self._on_notice_action)
         self._notice.dismissed.connect(self._on_notice_dismissed)
@@ -307,6 +310,9 @@ class AgentPanel(QtWidgets.QWidget):
             self._start_new_session()
 
     def _on_disconnected(self, reason: str) -> None:
+        self._pending_permissions.clear()
+        self._permission_views.clear()
+        self._hide_permission_popover()
         self._composer.set_busy(False)
         current = self._pool.current()
         if current is not None:
@@ -412,16 +418,22 @@ class AgentPanel(QtWidgets.QWidget):
             ],
         )
         self._pending_permissions[request_key] = session_id
+        self._permission_views[request_key] = view
         entry = self._model(session_id).apply_permission(view)
         self._touch(session_id, entry.id)
+        if self._is_current(session_id):
+            self._sync_permission_popover()
 
     def _on_permission_answered(self, request_key: str, option_id: str) -> None:
         session_id = self._pending_permissions.pop(request_key, "")
+        self._permission_views.pop(request_key, None)
+        self._hide_permission_popover()
         shared_client().answer_permission(request_key, option_id or None)
         if session_id:
             entry = self._model(session_id).resolve_permission(request_key, option_id or None)
             if entry is not None:
                 self._touch(session_id, entry.id)
+        self._sync_permission_popover()
 
     # ------------------------------------------------------------ sessions
 
@@ -441,13 +453,66 @@ class AgentPanel(QtWidgets.QWidget):
         state = self._pool.get(session_id)
         self._transcript.set_model(self._model(session_id))
         self._transcript.refresh(None)
-        self._composer.set_buddy(session_id)
         if state is not None:
             self._composer.set_busy(state.busy)
             self._composer.set_usage(state.usage)
             self._composer.set_commands(list(state.available_commands))
             self._composer.set_modes(state.available_modes, state.current_mode_id)
+        self._sync_permission_popover()
         self._refresh_sessions()
+
+    def _sync_permission_popover(self) -> None:
+        current = self._pool.current()
+        session_id = current.session_id if current is not None else ""
+        view = next(
+            (
+                candidate
+                for key, candidate in self._permission_views.items()
+                if self._pending_permissions.get(key) == session_id and candidate.answered is None
+            ),
+            None,
+        )
+        if view is None:
+            self._hide_permission_popover()
+            return
+        if (
+            self._permission_popover is not None
+            and self._permission_popover.request_key() == view.request_key
+        ):
+            self._position_permission_popover()
+            return
+        self._hide_permission_popover()
+        popover = PermissionRow(view, self)
+        popover.answered.connect(self._on_permission_answered)
+        self._permission_popover = popover
+        popover.show()
+        popover.raise_()
+        self._position_permission_popover()
+
+    def _hide_permission_popover(self) -> None:
+        popover = self._permission_popover
+        self._permission_popover = None
+        if popover is not None:
+            popover.hide()
+            popover.deleteLater()
+
+    def _position_permission_popover(self) -> None:
+        popover = self._permission_popover
+        if popover is None:
+            return
+        anchor = self._composer.popover_anchor_rect(self)
+        width = min(400, max(280, anchor.width() - 96))
+        popover.setFixedWidth(width)
+        popover.adjustSize()
+        x = anchor.center().x() - width // 2
+        x = max(8, min(x, self.width() - width - 8))
+        y = max(self._header.height() + 8, anchor.top() - popover.height() - 10)
+        popover.move(x, y)
+        popover.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._position_permission_popover()
 
     def _start_new_session(self) -> None:
         client = shared_client()
@@ -514,6 +579,10 @@ class AgentPanel(QtWidgets.QWidget):
         if current is not None:
             shared_client().set_mode(current.session_id, mode_id)
 
+    def _on_buddy_selected(self, buddy: str) -> None:
+        self._settings.buddy = buddy
+        settings_mod.save(self._settings)
+
     # ------------------------------------------------- оповещения и версии
 
     def _on_refresh_done(self, result: Any, entries: Any = ()) -> None:
@@ -564,7 +633,12 @@ class AgentPanel(QtWidgets.QWidget):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _remember_seen(self, announcement_id: str) -> None:
-        if announcement_id and announcement_id not in self._settings.seen_announcements:
+        if not announcement_id:
+            return
+        # Тот же принцип, что в _on_agent_chosen: перечитать перед записью,
+        # иначе снимок панели затирает то, что другие экраны уже сохранили.
+        self._settings = settings_mod.load()
+        if announcement_id not in self._settings.seen_announcements:
             self._settings.seen_announcements.append(announcement_id)
             settings_mod.save(self._settings)
 
@@ -608,6 +682,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
 
     def _on_agent_chosen(self, agent_id: str) -> None:
+        # Перечитать с диска ПЕРЕД записью — обязательно. self._settings — это
+        # снимок момента открытия панели, а экран «Агенты» пишет добавленного
+        # «своего агента» в файл напрямую. Сохранение снимка поверх стирало
+        # только что добавленного агента, и «добавил → нажал Использовать»
+        # падало с «агента нет ни в реестре, ни среди своих» (найдено живой
+        # проверкой в обеих Houdini).
+        self._settings = settings_mod.load()
         self._settings.default_agent = agent_id
         settings_mod.save(self._settings)
         client = shared_client()
