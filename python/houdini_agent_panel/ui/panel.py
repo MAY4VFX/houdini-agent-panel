@@ -308,6 +308,9 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_disconnected(self, reason: str) -> None:
         self._composer.set_busy(False)
+        current = self._pool.current()
+        if current is not None:
+            self._finish_activity(current.session_id)
         self._composer.set_capabilities(None, self._settings.whisper_endpoint)
         self._note(f"Агент отключился: {reason}" if reason else "Агент остановлен.")
 
@@ -326,6 +329,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._models.setdefault(session_id, TranscriptModel())
         self._pool.add(state)
         self._pool.set_current(session_id)
+        self._show_session(session_id)
         self._show_page(self.PAGE_TRANSCRIPT)
 
     def _on_modes_changed(self, session_id: str, mode_state: Any) -> None:
@@ -356,6 +360,8 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_tool_call(self, session_id: str, call: Any) -> None:
         entry = self._model(session_id).apply_tool_call(call)
         self._touch(session_id, entry.id)
+        if self._is_current(session_id):
+            self._transcript.reset_thinking_after_tool()
 
     def _on_tool_call_update(self, session_id: str, update: Any) -> None:
         entry = self._model(session_id).apply_tool_update(update)
@@ -379,6 +385,7 @@ class AgentPanel(QtWidgets.QWidget):
             state.busy = False
         if self._is_current(session_id):
             self._composer.set_busy(False)
+        self._finish_activity(session_id)
         if stop_reason and stop_reason not in ("end_turn", "cancelled"):
             entry = self._model(session_id).append_error(f"Агент остановился: {stop_reason}")
             self._touch(session_id, entry.id)
@@ -392,6 +399,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._touch(target, entry.id)
         if self._is_current(target):
             self._composer.set_busy(False)
+        self._finish_activity(target)
 
     def _on_permission_requested(
         self, request_key: str, session_id: str, tool_call: Any, options: list
@@ -433,6 +441,7 @@ class AgentPanel(QtWidgets.QWidget):
         state = self._pool.get(session_id)
         self._transcript.set_model(self._model(session_id))
         self._transcript.refresh(None)
+        self._composer.set_buddy(session_id)
         if state is not None:
             self._composer.set_busy(state.busy)
             self._composer.set_usage(state.usage)
@@ -485,7 +494,15 @@ class AgentPanel(QtWidgets.QWidget):
                 self._pool.mark_changed(current.session_id)
         current.busy = True
         self._composer.set_busy(True)
+        activity = self._model(current.session_id).start_activity()
+        self._touch(current.session_id, activity.id)
+        self._composer.trigger_buddy()
         shared_client().prompt(current.session_id, blocks)
+
+    def _finish_activity(self, session_id: str) -> None:
+        activity = self._model(session_id).finish_activity()
+        if activity is not None:
+            self._touch(session_id, activity.id)
 
     def _on_cancelled(self) -> None:
         current = self._pool.current()

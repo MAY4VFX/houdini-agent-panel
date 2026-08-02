@@ -179,21 +179,55 @@ def npx_argv(node_bin: Path, package: str, args: Sequence[str]) -> list[str]:
     return [str(node_bin), str(npx_cli), "--yes", package, *args]
 
 
-def _npx_cli_path(node_bin: Path) -> Path:
-    """`npx-cli.js` лежит в дереве npm рядом с `node`, а не в PATH.
+class NpxNotFoundError(RuntimeError):
+    """Рядом с этим Node нет npm. Явная ошибка вместо пути в никуда."""
 
-    Раскладка архива nodejs.org (и наша собственная — тот же архив):
-    - POSIX: `<root>/bin/node` -> `<root>/lib/node_modules/npm/bin/npx-cli.js`
-    - Windows: `<root>/node.exe` -> `<root>/node_modules/npm/bin/npx-cli.js`
 
-    `resolve()` — чтобы это работало и для системного Node, если это symlink
-    (типично для homebrew/nvm): раскладка `bin/../lib/node_modules` совпадает
-    с реальным деревом, на которое указывает symlink.
+def npx_cli_candidates(node_bin: Path) -> list[Path]:
+    """Где может лежать `npx-cli.js` относительно данного `node`.
+
+    Раньше здесь была одна догадка с `resolve()`, и она разваливалась ровно на
+    самом типичном случае — Homebrew. `/opt/homebrew/bin/node` это symlink в
+    `Cellar/node/<версия>/bin/node`, но npm Homebrew кладёт НЕ туда, а в
+    `/opt/homebrew/lib/node_modules`. То есть `resolve()` уводил в дерево, где
+    npm нет вовсе, и мы возвращали несуществующий путь как ни в чём не бывало.
+
+    Поэтому теперь это список: и по симлинку, и по реальному пути, и обе
+    раскладки — POSIX (`bin/../lib/node_modules`) и Windows
+    (`node_modules` рядом с `node.exe`). Проверять существование обязан
+    вызывающий.
     """
-    real = node_bin.resolve()
-    if real.name.lower() == "node.exe" or sys.platform == "win32" and real.suffix.lower() == ".exe":
-        return real.parent / "node_modules" / "npm" / "bin" / "npx-cli.js"
-    return real.parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js"
+    candidates: list[Path] = []
+    for base in (node_bin, node_bin.resolve()):
+        parent = base.parent
+        # Windows: node.exe и node_modules лежат в одном каталоге.
+        candidates.append(parent / "node_modules" / "npm" / "bin" / "npx-cli.js")
+        # POSIX: <root>/bin/node и <root>/lib/node_modules.
+        candidates.append(parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js")
+
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _npx_cli_path(node_bin: Path) -> Path:
+    """Первый существующий кандидат.
+
+    Не нашлось ничего — падаем с внятным текстом прямо здесь. Вернуть
+    несуществующий путь означало бы запустить `node <нет-такого-файла>`:
+    процесс умирает мгновенно и молча, а панель остаётся ждать приветствия от
+    покойника. Именно так это и выглядело у художника — «Запускаю…» навсегда.
+    """
+    for candidate in npx_cli_candidates(node_bin):
+        if candidate.is_file():
+            return candidate
+    raise NpxNotFoundError(
+        f"рядом с {node_bin} нет npm (искал npx-cli.js в: "
+        + ", ".join(str(c) for c in npx_cli_candidates(node_bin))
+        + ")"
+    )
 
 
 def path_with_node(node_bin: Path, base: str | None = None) -> str:

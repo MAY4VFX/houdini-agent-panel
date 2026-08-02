@@ -21,13 +21,17 @@ class PermissionRow(QtWidgets.QWidget):
 
     def __init__(self, view: PermissionView, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("permissionCard")
+        self.setAttribute(theme.QtCore.Qt.WA_StyledBackground, True)
+        self.setMaximumWidth(482)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self._view = view
         self._answered: str | None = view.answered
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(theme.MARGIN, theme.SPACING_TIGHT, theme.MARGIN, theme.SPACING_TIGHT)
-        layout.setSpacing(theme.SPACING_TIGHT)
+        layout.setContentsMargins(13, 11, 13, 11)
+        layout.setSpacing(8)
 
         self._title_label = QtWidgets.QLabel(view.tool_title, self)
         self._title_label.setWordWrap(True)
@@ -36,6 +40,7 @@ class PermissionRow(QtWidgets.QWidget):
 
         buttons_row = QtWidgets.QHBoxLayout()
         buttons_row.setSpacing(theme.SPACING_TIGHT)
+        buttons_row.addStretch(1)
         for option_id, name, kind in view.options:
             button = QtWidgets.QPushButton(name, self)  # текст — ровно то, что прислал агент
             button.setFlat(True)
@@ -47,10 +52,10 @@ class PermissionRow(QtWidgets.QWidget):
                 palette = button.palette()
                 palette.setColor(QtGui.QPalette.ButtonText, theme.status_color("pending"))
                 button.setPalette(palette)
+            button.setProperty("permissionPrimary", kind == "allow_once")
             button.clicked.connect(lambda _checked=False, oid=option_id: self._on_clicked(oid))
             self._buttons[option_id] = button
             buttons_row.addWidget(button)
-        buttons_row.addStretch(1)
         layout.addLayout(buttons_row)
 
         # Видна только после ответа — история решения человека.
@@ -60,6 +65,28 @@ class PermissionRow(QtWidgets.QWidget):
 
         if self._answered is not None:
             self._apply_answered(self._answered)
+
+        self.setStyleSheet(
+            "QWidget#permissionCard {"
+            " background: palette(base);"
+            " border: 1px solid palette(mid);"
+            " border-radius: 10px;"
+            "}"
+            "QWidget#permissionCard QPushButton {"
+            " border: 1px solid palette(mid);"
+            " border-radius: 7px;"
+            " padding: 5px 9px;"
+            " background: palette(alternate-base);"
+            "}"
+            "QWidget#permissionCard QPushButton:hover {"
+            " background: palette(button);"
+            "}"
+            "QWidget#permissionCard QPushButton[permissionPrimary=\"true\"] {"
+            " border-color: transparent;"
+            " color: #24180c;"
+            " background: #e5a047;"
+            "}"
+        )
 
     def apply_view(self, view: PermissionView) -> None:
         """Обновить строку по свежему `PermissionView` (например `answered` пришёл извне).

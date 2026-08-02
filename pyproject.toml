@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "houdini-agent-panel"
-version = "0.1.1"
+version = "0.1.2"
 description = "Панель-чат с ACP-агентом внутри SideFX Houdini поверх fxhoudinimcp"
 readme = "README.md"
 license = { text = "MIT" }
@@ -52,7 +52,7 @@ where = ["python"]
 include = ["houdini_agent_panel*"]
 
 [tool.setuptools.package-data]
-houdini_agent_panel = ["houdini/**/*", "data/*.json"]
+houdini_agent_panel = ["houdini/**/*", "data/*.json", "data/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

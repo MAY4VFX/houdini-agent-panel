@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6 import QtCore, QtWidgets
+
 from houdini_agent_panel.sessions import SessionMode, SessionState
 from houdini_agent_panel.ui.chips import HeaderBar, ModeChip
 
@@ -17,6 +19,19 @@ def test_set_agent_sets_button_text(qapp):
     header = HeaderBar()
     header.set_agent("Claude Code", None)
     assert header._agent_button.text() == "Claude Code"
+
+
+def test_header_uses_centered_precision_rail_and_no_native_combobox(qapp):
+    header = HeaderBar()
+    header.resize(900, 38)
+    header.show()
+    qapp.processEvents()
+
+    rail_pos = header._rail.mapTo(header, QtCore.QPoint(0, 0))
+    right_gutter = header.width() - rail_pos.x() - header._rail.width()
+    assert header._rail.width() == 736
+    assert abs(rail_pos.x() - right_gutter) <= 1
+    assert header.findChildren(QtWidgets.QComboBox) == []
 
 
 def test_set_cwd_sets_label_text(qapp):
@@ -99,6 +114,7 @@ def test_non_empty_modes_shows_widget_and_populates_in_order(qapp):
     combo = chip._combo
     assert [combo.itemData(i) for i in range(combo.count())] == ["ask", "code"]
     assert combo.currentData() == "code"
+    assert chip.findChildren(QtWidgets.QComboBox) == []
 
 
 def test_modes_then_empty_hides_again(qapp):

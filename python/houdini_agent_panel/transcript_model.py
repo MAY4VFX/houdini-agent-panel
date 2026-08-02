@@ -10,11 +10,14 @@ docs/architecture.md §8, §11). Ничего отсюда не импортир
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-EntryKind = Literal["user", "agent", "thought", "tool", "plan", "permission", "error"]
+EntryKind = Literal[
+    "user", "activity", "agent", "thought", "tool", "plan", "permission", "error"
+]
 
 #: У ленты один план на сессию — протокол шлёт его целиком при каждом
 #: обновлении (`Plan.entries` — полный список, не дельта), так что и у записи
@@ -48,6 +51,12 @@ class PermissionView:
 
 
 @dataclass
+class ActivityView:
+    started_at: float
+    finished_at: float | None = None
+
+
+@dataclass
 class Entry:
     kind: EntryKind
     id: str  # message_id / tool_call_id / uuid
@@ -55,6 +64,7 @@ class Entry:
     tool: ToolCallView | None = None
     plan: list[PlanEntry] = field(default_factory=list)
     permission: PermissionView | None = None
+    activity: ActivityView | None = None
 
 
 def _plain(value: Any) -> Any:
@@ -95,12 +105,28 @@ class TranscriptModel:
         self._by_tool_call_id: dict[str, Entry] = {}
         self._by_request_key: dict[str, Entry] = {}
         self._plan_entry: Entry | None = None
+        self._active_activity: Entry | None = None
 
     # --- добавление -----------------------------------------------------
 
     def append_user(self, text: str) -> Entry:
         entry = Entry(kind="user", id=str(uuid.uuid4()), text=text)
         self._entries.append(entry)
+        return entry
+
+    def start_activity(self) -> Entry:
+        activity = ActivityView(started_at=time.monotonic())
+        entry = Entry(kind="activity", id=str(uuid.uuid4()), activity=activity)
+        self._active_activity = entry
+        self._entries.append(entry)
+        return entry
+
+    def finish_activity(self) -> Entry | None:
+        entry = self._active_activity
+        if entry is None or entry.activity is None:
+            return None
+        entry.activity.finished_at = time.monotonic()
+        self._active_activity = None
         return entry
 
     def apply_chunk(self, message_id: str, text: str, *, thought: bool = False) -> Entry:

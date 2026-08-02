@@ -18,6 +18,7 @@ from ..transcript_model import Entry, TranscriptModel
 from . import theme
 from .permissions import PermissionRow
 from .qt import QtCore, QtGui, QtWidgets, Signal
+from .thinking import ThinkingIndicator
 
 #: Сколько пикселей до низа ещё считается «внизу» — маленький запас на
 #: округления layout'а, чтобы автопрокрутка не отваливалась от одного пикселя.
@@ -70,10 +71,9 @@ class TranscriptView(QtWidgets.QScrollArea):
 
         self._content = QtWidgets.QWidget(self)
         self._layout = QtWidgets.QVBoxLayout(self._content)
-        self._layout.setContentsMargins(theme.MARGIN, theme.MARGIN, theme.MARGIN, theme.MARGIN)
-        self._layout.setSpacing(theme.SPACING)
-        # Стретч в конце — записи прижимаются к верху, а не растягиваются по
-        # всей высоте вьюпорта, пока лента короткая.
+        self._layout.setContentsMargins(14, 39, 14, 8)
+        self._layout.setSpacing(14)
+        # Activity rows остаются в хронологии: user → Worked for… → answer.
         self._layout.addStretch(1)
         self.setWidget(self._content)
 
@@ -85,6 +85,12 @@ class TranscriptView(QtWidgets.QScrollArea):
     def set_model(self, model: TranscriptModel) -> None:
         self._model = model
         self.refresh(None)
+
+    def reset_thinking_after_tool(self) -> None:
+        for row in reversed(tuple(self._rows.values())):
+            if isinstance(row, _ActivityRow) and row.indicator.is_active():
+                row.indicator.reset_after_tool()
+                return
 
     def refresh(self, entry_id: str | None = None) -> None:
         if self._model is None:
@@ -109,7 +115,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         for entry in self._model.entries():
             row = self._make_row(entry)
             self._rows[entry.id] = row
-            self._layout.insertWidget(self._layout.count() - 1, row)
+            self._layout.insertWidget(len(self._rows) - 1, row)
 
     def _refresh_one(self, entry_id: str) -> None:
         entries = self._model.entries()
@@ -142,6 +148,8 @@ class TranscriptView(QtWidgets.QScrollArea):
     # --- сборка строк по kind ----------------------------------------------
 
     def _make_row(self, entry: Entry) -> QtWidgets.QWidget:
+        if entry.kind == "activity":
+            return _ActivityRow(entry)
         if entry.kind == "tool":
             return _ToolCallRow(entry)
         if entry.kind == "plan":
@@ -168,6 +176,45 @@ class TranscriptView(QtWidgets.QScrollArea):
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        # Both supplied references use a 706–736 px reading rail.  Wider
+        # Houdini panes add quiet gutters instead of stretching prose forever.
+        gutter = max(14, (self.viewport().width() - 736) // 2)
+        margins = self._layout.contentsMargins()
+        self._layout.setContentsMargins(gutter, margins.top(), gutter, margins.bottom())
+
+
+class _ActivityRow(QtWidgets.QWidget):
+    """Spinner while active; compact Worked-for divider after completion."""
+
+    def __init__(self, entry: Entry, parent=None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(0)
+        self.indicator = ThinkingIndicator(self)
+        self.indicator.setMinimumHeight(30)
+        layout.addWidget(self.indicator)
+        rule = QtWidgets.QFrame(self)
+        rule.setFrameShape(QtWidgets.QFrame.HLine)
+        rule.setObjectName("activityRule")
+        layout.addWidget(rule)
+        self.setStyleSheet("QFrame#activityRule { color: palette(mid); }")
+        self.update_from(entry)
+
+    def update_from(self, entry: Entry) -> None:
+        activity = entry.activity
+        if activity is None:
+            self.indicator.clear_activity()
+            return
+        if activity.finished_at is None:
+            if not self.indicator.is_active():
+                self.indicator.start(activity.started_at)
+            return
+        elapsed_ms = max(0, int((activity.finished_at - activity.started_at) * 1000))
+        self.indicator.finish(elapsed_ms)
+
 
 class _MessageRow(QtWidgets.QWidget):
     """Сообщение (user/agent/thought) или ошибка — без рамок, текст выделяется мышью.
@@ -189,6 +236,7 @@ class _MessageRow(QtWidgets.QWidget):
 
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
+        self._kind = entry.kind
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setSpacing(theme.SPACING_TIGHT)
         self._apply_kind_margins(entry.kind)
@@ -228,26 +276,50 @@ class _MessageRow(QtWidgets.QWidget):
                 self._apply_kind_style(widget, entry.kind)
                 widget.set_text(content)
             self._segments.append(widget)
-            self._layout.addWidget(widget)
+            alignment = QtCore.Qt.AlignRight if entry.kind == "user" else QtCore.Qt.Alignment()
+            self._layout.addWidget(widget, 0, alignment)
 
     def _apply_kind_margins(self, kind: str) -> None:
         # Отступ — визуальный маркер «это ввёл человек», без рамок и боксов.
         indent = theme.SPACING * 4 if kind == "user" else 0
-        self._layout.setContentsMargins(indent, 0, 0, 0)
+        bottom = 32 if kind == "user" else 0
+        self._layout.setContentsMargins(indent, 0, 0, bottom)
 
     def _apply_kind_style(self, widget: "_ProseBlock", kind: str) -> None:
         font = widget.font()
         palette = widget.palette()
-        if kind in ("user", "thought"):
-            # И реплика человека, и мысль агента — приглушённые: первая явно
-            # видна по отступу, вторая — курсивом ниже.
+        if kind == "thought":
+            # Мысль вторична; пользовательский bubble, напротив, держит
+            # нормальный контраст как в референсах Claude/Codex.
             palette.setColor(QtGui.QPalette.Text, theme.status_color("pending"))
+        elif kind == "user":
+            user_text = palette.color(QtGui.QPalette.Text)
+            user_text.setAlpha(230)
+            palette.setColor(QtGui.QPalette.Text, user_text)
         if kind == "thought":
             font.setItalic(True)
         elif kind == "error":
             font.setBold(True)
+        if kind == "user":
+            widget.setMaximumWidth(540)
+            widget.document().setDocumentMargin(8)
+            widget.setStyleSheet(
+                "QTextBrowser {"
+                " border: none;"
+                " border-radius: 12px;"
+                " background: palette(alternate-base);"
+                " padding: 2px 4px;"
+                "}"
+            )
         widget.setFont(font)
         widget.setPalette(palette)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if self._kind == "user":
+            maximum = max(220, int(self.width() * 0.74))
+            for widget in self._segments:
+                widget.setMaximumWidth(maximum)
 
 
 class _ProseBlock(QtWidgets.QTextBrowser):
@@ -324,11 +396,64 @@ class _CodeBlock(QtWidgets.QPlainTextEdit):
         self.setFixedHeight(lines * self.fontMetrics().lineSpacing() + 8)
 
 
+class _ToolTrigger(QtWidgets.QAbstractButton):
+    """Flat, fully painted disclosure row — no native Qt arrow/button chrome."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setMinimumHeight(34)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(5, 0, 5, 0)
+        layout.setSpacing(7)
+        self._kind = QtWidgets.QLabel(self)
+        self._title = QtWidgets.QLabel(self)
+        self._status = QtWidgets.QLabel(self)
+        self._chevron = QtWidgets.QLabel("›", self)
+        layout.addWidget(self._kind)
+        layout.addWidget(self._title)
+        layout.addStretch(1)
+        layout.addWidget(self._status)
+        layout.addWidget(self._chevron)
+
+    def set_view(self, *, kind: str, title: str, status: str) -> None:
+        self._kind.setText(theme.kind_glyph(kind))
+        self._title.setText(title)
+        self._status.setText(f"{theme.status_glyph(status)}  {theme.status_label(status)}")
+        color = theme.status_color(status)
+        palette = self._status.palette()
+        palette.setColor(QtGui.QPalette.WindowText, color)
+        self._status.setPalette(palette)
+        self.setAccessibleName(self.text())
+        self.update()
+
+    def text(self) -> str:
+        return f"{self._title.text()} — {self._status.text()}"
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        del event
+        painter = QtGui.QPainter(self)
+        if self.underMouse():
+            hover = self.palette().color(QtGui.QPalette.AlternateBase)
+            painter.fillRect(self.rect(), hover)
+        divider = self.palette().color(QtGui.QPalette.Mid)
+        divider.setAlpha(155)
+        painter.setPen(divider)
+        painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+
+    def nextCheckState(self) -> None:  # noqa: N802
+        super().nextCheckState()
+        self._chevron.setText("⌄" if self.isChecked() else "›")
+
+
 class _ToolCallRow(QtWidgets.QWidget):
     """Сворачиваемая строка вызова инструмента: иконка по `kind`, живой статус."""
 
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
+        self.setMaximumWidth(560)
         self._entry_id = entry.id
         self._expanded = False
 
@@ -336,11 +461,7 @@ class _ToolCallRow(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.SPACING_TIGHT)
 
-        self._toggle = QtWidgets.QToolButton(self)
-        self._toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self._toggle.setArrowType(QtCore.Qt.RightArrow)
-        self._toggle.setAutoRaise(True)
-        self._toggle.setCheckable(True)
+        self._toggle = _ToolTrigger(self)
         self._toggle.clicked.connect(self._on_toggled)
         layout.addWidget(self._toggle)
 
@@ -356,18 +477,12 @@ class _ToolCallRow(QtWidgets.QWidget):
     def update_from(self, entry: Entry) -> None:
         tool = entry.tool
         self._tool = tool
-        self._toggle.setIcon(theme.kind_icon(tool.kind))
-        status_text = f"{theme.status_glyph(tool.status)} {tool.title} — {theme.status_label(tool.status)}"
-        self._toggle.setText(status_text)
-        palette = self._toggle.palette()
-        palette.setColor(QtGui.QPalette.ButtonText, theme.status_color(tool.status))
-        self._toggle.setPalette(palette)
+        self._toggle.set_view(kind=tool.kind, title=tool.title, status=tool.status)
         if self._expanded:
             self._render_details()
 
     def _on_toggled(self, checked: bool) -> None:
         self._expanded = checked
-        self._toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
         if checked:
             self._render_details()
         self._details.setVisible(checked)

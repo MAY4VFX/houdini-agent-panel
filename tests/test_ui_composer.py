@@ -172,6 +172,23 @@ def test_empty_input_does_not_emit_submitted(qapp):
     assert received == []
 
 
+def test_composer_uses_same_centered_736px_rail_as_precision_mockup(qapp):
+    host = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    composer = Composer(host)
+    layout.addWidget(composer)
+    host.resize(900, 180)
+    host.show()
+    qapp.processEvents()
+
+    surface_pos = composer._surface.mapTo(composer, QtCore.QPoint(0, 0))
+    right_gutter = composer.width() - surface_pos.x() - composer._surface.width()
+
+    assert composer._surface.width() == 736
+    assert abs(surface_pos.x() - right_gutter) <= 1
+
+
 def test_submitted_includes_attachments_after_text(qapp, tmp_path):
     composer = Composer()
     composer.show()

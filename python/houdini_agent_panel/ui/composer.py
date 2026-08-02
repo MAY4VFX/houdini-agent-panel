@@ -18,10 +18,11 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .chips import ModeChip
+from .chips import ChoiceButton, ModeChip
 from .qt import QtCore, QtGui, QtWidgets, Signal
+from .thinking import _BuddySprite
 from .voice import VoiceButton
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 _MIN_LINES = 1
 _MAX_LINES = 6
 _MAX_POPUP_HEIGHT = 160
+_DEFAULT_PLACEHOLDER = "Что изменить в сцене?"
+_RAIL_WIDTH = 736
 
 
 class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
@@ -131,7 +134,11 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
     mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     if info.supports_image and mime_type.startswith("image/"):
         data = path.read_bytes()
-        return {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime_type}
+        return {
+            "type": "image",
+            "data": base64.b64encode(data).decode("ascii"),
+            "mimeType": mime_type,
+        }
     if info.supports_embedded_context:
         uri = path.resolve().as_uri()
         try:
@@ -169,6 +176,7 @@ class Composer(QtWidgets.QWidget):
     submitted = Signal(list)  # list[dict] — готовые контент-блоки ACP
     cancelled = Signal()
     mode_selected = Signal(str)
+    model_selected = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -188,6 +196,13 @@ class Composer(QtWidgets.QWidget):
 
         # --- поле ввода
         self._text_edit = _GrowingTextEdit(self)
+        self._text_edit.setObjectName("composerInput")
+        self._text_edit.setPlaceholderText(_DEFAULT_PLACEHOLDER)
+        self._text_edit.setFrameShape(QtWidgets.QFrame.NoFrame)
+        input_palette = self._text_edit.palette()
+        placeholder_role = getattr(QtGui.QPalette, "PlaceholderText", QtGui.QPalette.Text)
+        input_palette.setColor(placeholder_role, QtGui.QColor("#85827d"))
+        self._text_edit.setPalette(input_palette)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.submit_requested.connect(self._submit)
         self._text_edit.navigate_requested.connect(self._on_popup_navigate)
@@ -198,12 +213,14 @@ class Composer(QtWidgets.QWidget):
 
         # --- левые кнопки: вложения, голос
         self._attach_button = QtWidgets.QToolButton()
+        self._attach_button.setObjectName("composerTool")
         self._attach_button.setText("+")
         self._attach_button.setToolTip("Прикрепить файл")
         self._attach_button.setVisible(False)
         self._attach_button.clicked.connect(self._on_attach_clicked)
 
         self._voice_button = VoiceButton(self)
+        self._voice_button.setObjectName("composerTool")
         self._voice_button.recorded_audio.connect(self._on_voice_audio)
         self._voice_button.transcribed_text.connect(self._on_voice_text)
 
@@ -211,28 +228,96 @@ class Composer(QtWidgets.QWidget):
         self.mode_chip = ModeChip(self)
         self.mode_chip.mode_selected.connect(self.mode_selected.emit)
 
+        # Модель — такой же data-driven control: по умолчанию скрыта и
+        # появляется только если вызывающая сторона передала варианты.
+        self.model_chip = ChoiceButton(self)
+        self.model_chip.activated.connect(self._on_model_activated)
+        self.model_chip.setVisible(False)
+
         # --- правая сторона: счётчик, отправка/стоп
         self._usage_label = QtWidgets.QLabel()
         self._usage_label.setVisible(False)
 
-        self._send_button = QtWidgets.QPushButton("➤")
+        self._send_button = QtWidgets.QPushButton("↑")
+        self._send_button.setObjectName("composerSend")
+        self._send_button.setFixedSize(32, 32)
         self._send_button.setToolTip("Отправить")
         self._send_button.clicked.connect(self._on_send_clicked)
 
-        input_row = QtWidgets.QHBoxLayout()
-        input_row.addWidget(self._attach_button)
-        input_row.addWidget(self._voice_button)
-        input_row.addWidget(self.mode_chip)
-        input_row.addWidget(self._text_edit, 1)
-        input_row.addWidget(self._usage_label)
-        input_row.addWidget(self._send_button)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(3)
+        action_row.addWidget(self._attach_button)
+        action_row.addWidget(self.mode_chip)
+        action_row.addStretch(1)
+        action_row.addWidget(self.model_chip)
+        action_row.addWidget(self._usage_label)
+        action_row.addSpacing(12)
+        action_row.addWidget(self._voice_button)
+        action_row.addWidget(self._send_button)
+
+        self._surface = QtWidgets.QFrame(self)
+        self._surface.setObjectName("composerSurface")
+        self._surface.setMinimumHeight(99)
+        surface_layout = QtWidgets.QVBoxLayout(self._surface)
+        surface_layout.setContentsMargins(8, 7, 8, 8)
+        surface_layout.setSpacing(0)
+        surface_layout.addWidget(self._attachments_bar)
+        surface_layout.addWidget(self._text_edit)
+        surface_layout.addLayout(action_row)
 
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.addWidget(self._attachments_bar)
-        main_layout.addLayout(input_row)
+        main_layout.setContentsMargins(0, 42, 0, 14)
+        main_layout.setAlignment(QtCore.Qt.AlignHCenter)
+        main_layout.addWidget(self._surface, 0, QtCore.Qt.AlignHCenter)
+
+        self._buddy = _BuddySprite(self)
+        self._buddy.raise_()
+
+        self.setStyleSheet(
+            "QFrame#composerSurface {"
+            " background: palette(base);"
+            " border: 1px solid palette(mid);"
+            " border-radius: 18px;"
+            "}"
+            "QPlainTextEdit#composerInput {"
+            " background: transparent;"
+            " border: none;"
+            " padding: 4px 5px;"
+            "}"
+            "QPushButton#composerSend {"
+            " border: none;"
+            " border-radius: 16px;"
+            " background: palette(text);"
+            " color: palette(base);"
+            " font-weight: bold;"
+            "}"
+            "QPushButton#composerSend:disabled {"
+            " background: palette(mid);"
+            " color: palette(disabled, text);"
+            "}"
+            "QToolButton#composerTool {"
+            " border: none;"
+            " background: transparent;"
+            " padding: 4px;"
+            "}"
+            "QToolButton#composerTool:hover {"
+            " background: palette(alternate-base);"
+            " border-radius: 6px;"
+            "}"
+        )
 
         self._adjust_text_height()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._surface.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
+        surface_at = self._surface.mapTo(self, QtCore.QPoint(0, 0))
+        self._buddy.move(
+            surface_at.x() + self._surface.width() - self._buddy.width() - 20,
+            surface_at.y() - self._buddy.height() + 12,
+        )
+        self._buddy.raise_()
 
     # --- публичный контракт (docs/architecture.md §10) --------------------
 
@@ -256,9 +341,39 @@ class Composer(QtWidgets.QWidget):
         приватные/вложенные атрибуты)."""
         self.mode_chip.set_modes(modes, current_id)
 
+    def set_models(self, models: list[tuple[str, str]], current_id: str | None) -> None:
+        """Показать выбор модели только для списка, пришедшего от агента."""
+        self.model_chip.blockSignals(True)
+        try:
+            self.model_chip.clear()
+            for model_id, label in models:
+                self.model_chip.addItem(label, model_id)
+            index = self.model_chip.findData(current_id)
+            if index >= 0:
+                self.model_chip.setCurrentIndex(index)
+        finally:
+            self.model_chip.blockSignals(False)
+        self.model_chip.setVisible(bool(models))
+
+    def set_buddy(self, key: str) -> None:
+        self._buddy.set_buddy(key)
+
+    def trigger_buddy(self) -> None:
+        self._buddy.start_action()
+
+    def enable_preview_microphone(self) -> None:
+        """Показать affordance в standalone preview без выдуманной capability."""
+        self._voice_button.setVisible(True)
+        self._voice_button.setToolTip("Микрофон (в preview без аудиобэкенда)")
+
+    def _on_model_activated(self, index: int) -> None:
+        model_id = self.model_chip.itemData(index)
+        if model_id:
+            self.model_selected.emit(str(model_id))
+
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
-        self._send_button.setText("■" if busy else "➤")
+        self._send_button.setText("■" if busy else "↑")
         self._send_button.setToolTip("Остановить" if busy else "Отправить")
 
     def set_commands(self, commands: list["AvailableCommand"]) -> None:
@@ -287,7 +402,7 @@ class Composer(QtWidgets.QWidget):
     def unblock_input(self) -> None:
         self._blocked = False
         self._text_edit.setEnabled(True)
-        self._text_edit.setPlaceholderText("")
+        self._text_edit.setPlaceholderText(_DEFAULT_PLACEHOLDER)
         self._send_button.setEnabled(True)
         self._attach_button.setEnabled(True)
         self._voice_button.setEnabled(True)
@@ -419,8 +534,8 @@ class Composer(QtWidgets.QWidget):
         тестах в том числе) не отражают фактическое число абзацев надёжно."""
         line_height = QtGui.QFontMetrics(self._text_edit.font()).lineSpacing()
         lines = max(1, self._text_edit.toPlainText().count("\n") + 1)
-        padding = 12
-        min_height = line_height * _MIN_LINES + padding
+        padding = 22
+        min_height = max(55, line_height * _MIN_LINES + padding)
         max_height = line_height * _MAX_LINES + padding
         new_height = max(min_height, min(line_height * lines + padding, max_height))
         self._text_edit.setFixedHeight(int(new_height))
@@ -456,7 +571,8 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.popup_active = False
 
     def _position_popup(self) -> None:
-        edit_geo = self._text_edit.geometry()
+        edit_pos = self._text_edit.mapTo(self, QtCore.QPoint(0, 0))
+        edit_geo = QtCore.QRect(edit_pos, self._text_edit.size())
         row_height = self._popup.sizeHintForRow(0) if self._popup.count() else 20
         height = min(row_height * max(self._popup.count(), 1) + 4, _MAX_POPUP_HEIGHT)
         self._popup.setGeometry(edit_geo.x(), edit_geo.y() - height, edit_geo.width(), height)

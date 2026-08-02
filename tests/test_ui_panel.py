@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from houdini_agent_panel import sessions
@@ -288,6 +290,42 @@ def test_consent_strip_does_not_block_input(qapp):
 
     assert not widget._composer.is_input_blocked()
     assert widget._transcript.isEnabled()
+
+    widget.shutdown()
+
+
+def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch):
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+    state = _session()
+    client.session_started.emit(state.session_id, state)
+    monkeypatch.setattr(client, "prompt", lambda _session_id, _blocks: None)
+
+    widget._on_submitted([{"type": "text", "text": "построй тестовую геометрию"}])
+    activity_rows = [
+        row for row in widget._transcript._rows.values() if hasattr(row, "indicator")
+    ]
+    assert len(activity_rows) == 1
+    indicator = activity_rows[0].indicator
+    first_verb = indicator._verb
+    assert indicator.is_active()
+    assert widget._composer._buddy._action_elapsed == 0
+
+    call = SimpleNamespace(
+        tool_call_id="tc1",
+        title="Create geometry",
+        kind="edit",
+        status="pending",
+        content=None,
+        locations=None,
+    )
+    client.tool_call.emit(state.session_id, call)
+    assert indicator.is_active()
+    assert indicator._verb != first_verb
+
+    client.turn_finished.emit(state.session_id, "end_turn")
+    assert not indicator.is_active()
+    assert indicator._status._text.startswith("Worked for ")
 
     widget.shutdown()
 

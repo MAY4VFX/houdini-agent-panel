@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from .. import paths
 from .. import settings as settings_module
+from .chips import ChoiceButton
 from .qt import QtWidgets, Signal
 
 
@@ -34,7 +35,7 @@ class SettingsView(QtWidgets.QWidget):
         header.addWidget(QtWidgets.QLabel("Настройки"))
         header.addStretch(1)
 
-        self._default_agent_combo = QtWidgets.QComboBox()
+        self._default_agent_combo = ChoiceButton()
         self._default_agent_combo.currentIndexChanged.connect(self._on_field_changed)
 
         self._autostart_checkbox = QtWidgets.QCheckBox("Автостарт агента при открытии панели")
@@ -46,7 +47,9 @@ class SettingsView(QtWidgets.QWidget):
         self._show_announcements_checkbox = QtWidgets.QCheckBox("Показывать оповещения")
         self._show_announcements_checkbox.toggled.connect(self._on_field_changed)
 
-        self._telemetry_checkbox = QtWidgets.QCheckBox("Телеметрия (анонимная, по умолчанию выключена)")
+        self._telemetry_checkbox = QtWidgets.QCheckBox(
+            "Телеметрия (анонимная, по умолчанию выключена)"
+        )
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
         self._whisper_edit = QtWidgets.QLineEdit()

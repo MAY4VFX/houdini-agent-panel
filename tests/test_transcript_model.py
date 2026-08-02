@@ -43,6 +43,19 @@ def test_append_user_creates_entry_with_text():
     assert model.entries() == [entry]
 
 
+def test_activity_is_inserted_in_chronology_and_finished_in_place():
+    model = TranscriptModel()
+    user = model.append_user("вопрос")
+    activity = model.start_activity()
+    answer = model.apply_chunk("m1", "ответ")
+
+    finished = model.finish_activity()
+
+    assert model.entries() == [user, activity, answer]
+    assert finished is activity
+    assert activity.activity.finished_at >= activity.activity.started_at
+
+
 def test_chunks_with_same_message_id_are_merged():
     model = TranscriptModel()
     first = model.apply_chunk("m1", "Привет")

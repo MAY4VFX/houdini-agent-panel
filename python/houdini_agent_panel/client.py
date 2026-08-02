@@ -55,6 +55,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +93,14 @@ _STDIO_BUFFER_LIMIT = 50 * 1024 * 1024
 
 #: Код ошибки "нужен логин" — соглашение самого ACP (application-specific
 #: диапазон JSON-RPC, не стандартный -32700..-32603).
+#: Потолок ожидания ответа на `initialize`. Щедрый намеренно: npx-агент при
+#: первом запуске сначала выкачивает свой пакет, и минута там — норма, а не
+#: признак поломки. Но потолок обязан быть: без него панель ждёт вечно.
+_CONNECT_TIMEOUT = 180.0
+
+#: Сколько последних строк stderr агента показывать в сообщении об ошибке.
+_STDERR_TAIL_LINES = 12
+
 _AUTH_REQUIRED_CODE = -32000
 
 _CONTENT_BLOCK_TYPES: dict[str, type] = {
@@ -244,6 +253,11 @@ class AcpWorker(QtCore.QThread):
         self._stderr_task: asyncio.Task | None = None
         self._exit_watch_task: asyncio.Task | None = None
         self._closing = False
+        #: Резолвится кодом возврата, когда процесс агента умер. По ней
+        #: `initialize` понимает, что ответа уже не будет, вместо того чтобы
+        #: ждать его вечно.
+        self._exited: asyncio.Future | None = None
+        self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES * 4)
 
         self._agent_info: AgentInfo | None = None
         self._pending_permissions: dict[str, asyncio.Future] = {}
@@ -368,21 +382,78 @@ class AcpWorker(QtCore.QThread):
             conn = acp.connect_to_agent(self, writer, reader)
             self._conn = conn
 
+            self._exited = self.loop.create_future()
             self._stderr_task = self.loop.create_task(self._pump_stderr())
             self._exit_watch_task = self.loop.create_task(self._watch_process_exit(process))
 
-            init = await conn.initialize(
-                protocol_version=acp.PROTOCOL_VERSION,
-                client_capabilities=ClientCapabilities(),  # fs/terminal не объявляем
-                client_info=Implementation(name="houdini-agent-panel", version=__version__),
-            )
+            init = await self._initialize_or_fail(conn)
+            if init is None:
+                return
         except Exception as exc:  # noqa: BLE001 - что угодно на старте -> failed, не краш
             await self._cleanup()
-            self.failed.emit(str(exc))
+            self.failed.emit(self._describe_failure(str(exc)))
             return
 
         self._agent_info = _agent_info_from(init)
         self.connected.emit(self._agent_info)
+
+
+    async def _initialize_or_fail(self, conn) -> "Any | None":
+        """`initialize`, но не в вечность.
+
+        Голый `await conn.initialize(...)` — это то, из-за чего панель у
+        художника писала «Запускаю claude-acp…» и висела бесконечно. Агент
+        умирал сразу после старта (в том случае — из-за пути к npx, которого
+        не существовало), процесс закрывал каналы, ответа на `initialize` уже
+        не могло быть ни при каких обстоятельствах, а мы всё ждали.
+
+        Ждём теперь три исхода сразу: ответ, смерть процесса и общий потолок
+        времени. Возвращаем None, если соединения не вышло, — сигнал `failed`
+        при этом уже отправлен.
+        """
+        init_task = self.loop.create_task(
+            conn.initialize(
+                protocol_version=acp.PROTOCOL_VERSION,
+                client_capabilities=ClientCapabilities(),  # fs/terminal не объявляем
+                client_info=Implementation(name="houdini-agent-panel", version=__version__),
+            )
+        )
+        waiters = {init_task, self._exited}
+        done, _pending = await asyncio.wait(
+            waiters, return_when=asyncio.FIRST_COMPLETED, timeout=_CONNECT_TIMEOUT
+        )
+
+        if init_task in done:
+            return init_task.result()
+
+        init_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await init_task
+
+        if self._exited in done:
+            code = self._exited.result()
+            reason = f"агент завершился с кодом {code}, не ответив на initialize"
+        else:
+            reason = (
+                f"агент не ответил на initialize за {int(_CONNECT_TIMEOUT)} с "
+                "и, похоже, не запустился"
+            )
+
+        await self._cleanup()
+        self.failed.emit(self._describe_failure(reason))
+        return None
+
+    def _describe_failure(self, reason: str) -> str:
+        """К причине — хвост stderr агента.
+
+        Без него сообщение «агент завершился с кодом 1» не говорит человеку
+        ничего, а вся суть обычно ровно там: не найден файл, нет прав, не
+        хватает переменной окружения.
+        """
+        tail = [line for line in self._stderr_tail if line.strip()]
+        if not tail:
+            return reason
+        return reason + "\n\n" + "\n".join(tail[-_STDERR_TAIL_LINES:])
 
     async def do_stop(self) -> None:
         """Та же лестница останова, что раньше делал `spawn_agent_process.__aexit__`:
@@ -525,7 +596,9 @@ class AcpWorker(QtCore.QThread):
                 line = await self._stderr_reader.readline()
                 if not line:
                     break
-                self.log_line.emit(line.decode(errors="replace").rstrip("\n"))
+                text = line.decode(errors="replace").rstrip("\n")
+                self._stderr_tail.append(text)
+                self.log_line.emit(text)
         except asyncio.CancelledError:
             pass
 
@@ -536,6 +609,10 @@ class AcpWorker(QtCore.QThread):
             code = await self._await_process(process)
         except asyncio.CancelledError:
             return
+
+        exited = self._exited
+        if exited is not None and not exited.done():
+            exited.set_result(code)
         if not self._closing:
             self.disconnected.emit(f"agent-процесс неожиданно завершился (код {code})")
 

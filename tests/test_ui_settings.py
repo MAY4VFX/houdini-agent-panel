@@ -50,6 +50,13 @@ def test_default_agent_combo_lists_installed_and_custom(qapp):
     assert "custom:x" in options
 
 
+def test_settings_has_no_native_combobox(qapp):
+    from PySide6 import QtWidgets
+
+    view = SettingsView()
+    assert view.findChildren(QtWidgets.QComboBox) == []
+
+
 def test_default_agent_selection_persists(qapp):
     current = settings_module.load()
     current.installed_agents["claude-acp"] = settings_module.InstalledAgent(

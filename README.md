@@ -84,6 +84,16 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 Тесты не ходят в сеть и не пишут за пределы `tmp_path` — это обеспечено автофикстурами
 в `tests/conftest.py`, а не дисциплиной.
 
+UI можно разрабатывать без запуска Houdini. Preview использует настоящие Qt-виджеты
+панели, fake session и автоматически перезапускается после сохранения Python-файлов:
+
+```bash
+.venv/bin/python -m houdini_agent_panel.dev_preview --watch
+```
+
+В окне можно раскрывать custom dropdowns/tool rows, отвечать на permission-card и
+отправлять сообщения: fake-turn покажет spinner, buddy action и завершение `Worked for…`.
+
 ## Лицензия
 
 MIT
