@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "houdini-agent-panel"
-version = "0.1.0"
+version = "0.1.1"
 description = "Панель-чат с ACP-агентом внутри SideFX Houdini поверх fxhoudinimcp"
 readme = "README.md"
 license = { text = "MIT" }

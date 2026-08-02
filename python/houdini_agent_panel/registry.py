@@ -14,28 +14,49 @@ import platform
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from . import paths
 from .network import Fetcher, NetworkError, fetch_json
 
 REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
-#: Шестёрка из design.md. Порядок — порядок показа в UI.
+#: Шестёрка из design.md — ровно то, что панель предлагает. Порядок — порядок
+#: показа в UI.
 #:
-#: Сверено с живым реестром (registry version 1.0.0): реестр называет эти
-#: агенты не так, как design.md описывает их людям — "Claude Agent" лежит под
-#: id "claude-acp", "Gemini CLI" под "gemini", "Kimi CLI" под "kimi". Только
-#: "codex-acp", "grok-build" и "opencode" совпадают с тем, что можно было бы
-#: угадать по памяти.
+#: Это НЕ «всё, что есть в реестре»: там под сорок записей, и вываливать их
+#: художнику значит подменить выбор списком, в котором он не разбирается и не
+#: обязан. Всё, чего здесь нет, ставится через «Свой агент» — это и есть ответ
+#: дизайна на «остальное».
+#:
+#: Идентификаторы сверены с живым реестром (version 1.0.0) и не совпадают с
+#: тем, как агенты называются для людей: "Claude Agent" лежит под "claude-acp",
+#: "Gemini CLI" под "gemini", "Kimi CLI" под "kimi". Угадать их по памяти
+#: нельзя — только "codex-acp", "grok-build" и "opencode" очевидны.
 FEATURED_AGENT_IDS: tuple[str, ...] = (
     "claude-acp",
     "codex-acp",
-    "gemini",
     "grok-build",
-    "kimi",
     "opencode",
+    "gemini",
+    "kimi",
 )
+
+
+def featured(entries: "Sequence[AgentEntry]") -> "list[AgentEntry]":
+    """Отобрать и упорядочить агентов v1.
+
+    Порядок берётся из ``FEATURED_AGENT_IDS``, а не из реестра: реестр
+    отсортирован по идентификатору, и для человека этот порядок не значит
+    ничего. Запись, которой в реестре не оказалось (переименовали, убрали),
+    просто пропускается — панель не должна показывать пустую строку с именем,
+    которое ей неоткуда взять.
+    """
+    order = {agent_id: index for index, agent_id in enumerate(FEATURED_AGENT_IDS)}
+    chosen = [entry for entry in entries if entry.id in order]
+    chosen.sort(key=lambda entry: order[entry.id])
+    return chosen
+
 
 _CACHE_FILE_NAME = "registry.json"
 

@@ -505,8 +505,14 @@ class AgentPanel(QtWidgets.QWidget):
         # время таймаута, если сети нет. Записи приезжают уже готовыми.
         agents_view = getattr(self, "_agents_view", None)
         if agents_view is not None and entries:
+            from .. import registry
+
+            # Именно featured(), а не весь реестр: там под сорок записей, и
+            # вываливать их художнику значит подменить выбор списком, в котором
+            # он не разбирается. Всё остальное — через «Свой агент».
             agents_view.set_agents(
-                list(entries), updates=list(getattr(result, "updates", []) or [])
+                registry.featured(entries),
+                updates=list(getattr(result, "updates", []) or []),
             )
 
         for announcement in getattr(result, "announcements", []):
