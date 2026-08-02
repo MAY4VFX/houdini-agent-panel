@@ -28,7 +28,7 @@ from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .composer import Composer
-from .conversations import ConversationDrawer
+from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
@@ -119,6 +119,12 @@ class _RefreshWorker(QtCore.QThread):
 
 #: Names for the featured six, for when the registry hasn't arrived yet. Not
 #: a source of truth — the registry always wins — this only keeps the chip
+#: How long to wait for the agent to acknowledge a stop before releasing the
+#: input ourselves. `session/cancel` is a notification — an agent is free to
+#: never answer it, and the panel must not stay locked because of that.
+_CANCEL_GRACE_MS = 4000
+
+
 #: from showing a bare id for the first few seconds.
 _FALLBACK_LABELS = {
     "claude-acp": "Claude Agent",
@@ -251,9 +257,12 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.manage_agents_clicked.connect(self._open_agent_management)
         self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.conversations_clicked.connect(self._conversations.toggle)
+        self._header.new_session_clicked.connect(self._start_new_session)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
         self._conversations.new_session_clicked.connect(self._start_new_session)
         self._conversations.session_selected.connect(self._pool.set_current)
+        self._conversations.session_renamed.connect(self._on_session_renamed)
+        self._conversations.session_removed.connect(self._on_session_removed)
 
         self._composer.submitted.connect(self._on_submitted)
         self._composer.cancelled.connect(self._on_cancelled)
@@ -675,6 +684,20 @@ class AgentPanel(QtWidgets.QWidget):
             return
         client.new_session(cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers())
 
+    def _on_session_renamed(self, session_id: str, title: str) -> None:
+        state = self._pool.get(session_id)
+        if state is not None:
+            state.title = title
+            self._pool.mark_changed(session_id)
+
+    def _on_session_removed(self, session_id: str) -> None:
+        self._pool.remove(session_id)
+        if self._pool.current() is None:
+            # Deleted the last conversation — an artist who just cleared the
+            # drawer should land somewhere usable, not on an empty feed with
+            # no session to prompt.
+            self._start_new_session()
+
     def _model(self, session_id: str) -> TranscriptModel:
         return self._models.setdefault(session_id, TranscriptModel())
 
@@ -704,8 +727,12 @@ class AgentPanel(QtWidgets.QWidget):
         if text:
             entry = self._model(current.session_id).append_user(text)
             self._touch(current.session_id, entry.id)
-            if current.title in ("", "Новый разговор"):
-                current.title = text.splitlines()[0][:60]
+            # `client.py.do_new_session` seeds every fresh session with the
+            # English "New conversation" — this used to compare against the
+            # old Russian default and never matched, so live conversations
+            # never got a real name until this fix.
+            if current.title in ("", "New conversation"):
+                current.title = summarize_title(text)
                 self._pool.mark_changed(current.session_id)
         current.busy = True
         self._composer.set_busy(True)
@@ -720,9 +747,36 @@ class AgentPanel(QtWidgets.QWidget):
             self._touch(session_id, activity.id)
 
     def _on_cancelled(self) -> None:
+        """Stop the current turn — and never leave the artist stuck.
+
+        `session/cancel` is a notification: the agent may answer it with a
+        `turn_finished`, or may ignore it entirely (a dead session, a wedged
+        process). Waiting forever for an acknowledgement that may never come
+        is how the panel ends up with a stop button that does nothing, so
+        after a short grace period we release the input ourselves and say so.
+        """
         current = self._pool.current()
-        if current is not None:
-            shared_client().cancel(current.session_id)
+        if current is None:
+            self._composer.set_busy(False)
+            return
+        shared_client().cancel(current.session_id)
+        session_id = current.session_id
+        QtCore.QTimer.singleShot(
+            _CANCEL_GRACE_MS, lambda: self._release_if_still_busy(session_id)
+        )
+
+    def _release_if_still_busy(self, session_id: str) -> None:
+        state = self._pool.get(session_id)
+        if state is None or not state.busy:
+            return
+        state.busy = False
+        if self._is_current(session_id):
+            self._composer.set_busy(False)
+        entry = self._model(session_id).append_error(
+            "The agent did not acknowledge the stop. Input is unlocked; "
+            "start a new conversation if it stays unresponsive."
+        )
+        self._touch(session_id, entry.id)
 
     def _on_mode_selected(self, mode_id: str) -> None:
         current = self._pool.current()
@@ -857,6 +911,15 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client()
         if client.is_running():
             client.stop()
+        # Sessions belong to the process that issued them. The old agent is
+        # gone, so its conversations cannot be continued by the new one — the
+        # panel must start clean rather than carry ids the new agent never
+        # handed out.
+        self._pool.clear()
+        self._models.clear()
+        self._pending_permissions.clear()
+        self._transcript.set_model(self._model("__idle__"))
+        self._transcript.refresh(None)
         self._start_agent(agent_id)
 
     def _note(self, text: str) -> None:

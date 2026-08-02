@@ -102,6 +102,22 @@ class SessionPool(QtCore.QObject):
         self._current_id = session_id
         self.current_changed.emit(session_id)
 
+    def clear(self) -> None:
+        """Drop every session. Called when the agent process goes away.
+
+        A session id is issued by one specific agent process and means
+        nothing to any other. Keeping the list across an agent switch used to
+        leave the panel convinced it still had a live conversation: it
+        skipped creating a new session and then sent prompts carrying an id
+        the new agent had never issued, which simply hung.
+        """
+        removed = list(self._order)
+        self._states.clear()
+        self._order.clear()
+        self._current_id = None
+        for session_id in removed:
+            self.removed.emit(session_id)
+
     def remove(self, session_id: str) -> None:
         if session_id not in self._states:
             return
