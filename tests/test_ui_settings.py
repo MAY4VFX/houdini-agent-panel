@@ -106,15 +106,13 @@ def test_reload_does_not_resave_settings(qapp, monkeypatch):
 
 def test_agents_section_is_embedded_at_top(qapp):
     """The old standalone «Агенты» screen is gone: its content lives inside
-    settings now, as an `AgentsView` instance, first at the top."""
+    settings now, as an `AgentsView` instance, inside the first (topmost)
+    collapsible section."""
     view = SettingsView()
     assert isinstance(view._agents_view, AgentsView)
-    content_layout = view._scroll.widget().layout()
-    index = next(
-        i for i in range(content_layout.count())
-        if content_layout.itemAt(i).widget() is view._agents_view
-    )
-    assert index == 1  # right after the "Agents" section label
+    rail_layout = view._rail.layout()
+    first_section = rail_layout.itemAt(0).widget()
+    assert view._agents_view in first_section.findChildren(AgentsView)
 
 
 def test_focus_agents_scrolls_to_top(qapp):

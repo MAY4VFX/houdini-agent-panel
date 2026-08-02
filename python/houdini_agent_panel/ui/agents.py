@@ -104,10 +104,20 @@ class _AgentRow(QtWidgets.QWidget):
     uninstall_requested = Signal()
     remove_custom_requested = Signal()
 
+    #: Fixed width for the state column and the actions column. Letting them
+    #: size to content made every row's buttons land at a different x —
+    #: "Install" is narrower than "Update"+"Remove" — which read as an
+    #: unaligned list rather than a table. A shared fixed width plus
+    #: right-alignment inside it gives every row the same right edge
+    #: regardless of what that row happens to show.
+    _STATE_COLUMN_WIDTH = 150
+    _ACTIONS_COLUMN_WIDTH = 170
+
     def __init__(
         self,
         *,
-        title: str,
+        name: str,
+        version: str = "",
         state_text: str,
         unavailable_reason: str = "",
         is_installed: bool = False,
@@ -118,18 +128,41 @@ class _AgentRow(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(8)
 
-        layout.addWidget(QtWidgets.QLabel(title), 1)
+        name_box = QtWidgets.QWidget(self)
+        name_layout = QtWidgets.QHBoxLayout(name_box)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(6)
+        name_layout.addWidget(QtWidgets.QLabel(name, name_box))
+        if version:
+            # Version is a detail, not the headline — a name reads fine
+            # without it, so it's de-emphasized rather than dropped.
+            version_label = QtWidgets.QLabel(version, name_box)
+            version_label.setStyleSheet("color: palette(disabled, text);")
+            name_layout.addWidget(version_label)
+        name_layout.addStretch(1)
+        layout.addWidget(name_box, 1)
 
-        self._state_label = QtWidgets.QLabel(unavailable_reason or state_text)
+        self._state_label = QtWidgets.QLabel(unavailable_reason or state_text, self)
+        self._state_label.setMinimumWidth(self._STATE_COLUMN_WIDTH)
+        self._state_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         if unavailable_reason:
             self._state_label.setStyleSheet("color: gray;")
         layout.addWidget(self._state_label)
 
-        self._progress = QtWidgets.QProgressBar()
+        self._progress = QtWidgets.QProgressBar(self)
         self._progress.setVisible(False)
         self._progress.setMaximumWidth(120)
         layout.addWidget(self._progress)
+
+        self._actions = QtWidgets.QWidget(self)
+        self._actions.setFixedWidth(self._ACTIONS_COLUMN_WIDTH)
+        actions_layout = QtWidgets.QHBoxLayout(self._actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(6)
+        actions_layout.addStretch(1)
+        layout.addWidget(self._actions)
 
         self.unavailable = bool(unavailable_reason)
         if self.unavailable:
@@ -139,25 +172,25 @@ class _AgentRow(QtWidgets.QWidget):
             return
 
         if is_custom:
-            remove_btn = QtWidgets.QPushButton("Remove")
+            remove_btn = QtWidgets.QPushButton("Remove", self._actions)
             remove_btn.clicked.connect(self.remove_custom_requested.emit)
-            layout.addWidget(remove_btn)
+            actions_layout.addWidget(remove_btn)
             return
 
         if not is_installed:
-            install_btn = QtWidgets.QPushButton("Install")
+            install_btn = QtWidgets.QPushButton("Install", self._actions)
             install_btn.clicked.connect(self.install_requested.emit)
-            layout.addWidget(install_btn)
+            actions_layout.addWidget(install_btn)
             return
 
         if has_update:
-            update_btn = QtWidgets.QPushButton("Update")
+            update_btn = QtWidgets.QPushButton("Update", self._actions)
             update_btn.clicked.connect(self.update_requested.emit)
-            layout.addWidget(update_btn)
+            actions_layout.addWidget(update_btn)
 
-        remove_btn = QtWidgets.QPushButton("Remove")
+        remove_btn = QtWidgets.QPushButton("Remove", self._actions)
         remove_btn.clicked.connect(self.uninstall_requested.emit)
-        layout.addWidget(remove_btn)
+        actions_layout.addWidget(remove_btn)
 
     # --- download progress -------------------------------------------------
 
@@ -262,7 +295,8 @@ class AgentsView(QtWidgets.QWidget):
             installed = _installed_record(entry.id, current_settings)
             update = self._updates_by_target.get(entry.id)
             row = _AgentRow(
-                title=f"{entry.name} {entry.version}",
+                name=entry.name,
+                version=entry.version,
                 state_text=_state_text(installed, update),
                 unavailable_reason=reason,
                 is_installed=installed is not None,
@@ -324,7 +358,13 @@ class AgentsView(QtWidgets.QWidget):
         _clear_layout(self._custom_rows_layout)
         current = settings_module.load()
         for agent in current.custom_agents:
-            row = _AgentRow(title=f"{agent.name} ({agent.command})", state_text="custom agent", is_custom=True, parent=self)
+            row = _AgentRow(
+                name=agent.name,
+                version=agent.command,
+                state_text="custom agent",
+                is_custom=True,
+                parent=self,
+            )
             row.remove_custom_requested.connect(lambda checked=False, a=agent: self._remove_custom(a.id))
             self._custom_rows_layout.addWidget(row)
 

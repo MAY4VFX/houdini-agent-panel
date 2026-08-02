@@ -320,6 +320,19 @@ def test_set_usage_shows_compact_count_and_hides_on_none(qapp):
     assert not composer._usage_label.isVisible()
 
 
+def test_set_usage_shows_used_over_size_for_the_real_acp_shape(qapp):
+    """The real `usage_update` has `used`/`size`, never `total_tokens` — see
+    docs/facts/acp-sdk.md §4 (`_UsageUpdate`). That's the shape that was
+    silently reading as "0" in the live panel before this fix."""
+    from types import SimpleNamespace
+
+    composer = Composer()
+    composer.show()
+    composer.set_usage(SimpleNamespace(used=12_345, size=200_000))
+    assert composer._usage_label.isVisible()
+    assert composer._usage_label.text() == "12.3K/200K"
+
+
 # --- слеш-команды -----------------------------------------------------------------
 
 

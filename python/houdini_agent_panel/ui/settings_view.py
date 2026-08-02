@@ -7,6 +7,11 @@ between already-installed agents now happens from the header chip's dropdown
 stopped earning its keep — see `AgentPanel._open_agent_management`, which is
 just "open settings, scroll to top".
 
+Everything is grouped into collapsible `_Section`s (Agents / Behaviour /
+Updates & notices / Voice / Privacy / Data) inside a fixed-width, centered
+rail — the same 736 px column the feed and composer use — instead of one
+long form stretched edge to edge.
+
 Reads and writes `settings.json` directly (`settings.load`/`settings.save`) —
 the same one-way layering as `ui/agents.py`: the settings screen is allowed
 to know about `settings.py`, not the other way round.
@@ -20,10 +25,70 @@ from .. import paths
 from .. import settings as settings_module
 from .agents import AgentsView
 from .chips import ChoiceButton
-from .qt import QtWidgets, Signal
+from .qt import QtCore, QtWidgets, Signal
 
 if TYPE_CHECKING:
     from ..network import Fetcher
+
+_RAIL_WIDTH = 736
+
+
+class _Section(QtWidgets.QWidget):
+    """A titled, collapsible group of settings rows.
+
+    A flat form gives every field the same visual weight, so there's
+    nothing to scan — an artist has to read the whole screen to find the
+    one setting they came for. Grouping by topic under a foldable header
+    lets them collapse what they don't need to think about (Privacy, Data)
+    and land on the rest.
+    """
+
+    def __init__(self, title: str, parent=None, *, expanded: bool = True) -> None:
+        super().__init__(parent)
+        self._toggle = QtWidgets.QToolButton(self)
+        self._toggle.setObjectName("sectionToggle")
+        self._toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self._toggle.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(expanded)
+        # A bare "&" is Qt's mnemonic marker (it underlines the next letter
+        # instead of printing itself) — "&&" is how you get a literal one.
+        self._toggle.setText(title.replace("&", "&&"))
+        self._toggle.clicked.connect(self._on_toggled)
+
+        self.form = QtWidgets.QFormLayout()
+        self.form.setContentsMargins(6, 4, 6, 14)
+        self.form.setSpacing(8)
+        self._body = QtWidgets.QWidget(self)
+        self._body.setLayout(self.form)
+        self._body.setVisible(expanded)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._toggle)
+        layout.addWidget(self._body)
+
+        self.setStyleSheet(
+            "QToolButton#sectionToggle {"
+            " border: none; background: transparent; padding: 10px 4px 6px 0;"
+            " font-weight: 600; color: palette(text); text-align: left;"
+            "}"
+            "QToolButton#sectionToggle:hover { color: palette(highlight); }"
+        )
+
+    def add_row(self, *args: object) -> None:
+        """Same signature as `QFormLayout.addRow` (label+field, or a single
+        full-width widget/layout for a lone checkbox or button)."""
+        self.form.addRow(*args)
+
+    def add_widget(self, widget: QtWidgets.QWidget) -> None:
+        """A full-width, non-form child — the embedded `AgentsView`."""
+        self.form.addRow(widget)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._body.setVisible(checked)
+        self._toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
 
 
 class SettingsView(QtWidgets.QWidget):
@@ -40,6 +105,7 @@ class SettingsView(QtWidgets.QWidget):
         close_button.clicked.connect(self.closed.emit)
 
         header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(12, 10, 12, 4)
         header.addWidget(close_button)
         header.addWidget(QtWidgets.QLabel("Settings"))
         header.addStretch(1)
@@ -84,25 +150,47 @@ class SettingsView(QtWidgets.QWidget):
         copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics")
         copy_diagnostics_button.clicked.connect(self._on_copy_diagnostics)
 
-        form = QtWidgets.QFormLayout()
-        form.addRow("Default agent", self._default_agent_combo)
-        form.addRow(self._autostart_checkbox)
-        form.addRow(self._check_updates_checkbox)
-        form.addRow(self._show_announcements_checkbox)
-        form.addRow(self._telemetry_checkbox)
-        form.addRow("Data folder", data_dir_row)
-        form.addRow("Whisper endpoint", self._whisper_edit)
-        form.addRow(copy_diagnostics_button)
+        agents_section = _Section("Agents", expanded=True)
+        agents_section.add_widget(self._agents_view)
+
+        behaviour_section = _Section("Behaviour", expanded=True)
+        behaviour_section.add_row("Default agent", self._default_agent_combo)
+        behaviour_section.add_row(self._autostart_checkbox)
+
+        updates_section = _Section("Updates & notices", expanded=True)
+        updates_section.add_row(self._check_updates_checkbox)
+        updates_section.add_row(self._show_announcements_checkbox)
+
+        voice_section = _Section("Voice", expanded=True)
+        voice_section.add_row("Whisper endpoint", self._whisper_edit)
+
+        privacy_section = _Section("Privacy", expanded=False)
+        privacy_section.add_row(self._telemetry_checkbox)
+
+        data_section = _Section("Data", expanded=False)
+        data_section.add_row("Data folder", data_dir_row)
+        data_section.add_row(copy_diagnostics_button)
+
+        rail = QtWidgets.QWidget()
+        rail_layout = QtWidgets.QVBoxLayout(rail)
+        rail_layout.setContentsMargins(0, 8, 0, 24)
+        rail_layout.setSpacing(2)
+        for section in (
+            agents_section,
+            behaviour_section,
+            updates_section,
+            voice_section,
+            privacy_section,
+            data_section,
+        ):
+            rail_layout.addWidget(section)
+        self._rail = rail
 
         content = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content)
-        # Agents first, at the top: it's the section that used to be its own
-        # screen, and "open settings on the agents block" means nothing more
-        # than opening settings scrolled to the top (see `focus_agents`).
-        content_layout.addWidget(QtWidgets.QLabel("<b>Agents</b>"))
-        content_layout.addWidget(self._agents_view)
-        content_layout.addLayout(form)
-        content_layout.addStretch(1)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setAlignment(QtCore.Qt.AlignHCenter)
+        content_layout.addWidget(rail, 0, QtCore.Qt.AlignHCenter)
 
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -110,10 +198,19 @@ class SettingsView(QtWidgets.QWidget):
         self._scroll.setWidget(content)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addLayout(header)
         layout.addWidget(self._scroll, 1)
 
         self.reload()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        # Same centered-rail rule as the header and composer (chips.py,
+        # composer.py): a fixed reading width up to 736px, shrinking only
+        # when the panel itself is narrower than that.
+        self._rail.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
 
     # --- public -----------------------------------------------------
 

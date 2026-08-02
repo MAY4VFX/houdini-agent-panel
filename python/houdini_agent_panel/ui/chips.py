@@ -21,11 +21,12 @@ class ChoiceButton(QtWidgets.QWidget):
     activated = Signal(int)
     currentIndexChanged = Signal(int)
 
-    def __init__(self, parent=None, *, accent: bool = False) -> None:
+    def __init__(self, parent=None, *, accent: bool = False, show_caret: bool = True) -> None:
         super().__init__(parent)
         self._items: list[tuple[str, object]] = []
         self._current_index = -1
         self._accent = accent
+        self._show_caret = show_caret
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -138,7 +139,12 @@ class ChoiceButton(QtWidgets.QWidget):
 
     def _sync_text(self) -> None:
         label = self._items[self._current_index][0] if self._current_index >= 0 else ""
-        self._button.setText(f"{label}  ⌄" if label else "")
+        if not label:
+            self._button.setText("")
+        elif self._show_caret:
+            self._button.setText(f"{label}  ⌄")
+        else:
+            self._button.setText(label)
 
     def _toggle_popup(self) -> None:
         popup = self._ensure_popup()
@@ -187,6 +193,7 @@ class HeaderBar(QtWidgets.QWidget):
     manage_agents_clicked = Signal()
     agent_selected = Signal(str)
     conversations_clicked = Signal()
+    new_session_clicked = Signal()
     settings_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -226,6 +233,13 @@ class HeaderBar(QtWidgets.QWidget):
         self._cwd_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addWidget(self._cwd_label)
         layout.addStretch(1)
+
+        self._new_conversation_button = QtWidgets.QToolButton(self._rail)
+        self._new_conversation_button.setObjectName("contextIcon")
+        self._new_conversation_button.setText("+")
+        self._new_conversation_button.setToolTip("New conversation")
+        self._new_conversation_button.clicked.connect(self.new_session_clicked)
+        layout.addWidget(self._new_conversation_button)
 
         self._settings_button = QtWidgets.QToolButton(self._rail)
         self._settings_button.setObjectName("contextIcon")
@@ -410,7 +424,10 @@ class ModeChip(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._combo = ChoiceButton(self, accent=True)
+        # No caret: this chip reads as a status pill (current mode), not a
+        # dropdown affordance — the mode picker inside it is a bonus, not
+        # the point.
+        self._combo = ChoiceButton(self, accent=True, show_caret=False)
         self._combo.activated.connect(self._on_activated)
         layout.addWidget(self._combo)
         self.setVisible(False)

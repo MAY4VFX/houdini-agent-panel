@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
-from houdini_agent_panel.sessions import SessionMode, SessionState
-from houdini_agent_panel.ui.chips import HeaderBar, ModeChip
-
-
-def _state(session_id: str, title: str = "Новый разговор") -> SessionState:
-    return SessionState(session_id=session_id, title=title, cwd="/tmp/shot", created_at=0.0)
+from houdini_agent_panel.sessions import SessionMode
+from houdini_agent_panel.ui.chips import ChoiceButton, HeaderBar, ModeChip
 
 
 # --- HeaderBar -----------------------------------------------------------
@@ -34,6 +30,24 @@ def test_header_uses_centered_precision_rail_and_no_native_combobox(qapp):
     assert header.findChildren(QtWidgets.QComboBox) == []
 
 
+def test_closed_native_popups_are_destroyed_not_left_as_hidden_windows(qapp):
+    choice = ChoiceButton()
+    choice.addItem("One", "one")
+    choice._toggle_popup()
+    assert choice._popup is not None and choice._popup.isVisible()
+    choice._toggle_popup()
+    qapp.processEvents()
+    assert choice._popup is None
+
+    header = HeaderBar()
+    header.set_agent_menu([("a", "Agent A"), ("b", "Agent B")], "a")
+    header._toggle_agent_popup()
+    assert header._agent_popup is not None and header._agent_popup.isVisible()
+    header._toggle_agent_popup()
+    qapp.processEvents()
+    assert header._agent_popup is None
+
+
 def test_set_cwd_sets_label_text(qapp):
     header = HeaderBar()
     header.set_cwd("/Users/artist/shot010")
@@ -53,7 +67,7 @@ def test_agent_button_click_with_fewer_than_two_installed_opens_management(qapp)
     seen.clear()
     header._agent_button.click()
     assert seen == [True]
-    assert not header._agent_popup.isVisible()
+    assert header._agent_popup is None
 
 
 def test_agent_button_click_with_two_or_more_installed_opens_menu(qapp):
@@ -118,11 +132,11 @@ def test_selecting_manage_agents_from_menu_emits_manage_agents_clicked(qapp):
     assert not header._agent_popup.isVisible()
 
 
-def test_new_session_button_click_emits_signal(qapp):
+def test_conversations_button_click_emits_signal(qapp):
     header = HeaderBar()
     seen = []
-    header.new_session_clicked.connect(lambda: seen.append(True))
-    header._new_session_button.click()
+    header.conversations_clicked.connect(lambda: seen.append(True))
+    header._conversations_button.click()
     assert seen == [True]
 
 
@@ -132,38 +146,6 @@ def test_settings_button_click_emits_signal(qapp):
     header.settings_clicked.connect(lambda: seen.append(True))
     header._settings_button.click()
     assert seen == [True]
-
-
-def test_set_sessions_populates_combo_in_order(qapp):
-    header = HeaderBar()
-    states = [_state("s1", "Первый"), _state("s2", "Второй"), _state("s3", "Третий")]
-    header.set_sessions(states, "s2")
-
-    combo = header._session_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == ["s1", "s2", "s3"]
-    assert combo.currentData() == "s2"
-
-
-def test_set_sessions_does_not_emit_session_selected(qapp):
-    """Перестройка списка — не действие человека, сигнала быть не должно."""
-    header = HeaderBar()
-    seen = []
-    header.session_selected.connect(seen.append)
-    header.set_sessions([_state("s1"), _state("s2")], "s1")
-    assert seen == []
-
-
-def test_selecting_session_emits_session_selected_with_matching_id(qapp):
-    header = HeaderBar()
-    header.set_sessions([_state("s1"), _state("s2")], "s1")
-
-    seen = []
-    header.session_selected.connect(seen.append)
-    header._session_combo.setCurrentIndex(1)
-    # activated — сигнал именно о действии пользователя, эмулируем его напрямую.
-    header._session_combo.activated.emit(1)
-
-    assert seen == ["s2"]
 
 
 # --- ModeChip --------------------------------------------------------------

@@ -6,6 +6,13 @@ from ..sessions import SessionState
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _DRAWER_WIDTH = 286
+_AMBER = "#dfa047"
+
+#: What's left for the title once the drawer's own margins and the pin/more
+#: icon buttons take their share. `QPushButton` doesn't elide overflowing
+#: text on its own — without this a long first message pushed the pin and
+#: overflow buttons straight out of the (non-scrolling) drawer, off screen.
+_TITLE_MAX_WIDTH = 190
 
 
 def sidebar_icon() -> QtGui.QIcon:
@@ -23,8 +30,49 @@ def sidebar_icon() -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
+def summarize_title(text: str, limit: int = 60) -> str:
+    """First line of a human message, cut at a word boundary within `limit`.
+
+    A hard `text[:limit]` slice can chop a word in half, which reads like a
+    typo in the sidebar. Cutting back to the last space before the limit
+    keeps every visible word whole; an ellipsis marks that it was cut.
+    """
+    first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
+    if not first_line:
+        return "New conversation"
+    if len(first_line) <= limit:
+        return first_line
+    truncated = first_line[:limit]
+    cut = truncated.rfind(" ")
+    if cut > 0:
+        truncated = truncated[:cut]
+    return truncated.rstrip() + "…"
+
+
+_ROW_MENU_STYLESHEET = (
+    "QFrame#rowMenu {"
+    " background: #262626;"
+    " border: 1px solid #3a3a3a;"
+    " border-radius: 10px;"
+    "}"
+    "QPushButton {"
+    " min-height: 30px;"
+    " padding: 0 10px;"
+    " border: none;"
+    " border-radius: 6px;"
+    " color: #d7d4ce;"
+    " background: transparent;"
+    " text-align: left;"
+    "}"
+    "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
+    "QPushButton#rowMenuDelete:hover { background: #3a2323; color: #e3a3a3; }"
+)
+
+
 class ConversationDrawer(QtWidgets.QFrame):
     session_selected = Signal(str)
+    session_renamed = Signal(str, str)
+    session_removed = Signal(str)
     new_session_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -38,17 +86,12 @@ class ConversationDrawer(QtWidgets.QFrame):
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
 
-        top = QtWidgets.QHBoxLayout()
-        self._close_button = QtWidgets.QToolButton(self)
-        self._close_button.setObjectName("drawerIcon")
-        self._close_button.setIcon(sidebar_icon())
-        self._close_button.setIconSize(QtCore.QSize(18, 18))
-        self._close_button.setToolTip("Close conversations")
-        self._close_button.clicked.connect(self.close_drawer)
-        top.addWidget(self._close_button)
-        top.addStretch(1)
-        layout.addLayout(top)
-
+        # No collapse button in here any more: the header's own sidebar
+        # toggle (ui/chips.py `HeaderBar._conversations_button`) already
+        # opens and closes this drawer, and it stays reachable even while
+        # the drawer is closed. A second copy of the same icon a couple of
+        # centimeters away, only usable while the drawer happens to be open,
+        # was a redundant control, not a second way in.
         self._new_button = QtWidgets.QPushButton("＋  New conversation", self)
         self._new_button.setObjectName("newConversation")
         self._new_button.clicked.connect(self._on_new_session)
@@ -72,7 +115,11 @@ class ConversationDrawer(QtWidgets.QFrame):
         layout.addWidget(scroll, 1)
 
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
+        self._pin_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self._states: dict[str, SessionState] = {}
+        self._pinned: set[str] = set()
         self._current_id: str | None = None
+        self._active_row_menu: QtWidgets.QFrame | None = None
         self._animation = QtCore.QPropertyAnimation(self, b"pos", self)
         self._animation.setDuration(170)
         self._animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
@@ -84,11 +131,6 @@ class ConversationDrawer(QtWidgets.QFrame):
             " background: palette(window);"
             " border: none; border-right: 1px solid palette(mid);"
             "}"
-            "QToolButton#drawerIcon {"
-            " min-width: 28px; min-height: 28px; border: none; border-radius: 7px;"
-            " color: palette(disabled, text); background: transparent;"
-            "}"
-            "QToolButton#drawerIcon:hover { background: palette(alternate-base); color: palette(text); }"
             "QPushButton#newConversation {"
             " min-height: 34px; border: none; border-radius: 8px; padding: 0 9px;"
             " text-align: left; color: palette(text); background: transparent;"
@@ -107,27 +149,85 @@ class ConversationDrawer(QtWidgets.QFrame):
             "QPushButton[currentConversation=\"true\"] {"
             " color: palette(text); background: palette(alternate-base);"
             "}"
+            "QToolButton#rowPin, QToolButton#rowMore {"
+            " min-width: 22px; max-width: 22px; min-height: 22px; border: none;"
+            " border-radius: 6px; color: palette(disabled, text); background: transparent;"
+            " padding: 0;"
+            "}"
+            "QToolButton#rowPin:hover, QToolButton#rowMore:hover {"
+            " color: palette(text); background: palette(alternate-base);"
+            "}"
+            f"QToolButton#rowPin[pinned=\"true\"] {{ color: {_AMBER}; }}"
         )
 
     def set_sessions(self, states: list[SessionState], current_id: str | None) -> None:
         self._current_id = current_id
+        self._states = {state.session_id: state for state in states}
+        # A pinned session that no longer exists (deleted elsewhere) has
+        # nothing left to point at — drop it so the set doesn't grow forever.
+        self._pinned &= self._states.keys()
         while self._sessions_layout.count() > 1:
             item = self._sessions_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # `takeAt` only stops the layout from managing it — the
+                # widget itself stays visible at its old geometry until
+                # `deleteLater` actually runs on a later event-loop pass.
+                # Two rebuilds in the same tick (pin toggle right after the
+                # initial `set_sessions`) used to show the old row bleeding
+                # through the new one until then.
+                widget.hide()
                 widget.deleteLater()
         self._buttons.clear()
-        for state in reversed(states):
-            title = (state.title or "New conversation").splitlines()[0]
-            button = QtWidgets.QPushButton(title, self._content)
-            button.setProperty("conversation", True)
-            button.setProperty("currentConversation", state.session_id == current_id)
-            button.setToolTip(state.title or "New conversation")
-            button.clicked.connect(
-                lambda _checked=False, sid=state.session_id: self._select_session(sid)
-            )
-            self._buttons[state.session_id] = button
-            self._sessions_layout.insertWidget(self._sessions_layout.count() - 1, button)
+        self._pin_buttons.clear()
+        ordered = sorted(
+            states, key=lambda s: (s.session_id not in self._pinned, -s.created_at)
+        )
+        for state in ordered:
+            row = self._build_row(state)
+            self._sessions_layout.insertWidget(self._sessions_layout.count() - 1, row)
+
+    def _build_row(self, state: SessionState) -> QtWidgets.QWidget:
+        title = summarize_title(state.title) if state.title else "New conversation"
+        row = QtWidgets.QWidget(self._content)
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(2)
+
+        button = QtWidgets.QPushButton(row)
+        button.setProperty("conversation", True)
+        button.setProperty("currentConversation", state.session_id == self._current_id)
+        button.setToolTip(state.title or "New conversation")
+        metrics = QtGui.QFontMetrics(button.font())
+        button.setText(metrics.elidedText(title, QtCore.Qt.ElideRight, _TITLE_MAX_WIDTH))
+        button.clicked.connect(
+            lambda _checked=False, sid=state.session_id: self._select_session(sid)
+        )
+        row_layout.addWidget(button, 1)
+
+        pinned = state.session_id in self._pinned
+        pin_button = QtWidgets.QToolButton(row)
+        pin_button.setObjectName("rowPin")
+        pin_button.setProperty("pinned", pinned)
+        pin_button.setText("⚑" if pinned else "⚐")
+        pin_button.setToolTip("Unpin" if pinned else "Pin")
+        pin_button.clicked.connect(
+            lambda _checked=False, sid=state.session_id: self._toggle_pin(sid)
+        )
+        row_layout.addWidget(pin_button)
+
+        more_button = QtWidgets.QToolButton(row)
+        more_button.setObjectName("rowMore")
+        more_button.setText("⋯")
+        more_button.setToolTip("More")
+        more_button.clicked.connect(
+            lambda _checked=False, b=more_button, sid=state.session_id: self._open_row_menu(b, sid)
+        )
+        row_layout.addWidget(more_button)
+
+        self._buttons[state.session_id] = button
+        self._pin_buttons[state.session_id] = pin_button
+        return row
 
     def toggle(self) -> None:
         if self.isVisible() and not self._closing:
@@ -183,5 +283,64 @@ class ConversationDrawer(QtWidgets.QFrame):
             self.hide()
             self._closing = False
 
+    # --- pin / rename / delete ---------------------------------------------
 
-__all__ = ["ConversationDrawer", "sidebar_icon"]
+    def _toggle_pin(self, session_id: str) -> None:
+        if session_id in self._pinned:
+            self._pinned.discard(session_id)
+        else:
+            self._pinned.add(session_id)
+        self.set_sessions(list(self._states.values()), self._current_id)
+
+    def _open_row_menu(self, anchor: QtWidgets.QToolButton, session_id: str) -> None:
+        state = self._states.get(session_id)
+        title = state.title if state is not None else ""
+        menu = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        menu.setObjectName("rowMenu")
+        menu.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        menu.setStyleSheet(_ROW_MENU_STYLESHEET)
+        menu_layout = QtWidgets.QVBoxLayout(menu)
+        menu_layout.setContentsMargins(5, 5, 5, 5)
+        menu_layout.setSpacing(2)
+
+        rename_button = QtWidgets.QPushButton("Rename…", menu)
+        delete_button = QtWidgets.QPushButton("Delete", menu)
+        delete_button.setObjectName("rowMenuDelete")
+        menu_layout.addWidget(rename_button)
+        menu_layout.addWidget(delete_button)
+
+        rename_button.clicked.connect(lambda: (menu.close(), self._start_rename(session_id, title)))
+        delete_button.clicked.connect(lambda: (menu.close(), self._confirm_delete(session_id, title)))
+
+        width = max(anchor.width(), 150)
+        menu.setFixedWidth(width)
+        menu.adjustSize()
+        point = anchor.mapToGlobal(QtCore.QPoint(0, anchor.height() + 4))
+        menu.move(point)
+        # Kept alive by this reference until it closes (WA_DeleteOnClose then
+        # frees the underlying widget) — an unparented Qt.Popup with no
+        # Python reference can be garbage-collected mid-click.
+        self._active_row_menu = menu
+        menu.show()
+
+    def _start_rename(self, session_id: str, title: str) -> None:
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, "Rename conversation", "Name", QtWidgets.QLineEdit.Normal, title or ""
+        )
+        if ok and text.strip():
+            self.session_renamed.emit(session_id, text.strip())
+
+    def _confirm_delete(self, session_id: str, title: str) -> None:
+        label = summarize_title(title) if title else "New conversation"
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Delete conversation",
+            f"Delete “{label}”? This can't be undone.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.session_removed.emit(session_id)
+
+
+__all__ = ["ConversationDrawer", "sidebar_icon", "summarize_title"]
