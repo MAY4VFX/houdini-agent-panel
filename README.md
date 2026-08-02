@@ -28,27 +28,26 @@ Claude Agent, Codex, Gemini CLI, Grok Build, Kimi CLI, OpenCode — плюс «�
 
 ## Установка
 
-Одной командой, ничего заранее ставить не надо:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.sh | sh -s -- --agents opencode
-```
-
-Windows, PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.ps1 | iex
-```
-
-Скрипт находит, чем запустить пакет (`uvx`, `pipx`), а если нечем — приносит
-`uv` одним статическим бинарём в домашнюю папку, без прав root и без пакетного
-менеджера системы. В систему он ничего больше не кладёт.
-
-Если `uv` или `pipx` уже есть, команда короче и скрипт не нужен:
+Одной командой, одинаково на macOS, Linux и Windows:
 
 ```bash
 uvx --from houdini-agent-panel python -m houdini_agent_panel install --agents opencode
 ```
+
+Она находит все установленные Houdini, ставит панель в Python каждой из них,
+прописывает пакет и качает выбранного агента. В систему ничего не попадает:
+`uvx` запускает инсталлятор и уходит.
+
+Нет `uv`? Он ставится тоже одной командой и не требует прав root:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh          # macOS, Linux
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows
+```
+
+В репозитории лежат `scripts/install.sh` и `scripts/install.ps1` — они делают
+оба шага сразу и пригодятся, когда репозиторий станет публичным и их можно
+будет вызывать через `curl … | sh`.
 
 Перезапустить Houdini → панель появится в меню панелей (Tab → Python Panels → Agent).
 
