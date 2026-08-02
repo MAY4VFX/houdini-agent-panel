@@ -28,14 +28,26 @@ def _pane_key():
 
 
 def onCreateInterface():
+    # Log first, before anything that can fail. If the import below blows up,
+    # the reason must survive somewhere other than a Houdini console the
+    # artist has probably already closed.
+    try:
+        from houdini_agent_panel import logbook
+
+        logbook.setup()
+    except Exception:  # noqa: BLE001 - no log is not a reason to lose the panel
+        pass
+
     try:
         from houdini_agent_panel.ui.panel import AgentPanel
-    except Exception as exc:  # noqa: BLE001 - причина уйдёт в текст на панели
+    except Exception as exc:  # noqa: BLE001 - the reason goes into the panel text
+        _log_exception("panel import failed", exc)
         return _error_widget(exc)
 
     try:
         panel = AgentPanel()
     except Exception as exc:  # noqa: BLE001
+        _log_exception("panel construction failed", exc)
         return _error_widget(exc)
 
     _panels[_pane_key()] = panel
@@ -57,6 +69,29 @@ def onDestroyInterface():
             print("[houdini-agent-panel] ошибка при закрытии панели: %r" % (exc,))
 
 
+def _log_location():
+    try:
+        from houdini_agent_panel import logbook
+
+        return str(logbook.log_path())
+    except Exception:  # noqa: BLE001
+        return "unavailable"
+
+
+def _log_exception(what, exc):
+    """Send a failure to the on-disk log, if the log is reachable at all."""
+    try:
+        import traceback
+
+        from houdini_agent_panel import logbook
+
+        logbook.logger("houdini_agent_panel.pypanel").error(
+            "%s: %r\n%s", what, exc, traceback.format_exc()
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _error_widget(exc):
     try:
         from houdini_agent_panel.ui.qt import QtWidgets
@@ -64,11 +99,12 @@ def _error_widget(exc):
         from hutil.Qt import QtWidgets
 
     message = (
-        "Houdini Agent Panel не запустилась.\n\n"
+        "Houdini Agent Panel failed to start.\n\n"
         "%r\n\n"
-        "Открой терминал и выполни тем же Python, которым ставил панель:\n"
-        "python -m houdini_agent_panel doctor"
-    ) % (exc,)
+        "Open a terminal and run this with the same Python you installed with:\n"
+        "python -m houdini_agent_panel doctor\n\n"
+        "Full log: %s"
+    ) % (exc, _log_location())
 
     widget = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(widget)
