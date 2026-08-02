@@ -338,8 +338,8 @@ class Composer(QtWidgets.QWidget):
         action_row = QtWidgets.QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(3)
-        action_row.addWidget(self._attach_button)
         action_row.addWidget(self.mode_chip)
+        action_row.addWidget(self._attach_button)
         action_row.addStretch(1)
         action_row.addWidget(self.model_chip)
         action_row.addWidget(self._usage_label)
@@ -488,10 +488,27 @@ class Composer(QtWidgets.QWidget):
             self._update_slash_popup()
 
     def set_usage(self, usage: "Usage | None") -> None:
+        """Token counter, fed either shape that reaches it in practice.
+
+        The real ACP `usage_update` carries `used`/`size` — tokens currently
+        in context vs. the whole context window, there is no "total tokens"
+        field at all. `sessions.Usage` (`total_tokens`), used by the dev
+        preview and by tests, is the simpler synthetic shape. Showing
+        `used/size` when it's there is also the more useful number for an
+        artist: how full the context window is, not a lifetime counter.
+        """
         if usage is None:
             self._usage_label.setVisible(False)
             return
-        self._usage_label.setText(_format_tokens(getattr(usage, "total_tokens", 0)))
+        used = getattr(usage, "used", None)
+        size = getattr(usage, "size", None)
+        if used is not None and size is not None:
+            text = f"{_format_tokens(used)}/{_format_tokens(size)}"
+            self._usage_label.setToolTip("Tokens in context / context window size")
+        else:
+            text = _format_tokens(getattr(usage, "total_tokens", 0))
+            self._usage_label.setToolTip("Tokens used")
+        self._usage_label.setText(text)
         self._usage_label.setVisible(True)
 
     def block_input(self, reason: str) -> None:
@@ -696,16 +713,50 @@ class Composer(QtWidgets.QWidget):
         self._update_slash_popup()
 
     def _adjust_text_height(self) -> None:
-        """Растёт по числу строк текста, а не `document().size()`/`blockCount()`:
-        оба без реального layout-прохода (которого нет без экрана — в headless-
-        тестах в том числе) не отражают фактическое число абзацев надёжно."""
+        """Grow with the text, then scroll — not the other way round.
+
+        Height has to come from the document's laid-out size, because that is
+        the only thing that accounts for WRAPPING. Counting "\n" only sees
+        explicit line breaks, so one long paragraph typed without a single
+        Enter stayed one line tall and went straight to a scrollbar — which
+        is exactly what it looked like from the outside: a field that refuses
+        to grow.
+
+        The newline count survives as a fallback: without a real layout pass
+        (headless tests, a widget that was never shown) the document reports
+        nothing, and a zero-height input field would be worse than an
+        approximate one.
+        """
         line_height = QtGui.QFontMetrics(self._text_edit.font()).lineSpacing()
-        lines = max(1, self._text_edit.toPlainText().count("\n") + 1)
         padding = 22
         min_height = max(55, line_height * _MIN_LINES + padding)
         max_height = line_height * _MAX_LINES + padding
-        new_height = max(min_height, min(line_height * lines + padding, max_height))
+
+        # Count the lines the layout actually produced. `setTextWidth` is not
+        # an option here: with WidgetWidth wrapping the widget owns the
+        # document's width, and setting it by hand fights that and yields a
+        # height that never changes.
+        visual_lines = 0
+        document = self._text_edit.document()
+        block = document.begin()
+        while block.isValid():
+            layout = block.layout()
+            visual_lines += layout.lineCount() if layout is not None else 0
+            block = block.next()
+        if visual_lines <= 0:
+            # No layout pass yet (headless tests, a widget never shown). An
+            # approximate height beats a zero-height input field.
+            visual_lines = max(1, self._text_edit.toPlainText().count("\n") + 1)
+        laid_out = line_height * visual_lines
+
+        new_height = max(min_height, min(laid_out + padding, max_height))
         self._text_edit.setFixedHeight(int(new_height))
+        # A scrollbar only once there is genuinely no more room to grow.
+        self._text_edit.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAsNeeded
+            if laid_out + padding > max_height
+            else QtCore.Qt.ScrollBarAlwaysOff
+        )
 
     # --- слеш-команды -----------------------------------------------------
 
