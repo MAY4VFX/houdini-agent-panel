@@ -21,7 +21,9 @@ def _tool_call(**overrides):
 
 
 def _tool_update(**overrides):
-    defaults = dict(tool_call_id="tc1", title=None, kind=None, status=None, content=None, locations=None)
+    defaults = dict(
+        tool_call_id="tc1", title=None, kind=None, status=None, content=None, locations=None
+    )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -105,7 +107,8 @@ def test_apply_tool_update_patches_only_provided_fields():
 
 def test_apply_tool_update_replaces_content_wholesale():
     model = TranscriptModel()
-    model.apply_tool_call(_tool_call(content=[SimpleNamespace(model_dump=lambda exclude_none: {"a": 1})]))
+    old_content = [SimpleNamespace(model_dump=lambda exclude_none: {"a": 1})]
+    model.apply_tool_call(_tool_call(content=old_content))
 
     entry = model.apply_tool_update(
         _tool_update(content=[SimpleNamespace(model_dump=lambda exclude_none: {"b": 2})])
@@ -146,7 +149,9 @@ def test_apply_plan_replaces_whole_list_and_reuses_entry():
 
 def test_apply_permission_then_resolve_with_selected_option():
     model = TranscriptModel()
-    view = PermissionView(request_key="req1", tool_title="rm -rf", options=[("allow_once", "Allow", "allow_once")])
+    view = PermissionView(
+        request_key="req1", tool_title="rm -rf", options=[("allow_once", "Allow", "allow_once")]
+    )
     model.apply_permission(view)
 
     resolved = model.resolve_permission("req1", "allow_once")

@@ -197,25 +197,45 @@ def test_install_deps_success_creates_target_and_returns_log(tmp_path, monkeypat
     assert lines == ["Collecting foo", "Installing..."]
 
 
-def test_install_deps_passes_find_links(monkeypatch, tmp_path):
+def _capture_install_argv(monkeypatch, tmp_path, **kwargs) -> list[str]:
     captured = {}
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, **_kwargs):
         captured["argv"] = argv
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(deps.subprocess, "run", fake_run)
-
     deps.install_deps(
         Path("/fake/hython"),
         target=tmp_path / "deps",
         requirement="houdini-agent-panel",
-        find_links="/local/wheels",
         out=lambda *_: None,
+        **kwargs,
+    )
+    return captured["argv"]
+
+
+def test_install_deps_find_links_alone_does_not_cut_off_pypi(monkeypatch, tmp_path):
+    """«Возьми колесо панели отсюда» и «не ходи в интернет» — разные намерения.
+
+    Когда это был один флаг, главный сценарий разработки не работал: ставишь
+    локально собранное колесо панели, а `acp` и `pydantic` взять неоткуда,
+    потому что `--no-index` закрыл заодно и их.
+    """
+    argv = _capture_install_argv(monkeypatch, tmp_path, find_links="/local/wheels")
+
+    assert "--find-links" in argv
+    assert "/local/wheels" in argv
+    assert "--no-index" not in argv
+
+
+def test_install_deps_offline_cuts_off_pypi(monkeypatch, tmp_path):
+    argv = _capture_install_argv(
+        monkeypatch, tmp_path, find_links="/local/wheels", offline=True
     )
 
-    argv = captured["argv"]
     assert "--no-index" in argv
+    assert "--find-links" in argv
     assert "--find-links" in argv
     assert "/local/wheels" in argv
 

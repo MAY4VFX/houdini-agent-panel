@@ -40,7 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument(
         "--find-links",
         default=None,
-        help="Локальная директория с колёсами — офлайн-установка зависимостей",
+        help="Локальная директория с колёсами: искать пакеты сначала там",
+    )
+    install_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Не ходить на PyPI вообще (нужен --find-links со всеми зависимостями)",
     )
     install_parser.add_argument(
         "--skip-deps",
@@ -77,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             houdini_dir=args.houdini_dir,
             agents=_split_agents(args.agents),
             find_links=args.find_links,
+            offline=args.offline,
             skip_deps=args.skip_deps,
             dry_run=args.dry_run,
         )

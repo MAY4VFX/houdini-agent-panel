@@ -136,6 +136,7 @@ def install_deps(
     target: Path,
     requirement: str,
     find_links: str | None = None,
+    offline: bool = False,
     dry_run: bool = False,
     out=print,
 ) -> list[str]:
@@ -143,14 +144,21 @@ def install_deps(
 
     `--upgrade`, потому что повторная установка новой версии панели поверх
     старого дерева deps — обычный сценарий (обновление панели), а не разовая
-    установка. `find_links` — офлайн-режим, читает колёса из локальной папки
-    вместо PyPI.
+    установка.
+
+    `find_links` и `offline` разведены сознательно, хотя изначально это был
+    один флаг. «Возьми колесо панели из этой папки» и «не ходи в интернет
+    вообще» — разные намерения, и склеивание их ломало главный сценарий
+    разработки: собрал колесо локально, ставишь его, а зависимости (`acp`,
+    `pydantic`) взять неоткуда, потому что `--no-index` закрыл и их тоже.
     """
     argv: list[str] = [
         str(hython), "-m", "pip", "install", "--upgrade", "--target", str(target), requirement,
     ]
     if find_links:
-        argv += ["--no-index", "--find-links", find_links]
+        argv += ["--find-links", find_links]
+    if offline:
+        argv.append("--no-index")
 
     if dry_run:
         out(f"[dry-run] {printable_argv(argv)}")

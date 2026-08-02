@@ -44,11 +44,15 @@ _AUTH_METHOD_ID = "apikey"
 
 
 def _message_chunk(text: str, message_id: str) -> AgentMessageChunk:
-    return AgentMessageChunk(session_update="agent_message_chunk", content=text_block(text), message_id=message_id)
+    return AgentMessageChunk(
+        session_update="agent_message_chunk", content=text_block(text), message_id=message_id
+    )
 
 
 def _thought_chunk(text: str, message_id: str) -> AgentThoughtChunk:
-    return AgentThoughtChunk(session_update="agent_thought_chunk", content=text_block(text), message_id=message_id)
+    return AgentThoughtChunk(
+        session_update="agent_thought_chunk", content=text_block(text), message_id=message_id
+    )
 
 
 def _split(text: str, parts: int) -> list[str]:
@@ -71,17 +75,21 @@ class FakeAgent:
     def on_connect(self, conn) -> None:
         self._client = conn
 
-    async def initialize(self, protocol_version, client_capabilities=None, client_info=None, **kwargs):
+    async def initialize(
+        self, protocol_version, client_capabilities=None, client_info=None, **kwargs
+    ):
         auth_methods = []
         if SCENARIO == "auth":
             auth_methods = [
-                AuthMethodAgent(id=_AUTH_METHOD_ID, name="API Key", description="тестовый метод входа")
+                AuthMethodAgent(
+                    id=_AUTH_METHOD_ID, name="API Key", description="тестовый метод входа"
+                )
             ]
+        prompt_caps = PromptCapabilities(image=True, audio=False, embedded_context=True)
         return acp.InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
-                load_session=False,
-                prompt_capabilities=PromptCapabilities(image=True, audio=False, embedded_context=True),
+                load_session=False, prompt_capabilities=prompt_caps
             ),
             auth_methods=auth_methods,
             agent_info=Implementation(name="fake-agent", version="0.0.1"),
@@ -110,10 +118,10 @@ class FakeAgent:
     async def set_session_mode(self, session_id, mode_id, **kwargs):
         self._sessions[session_id] = mode_id
         if self._client is not None:
-            await self._client.session_update(
-                session_id=session_id,
-                update=CurrentModeUpdate(session_update="current_mode_update", current_mode_id=mode_id),
+            update = CurrentModeUpdate(
+                session_update="current_mode_update", current_mode_id=mode_id
             )
+            await self._client.session_update(session_id=session_id, update=update)
         return acp.SetSessionModeResponse()
 
     async def cancel(self, session_id, **kwargs) -> None:
@@ -142,7 +150,8 @@ class FakeAgent:
             session_id=session_id, update=_thought_chunk("думаю...", "t1")
         )
         for chunk in _split(reply, 3):
-            await self._client.session_update(session_id=session_id, update=_message_chunk(chunk, "m1"))
+            update = _message_chunk(chunk, "m1")
+            await self._client.session_update(session_id=session_id, update=update)
             await asyncio.sleep(0)
         return acp.PromptResponse(stop_reason="end_turn")
 
@@ -152,7 +161,9 @@ class FakeAgent:
             PermissionOption(option_id="reject_once", name="Reject", kind="reject_once"),
         ]
         tool_call = ToolCallUpdate(tool_call_id="tc1", title="rm -rf /tmp/x", kind="execute")
-        response = await self._client.request_permission(session_id=session_id, tool_call=tool_call, options=options)
+        response = await self._client.request_permission(
+            session_id=session_id, tool_call=tool_call, options=options
+        )
         outcome = response.outcome
         if getattr(outcome, "outcome", None) == "selected":
             reply = f"разрешение: {outcome.option_id}"
@@ -171,8 +182,10 @@ class FakeAgent:
             update=start_tool_call("tc1", "Читаю scene.py", kind="read", status="in_progress"),
         )
         await asyncio.sleep(0)
-        await self._client.session_update(session_id=session_id, update=update_tool_call("tc1", status="completed"))
-        await self._client.session_update(session_id=session_id, update=_message_chunk("готово", "m1"))
+        tool_update = update_tool_call("tc1", status="completed")
+        await self._client.session_update(session_id=session_id, update=tool_update)
+        done = _message_chunk("готово", "m1")
+        await self._client.session_update(session_id=session_id, update=done)
         return acp.PromptResponse(stop_reason="end_turn")
 
     async def _prompt_slow(self, session_id: str, text: str):

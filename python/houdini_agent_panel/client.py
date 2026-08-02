@@ -239,9 +239,11 @@ class AcpWorker(QtCore.QThread):
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         kind = update.session_update
         if kind == "agent_message_chunk":
-            self.message_chunk.emit(session_id, update.message_id or "", _chunk_text(update.content))
+            text = _chunk_text(update.content)
+            self.message_chunk.emit(session_id, update.message_id or "", text)
         elif kind == "agent_thought_chunk":
-            self.thought_chunk.emit(session_id, update.message_id or "", _chunk_text(update.content))
+            text = _chunk_text(update.content)
+            self.thought_chunk.emit(session_id, update.message_id or "", text)
         elif kind == "tool_call":
             self.tool_call.emit(session_id, update)
         elif kind == "tool_call_update":
@@ -252,7 +254,9 @@ class AcpWorker(QtCore.QThread):
             self.commands_changed.emit(session_id, list(update.available_commands))
         elif kind == "current_mode_update":
             available = self._session_modes.get(session_id, [])
-            state = SessionModeState(current_mode_id=update.current_mode_id, available_modes=available)
+            state = SessionModeState(
+                current_mode_id=update.current_mode_id, available_modes=available
+            )
             self.modes_changed.emit(session_id, state)
         elif kind == "usage_update":
             self.usage_changed.emit(session_id, update.usage)
@@ -260,7 +264,9 @@ class AcpWorker(QtCore.QThread):
         # отправке, эхо от агента ей не нужно; config_option_update и
         # session_info_update — вне охвата v1, тихо игнорируем.
 
-    async def request_permission(self, session_id: str, tool_call: Any, options: list, **kwargs: Any):
+    async def request_permission(
+        self, session_id: str, tool_call: Any, options: list, **kwargs: Any
+    ):
         request_key = str(uuid.uuid4())
         future: asyncio.Future = self.loop.create_future()
         self._pending_permissions[request_key] = future
@@ -268,7 +274,8 @@ class AcpWorker(QtCore.QThread):
         option_id = await future
         if option_id is None:
             return acp.RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
-        return acp.RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=option_id))
+        outcome = AllowedOutcome(outcome="selected", option_id=option_id)
+        return acp.RequestPermissionResponse(outcome=outcome)
 
     def resolve_permission(self, request_key: str, option_id: str | None) -> None:
         """Вызывается из ГЛАВНОГО потока — резолвит Future из чужого потока."""
@@ -339,7 +346,8 @@ class AcpWorker(QtCore.QThread):
             self.error.emit("", "нет соединения с агентом")
             return
         try:
-            response = await self._conn.new_session(cwd=cwd, mcp_servers=_build_mcp_servers(mcp_servers))
+            servers = _build_mcp_servers(mcp_servers)
+            response = await self._conn.new_session(cwd=cwd, mcp_servers=servers)
         except acp.RequestError as exc:
             if not self._emit_if_auth_required(exc):
                 self.error.emit("", str(exc))
@@ -500,11 +508,16 @@ class AcpClient(QtCore.QObject):
         self._agent_info: AgentInfo | None = None
         self._running = False
 
-        for name in _FORWARDED_SIGNALS:
-            getattr(self._worker, name).connect(getattr(self, name).emit)
+        # Порядок связывания важен: Qt зовёт несколько слотов одного сигнала
+        # в порядке подключения. Внутреннее состояние (`_running`,
+        # `_agent_info`) обязано обновиться РАНЬШЕ, чем форвардинг долетит до
+        # внешних подписчиков — иначе слот UI, сработавший на `connected`,
+        # может увидеть ещё не обновлённый `is_running()`/`agent_info()`.
         self._worker.connected.connect(self._on_connected)
         self._worker.disconnected.connect(self._on_stopped)
         self._worker.failed.connect(self._on_stopped)
+        for name in _FORWARDED_SIGNALS:
+            getattr(self._worker, name).connect(getattr(self, name).emit)
 
         self._worker.start()
         self._worker.wait_until_ready()

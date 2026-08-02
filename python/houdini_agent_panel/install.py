@@ -54,6 +54,7 @@ def install(
     houdini_dir: str | None = None,
     agents: Sequence[str] = (),
     find_links: str | None = None,
+    offline: bool = False,
     skip_deps: bool = False,
     dry_run: bool = False,
     fetch: Fetcher | None = None,
@@ -109,6 +110,7 @@ def install(
                     target=target,
                     requirement=f"houdini-agent-panel=={panel_version}",
                     find_links=find_links,
+                    offline=offline,
                     dry_run=dry_run,
                     out=out,
                 )

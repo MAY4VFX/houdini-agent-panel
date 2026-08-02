@@ -554,7 +554,8 @@ def send(event: str, *, settings: Settings, **extra) -> None
 ```
 
 Один и тот же суточный поход в сеть обслуживает и обновления, и оповещения —
-`network.py::daily_refresh()`. Выключены оба тумблера — не идём никуда.
+`refresh.py::daily_refresh()`. Выключены оба тумблера — не идём никуда, и это
+проверяется счётчиком вызовов `Fetcher`, а не отсутствием исключения.
 
 ---
 
@@ -620,9 +621,14 @@ class Composer(QtWidgets.QWidget):
     def set_capabilities(self, info: AgentInfo | None, whisper: str) -> None
     def set_busy(self, busy: bool) -> None        # кнопка отправки ↔ стоп
     def set_commands(self, commands: list[AvailableCommand]) -> None
+    def set_modes(self, modes: list[SessionMode], current_id: str | None) -> None
     def set_usage(self, usage) -> None
     def block_input(self, reason: str) -> None    # блокирующее оповещение
     def unblock_input(self) -> None
+    def is_input_blocked(self) -> bool
+        """Публично, потому что «оповещение гасит ввод, но не ленту» — это
+        требование, которое надо уметь проверить тестом, не залезая в
+        приватные атрибуты соседнего виджета."""
 
 # ui/agents.py
 class AgentsView(QtWidgets.QWidget):
