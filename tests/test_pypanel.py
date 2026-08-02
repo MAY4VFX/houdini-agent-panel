@@ -1,10 +1,11 @@
-"""Тесты на houdini_agent.pypanel: и на форму XML, и на реальное поведение.
+"""Tests for houdini_agent.pypanel: both the XML shape and real behavior.
 
-Никакой настоящей Houdini здесь нет — `<script>` вытаскивается из XML и
-исполняется в чистом namespace. `houdini_agent_panel.ui.panel` подменяется
-фейком (сам модуль ещё не написан на момент этого теста — панель UI в работе
-у другого человека), а `kwargs['paneTab']`, которым Houdini помечает конкретный
-таб, имитируется простыми объектами.
+There's no real Houdini here at all — the `<script>` is pulled out of the
+XML and executed in a clean namespace. `houdini_agent_panel.ui.panel` is
+replaced with a fake (the real module wasn't written yet at the time this
+test was written — the UI layer was someone else's work in progress), and
+`kwargs['paneTab']`, which Houdini uses to tag a specific tab, is simulated
+with plain objects.
 """
 
 from __future__ import annotations
@@ -34,11 +35,12 @@ def _script_text() -> str:
 
 @pytest.fixture
 def fake_agent_panel_module(monkeypatch):
-    """Подсовывает houdini_agent_panel.ui.panel.AgentPanel как фейк.
+    """Plants houdini_agent_panel.ui.panel.AgentPanel as a fake.
 
-    Настоящего ui/panel.py в репозитории ещё нет (UI-слой пишет другой
-    человек), а тест должен проверять поведение `.pypanel`, а не наличие
-    чужого файла — поэтому модуль эмулируется через sys.modules напрямую.
+    The real ui/panel.py doesn't exist in the repository yet (the UI layer
+    was someone else's work), and the test needs to check `.pypanel`'s
+    behavior, not the presence of someone else's file — so the module is
+    emulated directly via sys.modules.
     """
     import types
 
@@ -60,7 +62,7 @@ def fake_agent_panel_module(monkeypatch):
 
 @pytest.fixture
 def panel_namespace(fake_agent_panel_module):
-    """Исполняет <script> панели в свежем namespace для каждого теста."""
+    """Executes the panel's <script> in a fresh namespace for each test."""
     namespace: dict = {"__name__": "houdini_agent_panel_pypanel_under_test"}
     exec(compile(_script_text(), str(PYPANEL_PATH), "exec"), namespace)
     return namespace
@@ -144,10 +146,10 @@ def test_oncreate_falls_back_to_error_widget_when_import_fails(qapp, monkeypatch
 
     assert isinstance(widget, QtWidgets.QWidget)
     labels = widget.findChildren(QtWidgets.QLabel)
-    assert labels, "виджет ошибки должен показывать текст"
+    assert labels, "the error widget must show text"
     text = labels[0].text()
     assert "doctor" in text
-    assert "терминал" in text.lower()
+    assert "terminal" in text.lower()
     # Раньше текст советовал открыть Python Shell и там же выполнить shell-
     # команду — гарантированный SyntaxError в Python-консоли.
     assert "python shell" not in text.lower()

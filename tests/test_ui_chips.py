@@ -40,12 +40,82 @@ def test_set_cwd_sets_label_text(qapp):
     assert header._cwd_label.text() == "/Users/artist/shot010"
 
 
-def test_agent_button_click_emits_agent_clicked(qapp):
+def test_agent_button_click_with_fewer_than_two_installed_opens_management(qapp):
+    """0 or 1 installed agent: nothing to switch between, so the chip skips
+    the popup and goes straight to "manage agents"."""
     header = HeaderBar()
     seen = []
-    header.agent_clicked.connect(lambda: seen.append(True))
+    header.manage_agents_clicked.connect(lambda: seen.append(True))
     header._agent_button.click()
     assert seen == [True]
+
+    header.set_agent_menu([("claude-acp", "Claude Agent")], "claude-acp")
+    seen.clear()
+    header._agent_button.click()
+    assert seen == [True]
+    assert not header._agent_popup.isVisible()
+
+
+def test_agent_button_click_with_two_or_more_installed_opens_menu(qapp):
+    header = HeaderBar()
+    header.set_agent_menu(
+        [("claude-acp", "Claude Agent"), ("codex-acp", "Codex")], "claude-acp"
+    )
+
+    manage_seen = []
+    header.manage_agents_clicked.connect(lambda: manage_seen.append(True))
+    header._agent_button.click()
+
+    assert header._agent_popup.isVisible()
+    labels = [
+        header._agent_popup_layout.itemAt(i).widget().text()
+        for i in range(header._agent_popup_layout.count())
+        if isinstance(header._agent_popup_layout.itemAt(i).widget(), QtWidgets.QPushButton)
+    ]
+    assert labels == ["Claude Agent", "Codex", "Manage agents…"]
+    assert manage_seen == []
+
+
+def test_selecting_agent_from_menu_emits_agent_selected(qapp):
+    header = HeaderBar()
+    header.set_agent_menu(
+        [("claude-acp", "Claude Agent"), ("codex-acp", "Codex")], "claude-acp"
+    )
+    header._agent_button.click()
+
+    selected = []
+    header.agent_selected.connect(selected.append)
+    buttons = [
+        header._agent_popup_layout.itemAt(i).widget()
+        for i in range(header._agent_popup_layout.count())
+        if isinstance(header._agent_popup_layout.itemAt(i).widget(), QtWidgets.QPushButton)
+    ]
+    codex_button = next(b for b in buttons if b.text() == "Codex")
+    codex_button.click()
+
+    assert selected == ["codex-acp"]
+    assert not header._agent_popup.isVisible()
+
+
+def test_selecting_manage_agents_from_menu_emits_manage_agents_clicked(qapp):
+    header = HeaderBar()
+    header.set_agent_menu(
+        [("claude-acp", "Claude Agent"), ("codex-acp", "Codex")], "claude-acp"
+    )
+    header._agent_button.click()
+
+    seen = []
+    header.manage_agents_clicked.connect(lambda: seen.append(True))
+    buttons = [
+        header._agent_popup_layout.itemAt(i).widget()
+        for i in range(header._agent_popup_layout.count())
+        if isinstance(header._agent_popup_layout.itemAt(i).widget(), QtWidgets.QPushButton)
+    ]
+    manage_button = next(b for b in buttons if b.text() == "Manage agents…")
+    manage_button.click()
+
+    assert seen == [True]
+    assert not header._agent_popup.isVisible()
 
 
 def test_new_session_button_click_emits_signal(qapp):

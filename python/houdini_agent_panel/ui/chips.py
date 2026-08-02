@@ -1,8 +1,8 @@
 """Precision-style header and custom choice controls.
 
-No ``QComboBox``/``QMenu`` is used here.  Both the session picker and mode
-picker render their own flat trigger and popup surface so the OS/Qt style can
-never leak into the panel.
+No ``QComboBox``/``QMenu`` is used here.  The session picker, mode picker,
+and the agent chip's switcher menu all render their own flat trigger and
+popup surface so the OS/Qt style can never leak into the panel.
 """
 
 from __future__ import annotations
@@ -155,7 +155,8 @@ class ChoiceButton(QtWidgets.QWidget):
 class HeaderBar(QtWidgets.QWidget):
     """Top context rail matching ``houdini-agent-precision.html``."""
 
-    agent_clicked = Signal()
+    manage_agents_clicked = Signal()
+    agent_selected = Signal(str)
     session_selected = Signal(str)
     new_session_clicked = Signal()
     settings_clicked = Signal()
@@ -177,7 +178,7 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_button = QtWidgets.QToolButton(self._rail)
         self._agent_button.setObjectName("contextButton")
         self._agent_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self._agent_button.clicked.connect(self.agent_clicked)
+        self._agent_button.clicked.connect(self._on_agent_button_clicked)
         layout.addWidget(self._agent_button)
 
         self._divider = QtWidgets.QLabel("·", self._rail)
@@ -197,14 +198,14 @@ class HeaderBar(QtWidgets.QWidget):
         self._new_session_button = QtWidgets.QToolButton(self._rail)
         self._new_session_button.setObjectName("contextIcon")
         self._new_session_button.setText("+")
-        self._new_session_button.setToolTip("Новый разговор")
+        self._new_session_button.setToolTip("New conversation")
         self._new_session_button.clicked.connect(self.new_session_clicked)
         layout.addWidget(self._new_session_button)
 
         self._settings_button = QtWidgets.QToolButton(self._rail)
         self._settings_button.setObjectName("contextIcon")
         self._settings_button.setText("⋯")
-        self._settings_button.setToolTip("Настройки")
+        self._settings_button.setToolTip("Settings")
         self._settings_button.clicked.connect(self.settings_clicked)
         layout.addWidget(self._settings_button)
 
@@ -218,6 +219,42 @@ class HeaderBar(QtWidgets.QWidget):
             "}"
             "QLabel#contextPath { color: palette(disabled, text); padding: 0 7px; }"
             "QLabel#contextDivider { color: palette(mid); }"
+        )
+
+        # Installed agents fed by the panel (see `AgentPanel._refresh_agent_chip_menu`).
+        # Empty until the panel's first boot pass — the chip just opens
+        # settings until then, same as the "0 or 1 installed" case below.
+        self._agent_items: list[tuple[str, str]] = []
+        self._agent_current_id: str | None = None
+
+        self._agent_popup = QtWidgets.QFrame(
+            None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint
+        )
+        self._agent_popup.setObjectName("agentPopup")
+        self.destroyed.connect(self._agent_popup.deleteLater)
+        self._agent_popup_layout = QtWidgets.QVBoxLayout(self._agent_popup)
+        self._agent_popup_layout.setContentsMargins(5, 5, 5, 5)
+        self._agent_popup_layout.setSpacing(2)
+        self._agent_popup.setStyleSheet(
+            "QFrame#agentPopup {"
+            " background: #262626;"
+            " border: 1px solid #3a3a3a;"
+            " border-radius: 10px;"
+            "}"
+            "QFrame#agentMenuSeparator {"
+            " background: #3a3a3a; max-height: 1px; min-height: 1px; margin: 4px 6px;"
+            "}"
+            "QPushButton {"
+            " min-height: 30px;"
+            " padding: 0 10px;"
+            " border: none;"
+            " border-radius: 6px;"
+            " color: #d7d4ce;"
+            " background: transparent;"
+            " text-align: left;"
+            "}"
+            "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
+            f"QPushButton[checkedChoice=\"true\"] {{ color: {_AMBER}; background: #332a20; }}"
         )
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
@@ -237,6 +274,19 @@ class HeaderBar(QtWidgets.QWidget):
             painter.end()
             icon = QtGui.QIcon(dot)
         self._agent_button.setIcon(icon)
+
+    def set_agent_menu(self, agents: list[tuple[str, str]], current_id: str | None) -> None:
+        """Feed the chip the list of installed agents, as ``(agent_id, label)``.
+
+        With fewer than two installed agents there is nothing to switch
+        between, so clicking the chip skips the popup entirely and goes
+        straight to "manage agents" — the same "agent can't do it, no
+        control gets drawn" rule the rest of the panel follows, applied to
+        the switcher itself.
+        """
+        self._agent_items = list(agents)
+        self._agent_current_id = current_id
+        self._rebuild_agent_popup()
 
     def set_cwd(self, path: str) -> None:
         self._cwd_label.setText(path)
@@ -258,6 +308,65 @@ class HeaderBar(QtWidgets.QWidget):
         session_id = self._session_combo.itemData(index)
         if session_id:
             self.session_selected.emit(session_id)
+
+    # --- agent chip menu -------------------------------------------------
+
+    def _rebuild_agent_popup(self) -> None:
+        while self._agent_popup_layout.count():
+            item = self._agent_popup_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for agent_id, label in self._agent_items:
+            button = QtWidgets.QPushButton(label, self._agent_popup)
+            button.setProperty("checkedChoice", agent_id == self._agent_current_id)
+            button.clicked.connect(lambda _checked=False, a=agent_id: self._choose_agent(a))
+            self._agent_popup_layout.addWidget(button)
+        if self._agent_items:
+            separator = QtWidgets.QFrame(self._agent_popup)
+            separator.setObjectName("agentMenuSeparator")
+            separator.setFrameShape(QtWidgets.QFrame.HLine)
+            self._agent_popup_layout.addWidget(separator)
+        manage_button = QtWidgets.QPushButton("Manage agents…", self._agent_popup)
+        manage_button.clicked.connect(self._choose_manage)
+        self._agent_popup_layout.addWidget(manage_button)
+
+    def _on_agent_button_clicked(self) -> None:
+        if len(self._agent_items) < 2:
+            self.manage_agents_clicked.emit()
+            return
+        self._toggle_agent_popup()
+
+    def _toggle_agent_popup(self) -> None:
+        if self._agent_popup.isVisible():
+            self._agent_popup.hide()
+            return
+        self._rebuild_agent_popup()
+        width = max(self._agent_button.width(), 200)
+        self._agent_popup.setFixedWidth(width)
+        self._agent_popup.adjustSize()
+        point = self._agent_button.mapToGlobal(QtCore.QPoint(0, self._agent_button.height() + 5))
+        screen = QtWidgets.QApplication.screenAt(point)
+        below_screen = (
+            screen is not None
+            and point.y() + self._agent_popup.height() > screen.availableGeometry().bottom()
+        )
+        if below_screen:
+            point.setY(
+                self._agent_button.mapToGlobal(QtCore.QPoint(0, 0)).y()
+                - self._agent_popup.height()
+                - 5
+            )
+        self._agent_popup.move(point)
+        self._agent_popup.show()
+
+    def _choose_agent(self, agent_id: str) -> None:
+        self._agent_popup.hide()
+        self.agent_selected.emit(agent_id)
+
+    def _choose_manage(self) -> None:
+        self._agent_popup.hide()
+        self.manage_agents_clicked.emit()
 
 
 class ModeChip(QtWidgets.QWidget):

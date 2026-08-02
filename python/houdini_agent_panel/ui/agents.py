@@ -1,19 +1,25 @@
-"""Экран «Агенты»: реестр ACP плюс «Свой агент», установка/обновление/удаление.
+"""Agents section: the ACP registry plus "custom agent", install/update/remove.
 
-Контракт (`docs/architecture.md` §10) отдаёт наружу всего два сигнала:
-`agent_chosen` (человек выбрал агента для работы) и `closed` (обратно в чат).
-Всё остальное — поставить/обновить/удалить/прогресс — экран делает сам через
-`registry.py`/`runtime.py`/`settings.py` напрямую. Это то же однонаправленное
-разделение слоёв, что и у `ui/announcement.py` с `announcements.Announcement`:
-UI имеет право знать про реестр и рантайм, они про UI — нет (design.md,
-таблица «Четыре слоя»).
+Embedded at the top of `ui/settings_view.py` — there is no standalone agents
+screen any more. Switching which installed agent is currently running lives
+in the header chip's dropdown menu (`ui/chips.py`, fed by `AgentPanel`), so
+this view has no "Use" button: "the agent can't do it, no control gets
+drawn" applies to switching just as much as to anything else, and there is
+nothing here for a widget to switch *to* — it only changes what's on disk.
 
-Агент, недоступный на этой платформе (`AgentEntry.unavailable_reason()` не
-пустая — например Kimi CLI на darwin-x86_64), показывается строкой с этой
-причиной, а не прячется — прямое требование design.md.
+Whenever the on-disk installed/custom agent list changes, this view emits
+`installed_changed` so the panel can refresh the chip's menu without
+recreating anything. That is the only signal it sends outward — same
+one-way layering as `ui/announcement.py`/`announcements.Announcement`: this
+view is allowed to know about `registry.py`/`runtime.py`/`settings.py`, they
+know nothing about UI (design.md, table "Four layers").
 
-Установка/обновление — в `QThread` (`_InstallWorker`): `runtime.install_agent`
-бьёт по сети и диску, GUI-поток не должен ждать ни то, ни другое.
+An agent unavailable on this platform (`AgentEntry.unavailable_reason()`
+non-empty — e.g. Kimi CLI on darwin-x86_64) is shown as a row with that
+reason, not hidden — a direct design.md requirement.
+
+Install/update run on a `QThread` (`_InstallWorker`): `runtime.install_agent`
+hits the network and the disk, and the GUI thread must not wait on either.
 """
 
 from __future__ import annotations
@@ -31,10 +37,10 @@ if TYPE_CHECKING:
 
 
 class _InstallWorker(QtCore.QThread):
-    """Ставит (или обновляет) одного агента на фоновом потоке."""
+    """Installs (or updates) a single agent on a background thread."""
 
     progressed = Signal(int, object, str)  # done, total|None, note
-    succeeded = Signal(object)  # runtime.LaunchSpec — сам экран его не использует
+    succeeded = Signal(object)  # runtime.LaunchSpec — this view doesn't use it
     failed = Signal(str)
 
     def __init__(self, entry: "AgentEntry", *, fetch: "Fetcher | None", parent=None) -> None:
@@ -42,7 +48,7 @@ class _InstallWorker(QtCore.QThread):
         self._entry = entry
         self._fetch = fetch
 
-    def run(self) -> None:  # noqa: D102 - переопределение QThread.run
+    def run(self) -> None:  # noqa: D102 - QThread.run override
         try:
             spec = runtime.install_agent(
                 self._entry,
@@ -57,10 +63,10 @@ class _InstallWorker(QtCore.QThread):
 
 def _state_text(installed, update: "Update | None") -> str:
     if installed is None:
-        return "не поставлен"
+        return "not installed"
     if update is not None:
-        return f"поставлен {installed.version} — есть {update.latest}"
-    return f"поставлен {installed.version}"
+        return f"installed {installed.version} — update available: {update.latest}"
+    return f"installed {installed.version}"
 
 
 def _clear_layout(layout: "QtWidgets.QLayout") -> None:
@@ -68,20 +74,19 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
-            # `setParent(None)` — сразу, а не только `deleteLater()`: иначе
-            # старая строка ещё числится ребёнком до следующего цикла событий
-            # и попадает в `findChildren`/повторный подсчёт кнопок.
+            # `setParent(None)` right away, not just `deleteLater()`: otherwise
+            # the old row still counts as a child until the next event loop
+            # pass and shows up in `findChildren`/gets counted twice.
             widget.setParent(None)
             widget.deleteLater()
 
 
 class _AgentRow(QtWidgets.QWidget):
-    """Одна строка списка: реестровый агент или запись «Своего агента»."""
+    """One row: a registry agent, or a "custom agent" entry."""
 
     install_requested = Signal()
     update_requested = Signal()
     uninstall_requested = Signal()
-    use_requested = Signal()
     remove_custom_requested = Signal()
 
     def __init__(
@@ -113,39 +118,33 @@ class _AgentRow(QtWidgets.QWidget):
 
         self.unavailable = bool(unavailable_reason)
         if self.unavailable:
-            # Показан с причиной, но ставить его всё равно нечем — ни одной
-            # кнопки действия (design.md: недоступный агент не прячется).
+            # Shown with its reason, but there is nothing to install it
+            # with — no action button at all (design.md: an unavailable
+            # agent is shown, not hidden).
             return
 
         if is_custom:
-            use_btn = QtWidgets.QPushButton("Использовать")
-            use_btn.clicked.connect(self.use_requested.emit)
-            layout.addWidget(use_btn)
-            remove_btn = QtWidgets.QPushButton("Удалить")
+            remove_btn = QtWidgets.QPushButton("Remove")
             remove_btn.clicked.connect(self.remove_custom_requested.emit)
             layout.addWidget(remove_btn)
             return
 
         if not is_installed:
-            install_btn = QtWidgets.QPushButton("Поставить")
+            install_btn = QtWidgets.QPushButton("Install")
             install_btn.clicked.connect(self.install_requested.emit)
             layout.addWidget(install_btn)
             return
 
-        use_btn = QtWidgets.QPushButton("Использовать")
-        use_btn.clicked.connect(self.use_requested.emit)
-        layout.addWidget(use_btn)
-
         if has_update:
-            update_btn = QtWidgets.QPushButton("Обновить")
+            update_btn = QtWidgets.QPushButton("Update")
             update_btn.clicked.connect(self.update_requested.emit)
             layout.addWidget(update_btn)
 
-        remove_btn = QtWidgets.QPushButton("Удалить")
+        remove_btn = QtWidgets.QPushButton("Remove")
         remove_btn.clicked.connect(self.uninstall_requested.emit)
         layout.addWidget(remove_btn)
 
-    # --- прогресс скачивания -------------------------------------------------
+    # --- download progress -------------------------------------------------
 
     def set_progress(self, done: int, total: int | None, note: str) -> None:
         self._progress.setVisible(True)
@@ -153,7 +152,7 @@ class _AgentRow(QtWidgets.QWidget):
             self._progress.setMaximum(total)
             self._progress.setValue(done)
         else:
-            self._progress.setMaximum(0)  # total неизвестен — неопределённый прогресс
+            self._progress.setMaximum(0)  # total unknown — indeterminate progress
         self._progress.setToolTip(note)
 
     def clear_progress(self) -> None:
@@ -164,40 +163,29 @@ class _AgentRow(QtWidgets.QWidget):
 
 
 class AgentsView(QtWidgets.QWidget):
-    """Экран «Агенты»: список из реестра плюс «Свой агент»."""
+    """Registry list plus "custom agent" — embedded in the settings screen."""
 
-    agent_chosen = Signal(str)
-    closed = Signal()
+    installed_changed = Signal()
 
     def __init__(self, parent=None, *, fetch: "Fetcher | None" = None) -> None:
         super().__init__(parent)
         self._fetch = fetch
         self._entries: list["AgentEntry"] = []
         self._updates_by_target: dict[str, "Update"] = {}
-        # Ссылки на живые потоки держим здесь — иначе Python соберёт QThread
-        # мусорщиком раньше, чем он реально завершится.
+        # Keep references to live threads here — otherwise Python's garbage
+        # collector could claim the QThread before it has actually finished.
         self._threads: list[_InstallWorker] = []
-
-        close_button = QtWidgets.QToolButton()
-        close_button.setText("←")
-        close_button.setToolTip("Назад")
-        close_button.clicked.connect(self.closed.emit)
-
-        header = QtWidgets.QHBoxLayout()
-        header.addWidget(close_button)
-        header.addWidget(QtWidgets.QLabel("Агенты"))
-        header.addStretch(1)
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
 
         self._custom_name = QtWidgets.QLineEdit()
-        self._custom_name.setPlaceholderText("Имя")
+        self._custom_name.setPlaceholderText("Name")
         self._custom_command = QtWidgets.QLineEdit()
-        self._custom_command.setPlaceholderText("Команда")
+        self._custom_command.setPlaceholderText("Command")
         self._custom_args = QtWidgets.QLineEdit()
-        self._custom_args.setPlaceholderText("Аргументы через пробел")
-        add_custom_btn = QtWidgets.QPushButton("Добавить своего агента")
+        self._custom_args.setPlaceholderText("Arguments, space-separated")
+        add_custom_btn = QtWidgets.QPushButton("Add custom agent")
         add_custom_btn.clicked.connect(self._on_add_custom)
 
         custom_form = QtWidgets.QHBoxLayout()
@@ -207,32 +195,33 @@ class AgentsView(QtWidgets.QWidget):
         custom_form.addWidget(add_custom_btn)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(header)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._rows_layout)
-        layout.addWidget(QtWidgets.QLabel("Свой агент"))
+        layout.addWidget(QtWidgets.QLabel("Custom agent"))
         layout.addLayout(self._custom_rows_layout)
         layout.addLayout(custom_form)
-        layout.addStretch(1)
 
         self._load_custom_agents()
 
-    # --- наполнение данными -------------------------------------------------
+    # --- feeding data --------------------------------------------------
 
     def set_agents(self, entries: list["AgentEntry"], *, updates: list["Update"] | None = None) -> None:
-        """Перерисовать список реестровых агентов.
+        """Redraw the registry agent rows.
 
-        Состояние («поставлен»/версия/обновление) читается из `settings.load()`
-        при каждой перерисовке — источник правды один, дублировать его в
-        памяти виджета незачем и рискованно рассинхронизировать.
+        State (installed / version / update available) is read from
+        `settings.load()` on every redraw — there is exactly one source of
+        truth, and duplicating it in the widget's own memory would risk it
+        drifting out of sync.
         """
         self._entries = list(entries)
         self._updates_by_target = {u.target: u for u in (updates or []) if u.kind == "agent"}
         self._rebuild_registry_rows()
 
     def refresh_from_registry(self, *, force: bool = False) -> None:
-        """Шорткат для панели: сходить в реестр самой, с тем же `fetch`, что
-        передан в конструктор (тесты подсовывают `FakeFetcher`, продакшен —
-        ничего, тогда `registry.fetch_registry` берёт настоящую сеть)."""
+        """Shortcut for the panel: fetch the registry itself, with the same
+        `fetch` given to the constructor (tests hand in a `FakeFetcher`,
+        production passes nothing and `registry.fetch_registry` uses the
+        real network)."""
         try:
             entries = registry.fetch_registry(force=force, fetch=self._fetch)
         except registry.RegistryError:
@@ -257,7 +246,6 @@ class AgentsView(QtWidgets.QWidget):
             row.install_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
-            row.use_requested.connect(lambda checked=False, e=entry: self.agent_chosen.emit(e.id))
             self._rows_layout.addWidget(row)
 
     def _install(self, entry: "AgentEntry", row: "_AgentRow") -> None:
@@ -270,17 +258,17 @@ class AgentsView(QtWidgets.QWidget):
         worker.start()
 
     def _forget_thread(self, worker: "_InstallWorker") -> None:
-        # `finished` уходит непосредственно ПЕРЕД тем, как поток реально
-        # остановится — уронить последнюю Python-ссылку прямо здесь, не
-        # дождавшись `wait()`, значит рискнуть удалить QThread, пока ОС-поток
-        # ещё физически не присоединился (падение, не всегда воспроизводимое).
+        # `finished` fires just BEFORE the thread actually stops — dropping
+        # the last Python reference here without calling `wait()` first
+        # risks deleting the QThread before the OS thread has physically
+        # joined (a crash, not always reproducible).
         worker.wait()
         if worker in self._threads:
             self._threads.remove(worker)
 
     def _on_install_failed(self, row: "_AgentRow", message: str) -> None:
         row.clear_progress()
-        row.set_state_text(f"ошибка: {message}")
+        row.set_state_text(f"error: {message}")
 
     def _on_installed(self, entry: "AgentEntry", row: "_AgentRow") -> None:
         row.clear_progress()
@@ -294,6 +282,7 @@ class AgentsView(QtWidgets.QWidget):
         )
         settings_module.save(current)
         self._rebuild_registry_rows()
+        self.installed_changed.emit()
 
     def _uninstall(self, agent_id: str) -> None:
         runtime.uninstall_agent(agent_id)
@@ -301,15 +290,15 @@ class AgentsView(QtWidgets.QWidget):
         current.installed_agents.pop(agent_id, None)
         settings_module.save(current)
         self._rebuild_registry_rows()
+        self.installed_changed.emit()
 
-    # --- «Свой агент» --------------------------------------------------------
+    # --- "custom agent" --------------------------------------------------
 
     def _load_custom_agents(self) -> None:
         _clear_layout(self._custom_rows_layout)
         current = settings_module.load()
         for agent in current.custom_agents:
-            row = _AgentRow(title=f"{agent.name} ({agent.command})", state_text="свой агент", is_custom=True, parent=self)
-            row.use_requested.connect(lambda checked=False, a=agent: self.agent_chosen.emit(a.id))
+            row = _AgentRow(title=f"{agent.name} ({agent.command})", state_text="custom agent", is_custom=True, parent=self)
             row.remove_custom_requested.connect(lambda checked=False, a=agent: self._remove_custom(a.id))
             self._custom_rows_layout.addWidget(row)
 
@@ -328,12 +317,14 @@ class AgentsView(QtWidgets.QWidget):
         self._custom_command.clear()
         self._custom_args.clear()
         self._load_custom_agents()
+        self.installed_changed.emit()
 
     def _remove_custom(self, agent_id: str) -> None:
         current = settings_module.load()
         current.custom_agents = [a for a in current.custom_agents if a.id != agent_id]
         settings_module.save(current)
         self._load_custom_agents()
+        self.installed_changed.emit()
 
 
 __all__ = ["AgentsView"]

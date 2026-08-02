@@ -1,4 +1,4 @@
-"""Тесты экрана «Агенты»: недоступность на платформе, установка в фоне, «Свой агент»."""
+"""Tests for the agents section: platform unavailability, background install, "custom agent"."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _wait_until(condition, *, timeout_ms: int = 5000) -> None:
         app.processEvents()
         QtTest.QTest.qWait(step)
         elapsed += step
-    assert condition(), "условие не выполнилось за отведённое время"
+    assert condition(), "condition did not become true in time"
 
 
 def test_unavailable_agent_shown_with_reason_not_hidden(qapp, monkeypatch):
@@ -46,10 +46,10 @@ def test_unavailable_agent_shown_with_reason_not_hidden(qapp, monkeypatch):
     row = view._rows_layout.itemAt(0).widget()
     assert row.unavailable
     assert "Kimi CLI" in row.findChild(QtWidgets.QLabel).text() or True
-    # причина видна текстом, не спрятана
+    # the reason is visible text, not hidden
     labels = [child.text() for child in row.findChildren(QtWidgets.QLabel)]
     assert any("fake-platform" in text for text in labels)
-    # и ни одной кнопки действия
+    # and not a single action button
     assert not row.findChildren(QtWidgets.QPushButton)
 
 
@@ -65,7 +65,7 @@ def test_not_installed_agent_shows_install_button(qapp, monkeypatch):
     view.set_agents([entry])
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert buttons == {"Поставить"}
+    assert buttons == {"Install"}
 
 
 def test_install_flow_runs_in_background_and_updates_row(qapp, monkeypatch, fetcher):
@@ -85,21 +85,27 @@ def test_install_flow_runs_in_background_and_updates_row(qapp, monkeypatch, fetc
     view = AgentsView(fetch=fetcher)
     view.set_agents([entry])
     row = view._rows_layout.itemAt(0).widget()
-    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Поставить")
+    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Install")
+
+    changed = []
+    view.installed_changed.connect(lambda: changed.append(True))
     install_button.click()
 
     _wait_until(lambda: not view._threads)
 
     current = settings_module.load()
     assert current.installed_agents["agent-a"].version == "1.0.0"
+    assert changed == [True]
 
-    # После установки строка перерисована: теперь "Использовать"/"Удалить".
+    # After install the row is redrawn: no more "Use" button, just "Remove".
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert buttons == {"Использовать", "Удалить"}
+    assert buttons == {"Remove"}
 
 
-def test_use_button_emits_agent_chosen(qapp, monkeypatch):
+def test_installed_agent_has_no_use_button(qapp, monkeypatch):
+    """Switching agents lives in the header chip's menu now — this view is
+    install/update/remove only."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
         id="agent-a",
@@ -116,12 +122,8 @@ def test_use_button_emits_agent_chosen(qapp, monkeypatch):
     view = AgentsView()
     view.set_agents([entry])
     row = view._rows_layout.itemAt(0).widget()
-    use_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Использовать")
-
-    received = []
-    view.agent_chosen.connect(received.append)
-    use_button.click()
-    assert received == ["agent-a"]
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert buttons == {"Remove"}
 
 
 def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):
@@ -146,11 +148,15 @@ def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):
 
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert "Обновить" in buttons
+    assert "Update" in buttons
 
 
 def test_custom_agent_add_and_remove(qapp):
     view = AgentsView()
+
+    changed = []
+    view.installed_changed.connect(lambda: changed.append(True))
+
     view._custom_name.setText("Моя команда")
     view._custom_command.setText("/usr/bin/my-acp-agent")
     view._custom_args.setText("--flag value")
@@ -163,8 +169,11 @@ def test_custom_agent_add_and_remove(qapp):
 
     assert view._custom_rows_layout.count() == 1
     row = view._custom_rows_layout.itemAt(0).widget()
-    remove_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Удалить")
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert buttons == {"Remove"}
+    remove_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Remove")
     remove_button.click()
 
     current = settings_module.load()
     assert current.custom_agents == []
+    assert changed == [True, True]

@@ -43,13 +43,14 @@ def _session(session_id: str = "s1") -> sessions.SessionState:
     )
 
 
-def test_without_default_agent_panel_opens_on_agents_screen(qapp):
+def test_without_default_agent_panel_opens_on_agents_settings(qapp):
     """Первое открытие: агент не выбран, значит человеку показывают, из чего
-    выбирать, а не пустую ленту без единого объяснения."""
+    выбирать — теперь это блок «Агенты» в настройках, не отдельный экран."""
     widget = _make_panel(qapp)
     widget._boot()
 
-    assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_AGENTS
+    assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_SETTINGS
+    assert widget._settings_view._scroll.verticalScrollBar().value() == 0
     widget.shutdown()
 
 
@@ -235,10 +236,10 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
     widget.shutdown()
 
 
-def test_registry_reaches_the_agents_screen(qapp):
-    """Экран «Агенты» сам в сеть не ходит.
+def test_registry_reaches_the_agents_section(qapp):
+    """Блок «Агенты» в настройках сам в сеть не ходит.
 
-    Его `refresh_from_registry` синхронный, и вызов с главного потока
+    `AgentsView.refresh_from_registry` синхронный, и вызов с главного потока
     заморозил бы Houdini ровно на время сетевого таймаута. Записи обязаны
     приезжать готовыми из фонового обхода.
     """
@@ -255,7 +256,7 @@ def test_registry_reaches_the_agents_screen(qapp):
     )
 
     shown = []
-    widget._agents_view.set_agents = lambda entries, updates=None: shown.append((entries, updates))
+    widget._settings_view.set_agents = lambda entries, updates=None: shown.append((entries, updates))
 
     class _Result:
         announcements: list = []
@@ -264,6 +265,58 @@ def test_registry_reaches_the_agents_screen(qapp):
     widget._on_refresh_done(_Result(), [entry])
 
     assert shown and shown[0][0] == [entry]
+    widget.shutdown()
+
+
+def test_installed_agent_reaches_the_header_chip_menu(qapp):
+    """«Установил → появился в меню чипа без перезапуска панели»."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = _make_panel(qapp)
+    widget._boot()
+
+    current = settings_mod.load()
+    current.installed_agents["claude-acp"] = settings_mod.InstalledAgent(
+        agent_id="claude-acp", version="1.0", kind="npx", installed_at="now"
+    )
+    current.installed_agents["codex-acp"] = settings_mod.InstalledAgent(
+        agent_id="codex-acp", version="1.0", kind="binary", installed_at="now"
+    )
+    settings_mod.save(current)
+
+    widget._settings_view._agents_view.installed_changed.emit()
+
+    ids = [agent_id for agent_id, _label in widget._header._agent_items]
+    assert ids == ["claude-acp", "codex-acp"]
+    widget.shutdown()
+
+
+def test_choosing_agent_from_chip_menu_switches_agent(qapp, monkeypatch):
+    widget = _make_panel(qapp)
+    widget._boot()
+
+    started: list[str] = []
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started.append(agent_id))
+
+    widget._header.agent_selected.emit("codex-acp")
+
+    from houdini_agent_panel import settings as settings_mod
+
+    assert settings_mod.load().default_agent == "codex-acp"
+    assert started == ["codex-acp"]
+    widget.shutdown()
+
+
+def test_manage_agents_clicked_opens_settings_focused_on_agents(qapp):
+    widget = _make_panel(qapp)
+    widget._boot()
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    widget._settings_view._scroll.verticalScrollBar().setValue(50)
+
+    widget._header.manage_agents_clicked.emit()
+
+    assert widget._pages.currentIndex() == widget.PAGE_SETTINGS
+    assert widget._settings_view._scroll.verticalScrollBar().value() == 0
     widget.shutdown()
 
 

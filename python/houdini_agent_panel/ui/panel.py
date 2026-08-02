@@ -1,19 +1,20 @@
-"""Корневой виджет панели — место, где всё сходится.
+"""Root widget of the panel — where everything comes together.
 
-Здесь три решения, определяющие поведение всего остального.
+Three decisions here shape everything else.
 
-**Один агент на процесс Houdini, много сессий.** Процесс агента и соединение
-живут в модуле, а не в виджете: второй таб панели обязан видеть тот же
-разговор и не поднимать второй процесс. Виджеты приходят и уходят, соединение
-переживает их.
+**One agent per Houdini process, many sessions.** The agent process and its
+connection live in the module, not the widget: a second panel tab must see
+the same conversation, not spin up a second process. Widgets come and go,
+the connection outlives them.
 
-**Ни одной сетевой и ни одной долгой операции на главном потоке.** Houdini
-рисует интерфейс тем же потоком, что и вьюпорт; секунда, потраченная здесь на
-ожидание PyPI, — это секунда замёрзшего Houdini.
+**No network call and no long operation ever runs on the main thread.**
+Houdini paints its UI on the same thread as the viewport; a second spent
+here waiting on PyPI is a second of frozen Houdini.
 
-**`hou` — только отсюда и только синхронно.** Всё, что нужно от сцены, берётся
-в момент создания панели и в ответ на пользовательские действия, то есть
-заведомо с главного потока. Рабочий поток ACP-клиента `hou` не касается.
+**`hou` — only from here, and only synchronously.** Anything needed from the
+scene is grabbed when the panel is built and in response to user actions,
+which is to say, always on the main thread. The ACP client's worker thread
+never touches `hou`.
 """
 
 from __future__ import annotations
@@ -31,12 +32,13 @@ from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
 
-#: Соединение с агентом на весь процесс Houdini. Не атрибут виджета — иначе
-#: закрытие одного таба уносило бы разговор, открытый в другом.
+#: Connection to the agent for the whole Houdini process. Not a widget
+#: attribute — otherwise closing one tab would take the conversation open in
+#: another tab down with it.
 _shared_client: acp_client.AcpClient | None = None
 
-#: Живые панели. Слабые ссылки: Qt удаляет виджеты сам, и держать их сильной
-#: ссылкой значило бы не давать им умереть.
+#: Live panels. Weak references: Qt deletes the widgets itself, and holding a
+#: strong reference here would just stop them from ever dying.
 _live_panels: "weakref.WeakSet[AgentPanel]" = weakref.WeakSet()
 
 
@@ -48,7 +50,7 @@ def shared_client() -> acp_client.AcpClient:
 
 
 def reset_shared_state_for_tests() -> None:
-    """Сбросить процессные синглтоны. Только для тестов."""
+    """Reset process-wide singletons. Tests only."""
     global _shared_client
     if _shared_client is not None:
         _shared_client.stop()
@@ -58,18 +60,19 @@ def reset_shared_state_for_tests() -> None:
 
 
 class _RefreshWorker(QtCore.QThread):
-    """Один поход в сеть на все нужды панели, в стороне от главного потока.
+    """One network round trip for everything the panel needs, off the main thread.
 
-    Отдельный поток, а не таймер с блокирующим вызовом: даже когда сети нет,
-    urllib честно ждёт таймаут, и на главном потоке это выглядит как зависшая
-    Houdini.
+    A dedicated thread, not a timer with a blocking call: even with no
+    network, urllib honestly waits out the timeout, and on the main thread
+    that looks exactly like a frozen Houdini.
 
-    Реестр забирается здесь же, а не отдельно экраном «Агенты», по двум
-    причинам. Дизайн обещает один суточный запрос на версии, оповещения и
-    агентов. И без записей реестра `updates.check` физически не может сравнить
-    версии установленных агентов — плашка «есть обновление» появлялась бы
-    только для самой панели и fx, но никогда для того, чем художник
-    пользуется.
+    The registry is fetched here rather than separately by the agents
+    section, for two reasons. The design promises one daily request that
+    covers versions, announcements, and agents together. And without
+    registry entries, `updates.check` literally cannot compare installed
+    agent versions — the "update available" badge would only ever show up
+    for the panel and fx themselves, never for what the artist is actually
+    using.
     """
 
     done = Signal(object, object)  # RefreshResult | None, list[AgentEntry]
@@ -78,13 +81,13 @@ class _RefreshWorker(QtCore.QThread):
         super().__init__(parent)
         self._settings = current
 
-    def run(self) -> None:  # pragma: no cover - проверяется через refresh.py
+    def run(self) -> None:  # pragma: no cover - covered via refresh.py
         entries: list = []
         try:
             from .. import registry
 
             entries = registry.fetch_registry()
-        except Exception:  # noqa: BLE001 - без реестра панель обязана работать
+        except Exception:  # noqa: BLE001 - the panel must work without a registry
             entries = []
 
         result = None
@@ -94,7 +97,7 @@ class _RefreshWorker(QtCore.QThread):
                 panel_version=settings_mod._panel_version(),
                 entries=entries,
             )
-        except Exception:  # noqa: BLE001 - фид не имеет права ломать панель
+        except Exception:  # noqa: BLE001 - the feed must never break the panel
             result = None
 
         self.done.emit(result, entries)
@@ -102,8 +105,9 @@ class _RefreshWorker(QtCore.QThread):
 
 
 
-#: Имена шестёрки на случай, когда реестр ещё не приехал. Не источник правды —
-#: реестр главнее, это только чтобы чип не показывал голый id первые секунды.
+#: Names for the featured six, for when the registry hasn't arrived yet. Not
+#: a source of truth — the registry always wins — this only keeps the chip
+#: from showing a bare id for the first few seconds.
 _FALLBACK_LABELS = {
     "claude-acp": "Claude Agent",
     "codex-acp": "Codex",
@@ -115,15 +119,16 @@ _FALLBACK_LABELS = {
 
 
 class _LaunchPrepWorker(QtCore.QThread):
-    """Готовит LaunchSpec в стороне от главного потока.
+    """Prepares a LaunchSpec off the main thread.
 
-    Здесь живёт всё медленное, что было в старом _launch_spec: поход в реестр
-    и ensure_node с возможной закачкой портативного Node. На главном потоке
-    этому не место — GUI-Houdini не наследует PATH шелла, homebrew-node ей не
-    виден, и закачка при первом запуске почти гарантирована.
+    Everything slow that used to live in the old _launch_spec lives here: a
+    registry round trip and ensure_node, which can mean downloading portable
+    Node. None of that belongs on the main thread — GUI Houdini doesn't
+    inherit the shell's PATH, so a homebrew node is invisible to it, and a
+    download on first launch is close to guaranteed, not a rare case.
     """
 
-    ready = Signal(object, str)   # LaunchSpec, человеческое имя
+    ready = Signal(object, str)   # LaunchSpec, human-readable name
     prep_failed = Signal(str)
     note = Signal(str)
 
@@ -132,7 +137,7 @@ class _LaunchPrepWorker(QtCore.QThread):
         self._agent_id = agent_id
         self._settings = current
 
-    def run(self) -> None:  # pragma: no cover - тонкая обёртка, логика в runtime
+    def run(self) -> None:  # pragma: no cover - thin wrapper, logic lives in runtime
         from .. import registry, runtime
 
         agent_id = self._agent_id
@@ -148,29 +153,28 @@ class _LaunchPrepWorker(QtCore.QThread):
                     break
             if entry is None:
                 self.prep_failed.emit(
-                    f"Агента {agent_id} нет ни в реестре, ни среди своих."
+                    f"Agent {agent_id} isn't in the registry or among custom agents."
                 )
                 return
             from .. import node as node_module
 
             if entry.needs_node and node_module.find_system_node() is None:
                 self.note.emit(
-                    f"{entry.name}: системного Node не видно, приношу портативный — "
-                    "первый запуск может занять минуту…"
+                    f"{entry.name}: no system Node found, fetching the portable one — "
+                    "first launch may take a minute…"
                 )
             spec = runtime.launch_spec(entry)
             self.ready.emit(spec, entry.name)
-        except Exception as exc:  # noqa: BLE001 - причина уходит в ленту
-            self.prep_failed.emit(f"Не удалось подготовить агента {agent_id}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - the reason goes to the feed
+            self.prep_failed.emit(f"Could not prepare agent {agent_id}: {exc}")
 
 
 class AgentPanel(QtWidgets.QWidget):
-    """То, что возвращает ``onCreateInterface()``."""
+    """What ``onCreateInterface()`` returns."""
 
     PAGE_TRANSCRIPT = 0
-    PAGE_AGENTS = 1
-    PAGE_SETTINGS = 2
-    PAGE_AUTH = 3
+    PAGE_SETTINGS = 1
+    PAGE_AUTH = 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -192,9 +196,9 @@ class AgentPanel(QtWidgets.QWidget):
 
         _live_panels.add(self)
 
-        # Boot откладываем на следующий проход цикла событий: Houdini ждёт
-        # возврата виджета из onCreateInterface, и всё, что мы успеем сделать
-        # до возврата, задерживает открытие таба.
+        # Boot is deferred to the next event loop pass: Houdini waits for the
+        # widget to return from onCreateInterface, and anything done before
+        # that return delays the tab opening.
         QtCore.QTimer.singleShot(0, self._boot)
 
     # ------------------------------------------------------------------ UI
@@ -214,7 +218,6 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._transcript = TranscriptView(self)
         self._pages.insertWidget(self.PAGE_TRANSCRIPT, self._transcript)
-        self._pages.insertWidget(self.PAGE_AGENTS, self._make_agents_view())
         self._pages.insertWidget(self.PAGE_SETTINGS, self._make_settings_view())
         self._pages.insertWidget(self.PAGE_AUTH, self._make_auth_view())
 
@@ -225,7 +228,8 @@ class AgentPanel(QtWidgets.QWidget):
         layout.addWidget(self._blocking)
         layout.addWidget(self._composer)
 
-        self._header.agent_clicked.connect(lambda: self._show_page(self.PAGE_AGENTS))
+        self._header.manage_agents_clicked.connect(self._open_agent_management)
+        self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
         self._header.new_session_clicked.connect(self._start_new_session)
         self._header.session_selected.connect(self._pool.set_current)
@@ -239,15 +243,6 @@ class AgentPanel(QtWidgets.QWidget):
         self._notice.dismissed.connect(self._on_notice_dismissed)
         self._blocking.action_clicked.connect(self._on_blocking_action)
         self._consent.answered.connect(self._on_telemetry_answer)
-
-    def _make_agents_view(self) -> QtWidgets.QWidget:
-        from .agents import AgentsView
-
-        view = AgentsView(self)
-        self._agents_view = view
-        view.agent_chosen.connect(self._on_agent_chosen)
-        view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
-        return view
 
     def _make_settings_view(self) -> QtWidgets.QWidget:
         from .settings_view import SettingsView
@@ -263,24 +258,38 @@ class AgentPanel(QtWidgets.QWidget):
 
         view = AuthView(self)
         self._auth_view = view
-        # Через свои методы, а не напрямую в shared_client().authenticate:
-        # прямая подписка навсегда запомнила бы ТОТ экземпляр клиента, что
-        # существовал в момент сборки виджета. После смены агента клиент
-        # пересоздаётся, и кнопки входа молча начали бы говорить с покойником.
+        # Through its own methods, not straight into shared_client().authenticate:
+        # a direct subscription would permanently capture whichever client
+        # instance existed when the widget was built. The client gets
+        # recreated on an agent switch, and the login buttons would silently
+        # start talking to a corpse.
         view.method_chosen.connect(self._on_auth_method_chosen)
         view.logout_requested.connect(self._on_logout_requested)
         return view
 
     def _show_page(self, index: int) -> None:
         self._pages.setCurrentIndex(index)
-        # Писать агенту с экрана настроек или установки бессмысленно: ответ
-        # придёт в ленту, которой человек в этот момент не видит.
+        # Writing to the agent from the settings or auth screen is pointless:
+        # the reply lands in a feed the human can't see right now.
         self._composer.setVisible(index == self.PAGE_TRANSCRIPT)
+
+    def _open_agent_management(self) -> None:
+        """Send the human to the agents section of settings.
+
+        Every path that used to land on the standalone "Agents" screen —
+        first launch with no agent picked, a failed launch — lands here
+        instead now. There is no PAGE_AGENTS any more; the agents block
+        lives at the top of settings (`ui/settings_view.py`), so opening it
+        is just switching pages plus scrolling to the top.
+        """
+        self._show_page(self.PAGE_SETTINGS)
+        self._settings_view.focus_agents()
 
     # --------------------------------------------------------------- boot
 
     def _boot(self) -> None:
         self._header.set_cwd(scene.hip_dir())
+        self._refresh_agent_chip_menu()
         self._refresh_worker = _RefreshWorker(self._settings, self)
         self._refresh_worker.done.connect(self._on_refresh_done)
         self._refresh_worker.start()
@@ -288,16 +297,16 @@ class AgentPanel(QtWidgets.QWidget):
 
         client = shared_client()
         if client.is_running():
-            # Мы второй таб: соединение уже поднято, показываем то, что есть.
+            # We're a second tab: the connection is already up, show what's there.
             self._adopt_running_client()
             return
 
         agent_id = self._settings.default_agent
         if not agent_id:
-            self._show_page(self.PAGE_AGENTS)
+            self._open_agent_management()
             return
         if not self._settings.autostart_agent:
-            self._note("Агент не запущен. Нажми «+», чтобы начать разговор.")
+            self._note('No agent running. Press "+" to start a conversation.')
             return
         self._start_agent(agent_id)
 
@@ -315,20 +324,21 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_TRANSCRIPT)
 
     def _start_agent(self, agent_id: str) -> None:
-        """Запустить агента, не заморозив Houdini.
+        """Start an agent without freezing Houdini.
 
-        Подготовка спека — это поход в реестр и, если системного Node нет,
-        закачка портативного (44 МБ). GUI-Houdini на macOS не наследует PATH
-        шелла, так что node из homebrew она не видит и закачка — не редкий
-        случай, а типичный первый запуск. Всё это раньше шло на главном
-        потоке, и Houdini висела мёртво всю закачку — для художника это
-        неотличимо от «панель не работает». Теперь подготовка в фоне, панель
-        живёт и рассказывает, что происходит.
+        Preparing the spec means a registry round trip and, if no system
+        Node is found, downloading the portable one (44 MB). GUI Houdini on
+        macOS doesn't inherit the shell's PATH, so it never sees a homebrew
+        node, and a download on first launch is the typical case, not a rare
+        one. All of this used to run on the main thread, and Houdini hung
+        dead for the whole download — to an artist that's indistinguishable
+        from "the panel doesn't work." Now the prep happens in the
+        background, the panel stays alive and reports what's going on.
         """
         if self._launch_worker is not None and self._launch_worker.isRunning():
-            return  # уже готовим — повторный клик не должен плодить закачки
+            return  # already preparing — a repeat click must not pile up downloads
         self._pending_agent_label = self._display_label(agent_id)
-        self._note(f"Готовлю {self._pending_agent_label}…")
+        self._note(f"Preparing {self._pending_agent_label}…")
         worker = _LaunchPrepWorker(agent_id, self._settings, self)
         worker.note.connect(self._note)
         worker.ready.connect(self._on_launch_ready)
@@ -340,22 +350,23 @@ class AgentPanel(QtWidgets.QWidget):
         self._launch_worker = None
         if label:
             self._pending_agent_label = label
-        self._note(f"Запускаю {self._pending_agent_label}…")
+        self._note(f"Launching {self._pending_agent_label}…")
         shared_client().start(spec, cwd=scene.hip_dir())
 
     def _on_launch_prep_failed(self, message: str) -> None:
         self._launch_worker = None
         self._note(message)
-        self._show_page(self.PAGE_AGENTS)
+        self._open_agent_management()
 
     def _display_label(self, agent_id: str) -> str:
-        """Человеческое имя агента для чипа и ленты.
+        """Human-readable agent name for the chip and the feed.
 
-        Художник выбирает «Claude Agent», а не «@agentclientprotocol/
-        claude-agent-acp» — идентификаторы пакетов остаются в логах. Сеть
-        отсюда не зовём никогда: имя нужно мгновенно и на главном потоке,
-        поэтому реестр берётся только из уже приехавших данных, а для
-        шестёрки есть статичные имена на случай, когда реестр ещё не пришёл.
+        The artist picks "Claude Agent", not "@agentclientprotocol/
+        claude-agent-acp" — package identifiers stay in the logs. This never
+        hits the network: the name is needed instantly, on the main thread,
+        so the registry is only read from whatever has already arrived, and
+        the featured six get static names for when the registry hasn't
+        landed yet.
         """
         for custom in self._settings.custom_agents:
             if custom.id == agent_id:
@@ -365,15 +376,26 @@ class AgentPanel(QtWidgets.QWidget):
                 return entry.name
         return _FALLBACK_LABELS.get(agent_id, agent_id)
 
+    def _refresh_agent_chip_menu(self) -> None:
+        """Feed the header chip whatever is installed right now.
+
+        Order is install order — registry agents in `installed_agents` dict
+        order, then custom agents — deterministic, and it matches how the
+        agents section lists them.
+        """
+        ids = list(self._settings.installed_agents) + [c.id for c in self._settings.custom_agents]
+        items = [(agent_id, self._display_label(agent_id)) for agent_id in ids]
+        self._header.set_agent_menu(items, self._settings.default_agent)
+
     # ------------------------------------------------------------- client
 
     def _wire_client(self) -> None:
-        """Подписаться на общий клиент, запомнив КАЖДУЮ пару сигнал-слот.
+        """Subscribe to the shared client, remembering EVERY signal-slot pair.
 
-        Запоминаем именно пары, потому что клиент общий на все табы: голый
-        ``signal.disconnect()`` при закрытии одного таба отписал бы заодно и
-        соседний, и тот перестал бы получать ответы агента, продолжая
-        выглядеть живым.
+        We remember pairs specifically because the client is shared across
+        tabs: a bare ``signal.disconnect()`` when one tab closes would also
+        disconnect its neighbor, which would stop getting the agent's
+        replies while still looking alive.
         """
         client = shared_client()
         wiring = (
@@ -399,8 +421,8 @@ class AgentPanel(QtWidgets.QWidget):
         self._client_wiring = wiring
 
     def _on_connected(self, info: Any) -> None:
-        # В чипе — имя, которое выбирал художник, а не имя npm-пакета из
-        # initialize ("@agentclientprotocol/claude-agent-acp").
+        # The chip shows the name the artist picked, not the npm package
+        # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
@@ -416,11 +438,11 @@ class AgentPanel(QtWidgets.QWidget):
         if current is not None:
             self._finish_activity(current.session_id)
         self._composer.set_capabilities(None, self._settings.whisper_endpoint)
-        self._note(f"Агент отключился: {reason}" if reason else "Агент остановлен.")
+        self._note(f"Agent disconnected: {reason}" if reason else "Agent stopped.")
 
     def _on_failed(self, message: str) -> None:
-        self._note(f"Агент не запустился: {message}")
-        self._show_page(self.PAGE_AGENTS)
+        self._note(f"Agent failed to start: {message}")
+        self._open_agent_management()
 
     def _on_auth_required(self, methods: list) -> None:
         info = shared_client().agent_info()
@@ -491,7 +513,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_busy(False)
         self._finish_activity(session_id)
         if stop_reason and stop_reason not in ("end_turn", "cancelled"):
-            entry = self._model(session_id).append_error(f"Агент остановился: {stop_reason}")
+            entry = self._model(session_id).append_error(f"Agent stopped: {stop_reason}")
             self._touch(session_id, entry.id)
 
     def _on_error(self, session_id: str, message: str) -> None:
@@ -510,7 +532,7 @@ class AgentPanel(QtWidgets.QWidget):
     ) -> None:
         view = PermissionView(
             request_key=request_key,
-            tool_title=getattr(tool_call, "title", "") or "Действие агента",
+            tool_title=getattr(tool_call, "title", "") or "Agent action",
             options=[
                 (option.option_id, option.name, option.kind) for option in options
             ],
@@ -619,7 +641,7 @@ class AgentPanel(QtWidgets.QWidget):
             if agent_id:
                 self._start_agent(agent_id)
             else:
-                self._show_page(self.PAGE_AGENTS)
+                self._open_agent_management()
             return
         client.new_session(cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers())
 
@@ -631,15 +653,15 @@ class AgentPanel(QtWidgets.QWidget):
         return current is not None and current.session_id == session_id
 
     def _touch(self, session_id: str, entry_id: str) -> None:
-        """Перерисовать одну запись — и только если человек смотрит эту сессию.
+        """Redraw a single entry — only if the human is looking at this session.
 
-        Иначе стриминг в фоновой сессии заставлял бы Qt перекладывать виджеты
-        ленты, которую никто не видит.
+        Otherwise streaming into a background session would make Qt reflow a
+        feed nobody is watching.
         """
         if self._is_current(session_id):
             self._transcript.refresh(entry_id)
 
-    # ------------------------------------------------------------- ввод
+    # ------------------------------------------------------------- input
 
     def _on_submitted(self, blocks: list) -> None:
         current = self._pool.current()
@@ -681,22 +703,24 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings.buddy = buddy
         settings_mod.save(self._settings)
 
-    # ------------------------------------------------- оповещения и версии
+    # ------------------------------------------------- announcements and updates
 
     def _on_refresh_done(self, result: Any, entries: Any = ()) -> None:
-        # Экран «Агенты» сам в сеть не ходит: его `refresh_from_registry`
-        # синхронный, а значит на главном потоке заморозил бы Houdini ровно на
-        # время таймаута, если сети нет. Записи приезжают уже готовыми.
+        # The agents section doesn't hit the network itself: its
+        # `refresh_from_registry` is synchronous, so calling it from the
+        # main thread would freeze Houdini for the length of a network
+        # timeout when there's no network. Entries arrive already fetched.
         if entries:
             self._registry_entries = list(entries)
-        agents_view = getattr(self, "_agents_view", None)
-        if agents_view is not None and entries:
+        self._refresh_agent_chip_menu()
+        settings_view = getattr(self, "_settings_view", None)
+        if settings_view is not None and entries:
             from .. import registry
 
-            # Именно featured(), а не весь реестр: там под сорок записей, и
-            # вываливать их художнику значит подменить выбор списком, в котором
-            # он не разбирается. Всё остальное — через «Свой агент».
-            agents_view.set_agents(
+            # featured(), not the whole registry: that's pushing forty-odd
+            # entries at the artist, drowning the choice they can't make
+            # sense of. Anything else goes through "custom agent".
+            settings_view.set_agents(
                 registry.featured(entries),
                 updates=list(getattr(result, "updates", []) or []),
             )
@@ -735,8 +759,9 @@ class AgentPanel(QtWidgets.QWidget):
     def _remember_seen(self, announcement_id: str) -> None:
         if not announcement_id:
             return
-        # Тот же принцип, что в _on_agent_chosen: перечитать перед записью,
-        # иначе снимок панели затирает то, что другие экраны уже сохранили.
+        # Same principle as in _on_agent_chosen: reload before writing, or
+        # the panel's own snapshot would overwrite what other screens have
+        # already saved.
         self._settings = settings_mod.load()
         if announcement_id not in self._settings.seen_announcements:
             self._settings.seen_announcements.append(announcement_id)
@@ -746,28 +771,30 @@ class AgentPanel(QtWidgets.QWidget):
         shared_client().authenticate(method_id)
 
     def _on_logout_requested(self) -> None:
-        """Выход возвращает панель туда же, откуда пришёл вход.
+        """Logging out sends the panel back where sign-in came from.
 
-        Клиент после успешного logout поднимает `auth_required` с теми же
-        методами, что были в `initialize`, — экран входа покажется сам, и
-        отдельной ветки здесь не нужно. Если агент выйти не смог, придёт
-        `error`, и человек останется там же, где был: молча делать вид, что
-        вышли, нельзя.
+        After a successful logout, the client raises `auth_required` with
+        the same methods that came from `initialize` — the sign-in screen
+        shows up on its own, no separate branch needed here. If the agent
+        couldn't log out, an `error` arrives instead and the human stays
+        put: silently pretending the logout happened isn't an option.
         """
         shared_client().logout()
 
     def _ask_telemetry_consent_once(self) -> None:
-        """Спросить про телеметрию ровно один раз за всё время.
+        """Ask about telemetry exactly once, ever.
 
-        Флаг «спрашивали» пишется независимо от ответа — иначе человек,
-        отказавшийся один раз, получал бы тот же вопрос при каждом открытии
-        панели, а это уже не вопрос, а выклянчивание.
+        The "asked" flag is written regardless of the answer — otherwise
+        someone who said no once would get the same question every time
+        they open the panel, and that's not a question any more, it's
+        nagging.
         """
         if self._settings.telemetry_consent_asked:
             return
         self._consent.ask(
-            "Разрешить отправлять анонимную статистику? Только версии панели, "
-            "агента и ОС плюс факты падений. Никогда — сцены, промпты и пути."
+            "Allow sending anonymous usage stats? Only panel, agent, and OS "
+            "versions, plus the fact something crashed. Never scenes, "
+            "prompts, or paths."
         )
 
     def _on_telemetry_answer(self, allowed: bool) -> None:
@@ -780,17 +807,23 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings = settings_mod.load()
         info = shared_client().agent_info()
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
+        self._refresh_agent_chip_menu()
 
     def _on_agent_chosen(self, agent_id: str) -> None:
-        # Перечитать с диска ПЕРЕД записью — обязательно. self._settings — это
-        # снимок момента открытия панели, а экран «Агенты» пишет добавленного
-        # «своего агента» в файл напрямую. Сохранение снимка поверх стирало
-        # только что добавленного агента, и «добавил → нажал Использовать»
-        # падало с «агента нет ни в реестре, ни среди своих» (найдено живой
-        # проверкой в обеих Houdini).
+        """Switch the running agent — called from the header chip's menu.
+
+        Reload from disk BEFORE writing — mandatory. self._settings is a
+        snapshot from when the panel opened, and the agents section writes a
+        freshly-added custom agent straight to the file. Saving the stale
+        snapshot on top used to erase that agent, and "add a custom agent →
+        pick it right away" failed with "agent isn't in the registry or
+        among custom agents" (found only by testing live, in both Houdini
+        versions).
+        """
         self._settings = settings_mod.load()
         self._settings.default_agent = agent_id
         settings_mod.save(self._settings)
+        self._refresh_agent_chip_menu()
         client = shared_client()
         if client.is_running():
             client.stop()
@@ -806,14 +839,14 @@ class AgentPanel(QtWidgets.QWidget):
         else:
             self._touch(session_id, entry.id)
 
-    # ---------------------------------------------------------- завершение
+    # ---------------------------------------------------------- shutdown
 
     def shutdown(self) -> None:
-        """Закрытие ЭТОГО таба.
+        """Close THIS tab.
 
-        Соединение с агентом гасим только когда закрылся последний таб: пока
-        жив хоть один, разговор должен продолжаться. Иначе художник, закрывший
-        одну из двух панелей, терял бы обе.
+        The agent connection only goes down once the last tab closes: while
+        any tab is still alive, the conversation must keep going. Otherwise
+        an artist closing one of two panels would lose both.
         """
         if self._closed:
             return
