@@ -159,3 +159,45 @@ class BlockingNotice(QtWidgets.QWidget):
 
 
 __all__ = ["NoticeStrip", "BlockingNotice"]
+
+
+class ConsentStrip(QtWidgets.QWidget):
+    """Разовый вопрос художнику — сейчас единственный такой вопрос про телеметрию.
+
+    Строкой, а не модальным окном, сознательно. Диалог посреди Houdini
+    останавливает работу и заставляет отвечать немедленно, а вопрос
+    «поделишься ли ты анонимной статистикой» такого права не имеет. Строка
+    ждёт, ничего не блокирует и уходит после ответа.
+
+    Кнопки нарочно равнозначны по весу: у вопроса про сбор данных не должно
+    быть визуально «правильного» ответа, подталкивающего нажать согласие.
+    """
+
+    answered = Signal(bool)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+        self._label = QtWidgets.QLabel()
+        self._label.setWordWrap(True)
+
+        self._yes = QtWidgets.QPushButton("Разрешить")
+        self._no = QtWidgets.QPushButton("Не надо")
+        self._yes.clicked.connect(lambda: self._answer(True))
+        self._no.clicked.connect(lambda: self._answer(False))
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.addWidget(self._label, 1)
+        layout.addWidget(self._no)
+        layout.addWidget(self._yes)
+
+        self.setVisible(False)
+
+    def ask(self, question: str) -> None:
+        self._label.setText(question)
+        self.setVisible(True)
+
+    def _answer(self, allowed: bool) -> None:
+        self.setVisible(False)
+        self.answered.emit(allowed)

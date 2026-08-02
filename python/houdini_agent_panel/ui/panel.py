@@ -24,7 +24,7 @@ from typing import Any
 from .. import client as acp_client
 from .. import refresh, scene, sessions, settings as settings_mod
 from ..transcript_model import PermissionView, TranscriptModel
-from .announcement import BlockingNotice, NoticeStrip
+from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .composer import Composer
 from .qt import QtCore, QtWidgets, Signal
@@ -57,28 +57,46 @@ def reset_shared_state_for_tests() -> None:
 
 
 class _RefreshWorker(QtCore.QThread):
-    """Суточный поход за версиями и оповещениями — в стороне от главного потока.
+    """Один поход в сеть на все нужды панели, в стороне от главного потока.
 
     Отдельный поток, а не таймер с блокирующим вызовом: даже когда сети нет,
     urllib честно ждёт таймаут, и на главном потоке это выглядит как зависшая
     Houdini.
+
+    Реестр забирается здесь же, а не отдельно экраном «Агенты», по двум
+    причинам. Дизайн обещает один суточный запрос на версии, оповещения и
+    агентов. И без записей реестра `updates.check` физически не может сравнить
+    версии установленных агентов — плашка «есть обновление» появлялась бы
+    только для самой панели и fx, но никогда для того, чем художник
+    пользуется.
     """
 
-    done = Signal(object)
+    done = Signal(object, object)  # RefreshResult | None, list[AgentEntry]
 
     def __init__(self, current: settings_mod.Settings, parent=None) -> None:
         super().__init__(parent)
         self._settings = current
 
     def run(self) -> None:  # pragma: no cover - проверяется через refresh.py
+        entries: list = []
+        try:
+            from .. import registry
+
+            entries = registry.fetch_registry()
+        except Exception:  # noqa: BLE001 - без реестра панель обязана работать
+            entries = []
+
+        result = None
         try:
             result = refresh.daily_refresh(
                 settings=self._settings,
                 panel_version=settings_mod._panel_version(),
+                entries=entries,
             )
         except Exception:  # noqa: BLE001 - фид не имеет права ломать панель
-            return
-        self.done.emit(result)
+            result = None
+
+        self.done.emit(result, entries)
 
 
 class AgentPanel(QtWidgets.QWidget):
@@ -118,6 +136,7 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._header = HeaderBar(self)
         self._notice = NoticeStrip(self)
+        self._consent = ConsentStrip(self)
         self._pages = QtWidgets.QStackedWidget(self)
         self._composer = Composer(self)
         self._blocking = BlockingNotice(self)
@@ -130,6 +149,7 @@ class AgentPanel(QtWidgets.QWidget):
 
         layout.addWidget(self._header)
         layout.addWidget(self._notice)
+        layout.addWidget(self._consent)
         layout.addWidget(self._pages, 1)
         layout.addWidget(self._blocking)
         layout.addWidget(self._composer)
@@ -148,6 +168,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._notice.action_clicked.connect(self._on_notice_action)
         self._notice.dismissed.connect(self._on_notice_dismissed)
         self._blocking.action_clicked.connect(self._on_blocking_action)
+        self._consent.answered.connect(self._on_telemetry_answer)
 
     def _make_agents_view(self) -> QtWidgets.QWidget:
         from .agents import AgentsView
@@ -188,6 +209,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._refresh_worker = _RefreshWorker(self._settings, self)
         self._refresh_worker.done.connect(self._on_refresh_done)
         self._refresh_worker.start()
+        self._ask_telemetry_consent_once()
 
         client = shared_client()
         if client.is_running():
@@ -472,7 +494,16 @@ class AgentPanel(QtWidgets.QWidget):
 
     # ------------------------------------------------- оповещения и версии
 
-    def _on_refresh_done(self, result: Any) -> None:
+    def _on_refresh_done(self, result: Any, entries: Any = ()) -> None:
+        # Экран «Агенты» сам в сеть не ходит: его `refresh_from_registry`
+        # синхронный, а значит на главном потоке заморозил бы Houdini ровно на
+        # время таймаута, если сети нет. Записи приезжают уже готовыми.
+        agents_view = getattr(self, "_agents_view", None)
+        if agents_view is not None and entries:
+            agents_view.set_agents(
+                list(entries), updates=list(getattr(result, "updates", []) or [])
+            )
+
         for announcement in getattr(result, "announcements", []):
             if announcement.severity == "blocking":
                 self._blocking.show_notice(announcement)
@@ -508,6 +539,26 @@ class AgentPanel(QtWidgets.QWidget):
         if announcement_id and announcement_id not in self._settings.seen_announcements:
             self._settings.seen_announcements.append(announcement_id)
             settings_mod.save(self._settings)
+
+    def _ask_telemetry_consent_once(self) -> None:
+        """Спросить про телеметрию ровно один раз за всё время.
+
+        Флаг «спрашивали» пишется независимо от ответа — иначе человек,
+        отказавшийся один раз, получал бы тот же вопрос при каждом открытии
+        панели, а это уже не вопрос, а выклянчивание.
+        """
+        if self._settings.telemetry_consent_asked:
+            return
+        self._consent.ask(
+            "Разрешить отправлять анонимную статистику? Только версии панели, "
+            "агента и ОС плюс факты падений. Никогда — сцены, промпты и пути."
+        )
+
+    def _on_telemetry_answer(self, allowed: bool) -> None:
+        self._settings = settings_mod.load()
+        self._settings.telemetry = bool(allowed)
+        self._settings.telemetry_consent_asked = True
+        settings_mod.save(self._settings)
 
     def _on_settings_changed(self) -> None:
         self._settings = settings_mod.load()

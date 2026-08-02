@@ -208,3 +208,85 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
     assert widget._model(background.session_id).entries()
 
     widget.shutdown()
+
+
+def test_registry_reaches_the_agents_screen(qapp):
+    """Экран «Агенты» сам в сеть не ходит.
+
+    Его `refresh_from_registry` синхронный, и вызов с главного потока
+    заморозил бы Houdini ровно на время сетевого таймаута. Записи обязаны
+    приезжать готовыми из фонового обхода.
+    """
+    from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
+
+    widget = _make_panel(qapp)
+    entry = AgentEntry(
+        id="opencode",
+        name="OpenCode",
+        version="1.18.11",
+        binaries={"darwin-aarch64": BinaryDistribution(
+            archive="https://example.test/a.zip", cmd="./opencode", args=[], sha256="0" * 64
+        )},
+    )
+
+    shown = []
+    widget._agents_view.set_agents = lambda entries, updates=None: shown.append((entries, updates))
+
+    class _Result:
+        announcements: list = []
+        updates: list = []
+
+    widget._on_refresh_done(_Result(), [entry])
+
+    assert shown and shown[0][0] == [entry]
+    widget.shutdown()
+
+
+def test_telemetry_consent_asked_once_and_remembered(qapp):
+    """Отказ тоже запоминается.
+
+    Иначе человек, сказавший «не надо», получал бы тот же вопрос при каждом
+    открытии панели — это уже не вопрос, а выклянчивание.
+    """
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = _make_panel(qapp)
+    widget._boot()
+    assert widget._consent.isVisibleTo(widget)
+
+    widget._on_telemetry_answer(False)
+
+    saved = settings_mod.load()
+    assert saved.telemetry_consent_asked is True
+    assert saved.telemetry is False
+
+    widget.shutdown()
+
+    second = _make_panel(qapp)
+    second._boot()
+    assert not second._consent.isVisibleTo(second)
+    second.shutdown()
+
+
+def test_telemetry_consent_yes_turns_it_on(qapp):
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = _make_panel(qapp)
+    widget._on_telemetry_answer(True)
+
+    saved = settings_mod.load()
+    assert saved.telemetry is True
+    assert saved.telemetry_consent_asked is True
+
+    widget.shutdown()
+
+
+def test_consent_strip_does_not_block_input(qapp):
+    """Вопрос про статистику не имеет права мешать работать."""
+    widget = _make_panel(qapp)
+    widget._boot()
+
+    assert not widget._composer.is_input_blocked()
+    assert widget._transcript.isEnabled()
+
+    widget.shutdown()

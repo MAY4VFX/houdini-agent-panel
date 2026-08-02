@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..transcript_model import Entry, TranscriptModel
 from . import theme
 from .permissions import PermissionRow
@@ -20,6 +22,40 @@ from .qt import QtCore, QtGui, QtWidgets, Signal
 #: Сколько пикселей до низа ещё считается «внизу» — маленький запас на
 #: округления layout'а, чтобы автопрокрутка не отваливалась от одного пикселя.
 _BOTTOM_EPSILON = 4
+
+#: `QTextEdit.setMarkdown` есть с Qt 5.14 — в PySide2 5.15.15 (H20.5) и
+#: PySide6 6.8.3 (H22) он точно есть (facts/houdini.md §3), но проверяем
+#: динамически, а не полагаемся на версию: деградация на обычный текст лучше
+#: падения, если метод вдруг отсутствует в чьей-то сборке.
+_HAS_MARKDOWN = hasattr(QtWidgets.QTextEdit, "setMarkdown")
+
+#: Тройные бэктики — с необязательным языком на той же строке. Незакрытый
+#: fence (агент ещё не дострил ```` ``` ```` на конце стрима) матчится до
+#: конца строки — так частично пришедший код рендерится кодом, а не сырыми
+#: бэктиками посреди текста.
+_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\r?\n(.*?)(?:```|\Z)", re.DOTALL)
+
+
+def _split_markdown_segments(text: str) -> list[tuple[str, str]]:
+    """Разбить текст на чередующиеся куски ``("text", ...)`` / ``("code", ...)``.
+
+    Блок кода рендерится ОТДЕЛЬНЫМ виджетом с собственной горизонтальной
+    прокруткой и без переноса строк (иначе ломается отступ VEX/питона) —
+    поэтому он не может быть просто частью общего markdown-документа прозы,
+    у которого перенос по словам должен работать как обычно.
+    """
+    segments: list[tuple[str, str]] = []
+    pos = 0
+    for match in _CODE_FENCE_RE.finditer(text):
+        before = text[pos : match.start()]
+        if before.strip():
+            segments.append(("text", before))
+        segments.append(("code", match.group(1)))
+        pos = match.end()
+    tail = text[pos:]
+    if tail.strip() or not segments:
+        segments.append(("text", tail))
+    return segments
 
 
 class TranscriptView(QtWidgets.QScrollArea):
@@ -134,39 +170,158 @@ class TranscriptView(QtWidgets.QScrollArea):
 
 
 class _MessageRow(QtWidgets.QWidget):
-    """Сообщение (user/agent/thought) или ошибка — без рамок, текст выделяется мышью."""
+    """Сообщение (user/agent/thought) или ошибка — без рамок, текст выделяется мышью.
+
+    Автор реплики должен читаться с одного взгляда, без вчитывания (design.md
+    просит именно «без рамок», поэтому различаем цветом/отступом, не боксом):
+    реплика человека — приглушённым цветом палитры и с отступом слева, ответ
+    агента — обычным цветом на всю ширину, размышление — курсивом и тоже
+    приглушённое, но без отступа (это не вопрос человека, а мысль агента).
+
+    Текст рендерится через `QTextDocument.setMarkdown` — агент присылает
+    markdown (бэктики, **жирный**, списки, ```code```) постоянно, и это
+    единственный путь показать его отформатированным, не скармливая
+    недоверенный текст агента в `setHtml` напрямую. Блоки кода вырезаются из
+    markdown и рендерятся отдельными моноширинными виджетами со своей
+    горизонтальной прокруткой — прозу это не касается, она просто переносится
+    по словам.
+    """
 
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._label = QtWidgets.QLabel(self)
-        self._label.setWordWrap(True)
-        self._label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        layout.addWidget(self._label)
-
-        self._apply_kind_style(entry.kind)
-        self._set_text(entry.text)
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self._layout.setSpacing(theme.SPACING_TIGHT)
+        self._apply_kind_margins(entry.kind)
+        self._segments: list[QtWidgets.QWidget] = []
+        self.update_from(entry)
 
     def update_from(self, entry: Entry) -> None:
-        self._set_text(entry.text)
+        segments = _split_markdown_segments(entry.text)
 
-    def _set_text(self, text: str) -> None:
-        self._label.setText(text)
+        # Стриминг чаще всего просто дописывает текст в последний кусок, не
+        # меняя число/тип кусков — тогда достаточно обновить содержимое на
+        # месте, не пересоздавая виджеты (та же логика, что и у остальной
+        # ленты: патчим, а не строим заново).
+        same_shape = len(segments) == len(self._segments) and all(
+            isinstance(widget, _CodeBlock) == (kind == "code")
+            for widget, (kind, _content) in zip(self._segments, segments)
+        )
+        if same_shape:
+            for widget, (kind, content) in zip(self._segments, segments):
+                if kind == "code":
+                    widget.set_code(content)
+                else:
+                    widget.set_text(content)
+            return
 
-    def _apply_kind_style(self, kind: str) -> None:
-        font = self._label.font()
-        palette = self._label.palette()
+        for widget in self._segments:
+            self._layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        self._segments = []
+
+        for kind, content in segments:
+            if kind == "code":
+                widget = _CodeBlock(content, self)
+            else:
+                widget = _ProseBlock(self)
+                self._apply_kind_style(widget, entry.kind)
+                widget.set_text(content)
+            self._segments.append(widget)
+            self._layout.addWidget(widget)
+
+    def _apply_kind_margins(self, kind: str) -> None:
+        # Отступ — визуальный маркер «это ввёл человек», без рамок и боксов.
+        indent = theme.SPACING * 4 if kind == "user" else 0
+        self._layout.setContentsMargins(indent, 0, 0, 0)
+
+    def _apply_kind_style(self, widget: "_ProseBlock", kind: str) -> None:
+        font = widget.font()
+        palette = widget.palette()
+        if kind in ("user", "thought"):
+            # И реплика человека, и мысль агента — приглушённые: первая явно
+            # видна по отступу, вторая — курсивом ниже.
+            palette.setColor(QtGui.QPalette.Text, theme.status_color("pending"))
         if kind == "thought":
-            # Мысль агента — приглушённая и курсивом, чтобы не спорить взглядом
-            # с обычным текстом ответа.
             font.setItalic(True)
-            palette.setColor(QtGui.QPalette.WindowText, theme.status_color("pending"))
         elif kind == "error":
             font.setBold(True)
-        self._label.setFont(font)
-        self._label.setPalette(palette)
+        widget.setFont(font)
+        widget.setPalette(palette)
+
+
+class _ProseBlock(QtWidgets.QTextBrowser):
+    """Кусок markdown-прозы сообщения — без рамки, с переносом по словам.
+
+    Высота подгоняется под содержимое: внутренний вертикальный скролл не
+    нужен, лента и так скроллится целиком (`TranscriptView`), а свой скролл
+    внутри строки сообщения был бы лишним уровнем прокрутки.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setReadOnly(True)
+        # Ссылки — во внешний браузер: панель не файловый менеджер и не веб-вьюер.
+        self.setOpenExternalLinks(True)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        # Без собственной заливки — фон ленты просвечивает, никакого бокса.
+        self.setAutoFillBackground(False)
+        self.viewport().setAutoFillBackground(False)
+        self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
+
+    def set_text(self, text: str) -> None:
+        if _HAS_MARKDOWN:
+            self.setMarkdown(text)
+        else:  # pragma: no cover — на всех целевых Qt (5.14+, см. facts/houdini.md §3) есть
+            self.setPlainText(text)
+        self._sync_height()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.document().setTextWidth(self.viewport().width())
+        self._sync_height()
+
+    def _sync_height(self, *_args: object) -> None:
+        self.setFixedHeight(max(int(self.document().size().height()) + 4, 1))
+
+
+class _CodeBlock(QtWidgets.QPlainTextEdit):
+    """Блок кода из ```fence``` — моноширинный, своя горизонтальная прокрутка.
+
+    `NoWrap` намеренно: перенос сломал бы отступы VEX/питона. Длинная строка
+    скроллится ВНУТРИ этого виджета (`sizeHint()` у `QPlainTextEdit` не растёт
+    от длины документа — см. `_sync_height`, ширину задаёт только layout), а
+    не раздвигает панель по горизонтали — снаружи `TranscriptView` держит
+    `ScrollBarAlwaysOff` именно ради этого.
+    """
+
+    def __init__(self, code: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFont(theme.monospace_font())
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        palette = self.palette()
+        # Едва заметная подложка — из палитры (роль именно для такого
+        # «альтернативного» блока), не рамка и не хардкод-цвет: просто
+        # отличает код от прозы вокруг него.
+        palette.setColor(QtGui.QPalette.Base, theme.palette().color(QtGui.QPalette.AlternateBase))
+        self.setPalette(palette)
+        self.set_code(code)
+
+    def set_code(self, code: str) -> None:
+        self.setPlainText(code.rstrip("\n"))
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        lines = max(self.document().blockCount(), 1)
+        self.setFixedHeight(lines * self.fontMetrics().lineSpacing() + 8)
 
 
 class _ToolCallRow(QtWidgets.QWidget):

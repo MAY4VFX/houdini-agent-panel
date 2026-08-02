@@ -97,7 +97,7 @@ def test_refresh_entry_id_patches_streaming_chunk_in_place(qapp):
 
     row_after = view._rows[entry.id]
     assert row_after is row_before  # не пересоздан
-    assert row_after._label.text() == "Привет, мир"
+    assert row_after._segments[0].toPlainText() == "Привет, мир"
 
 
 def test_refresh_unrelated_entry_id_does_not_touch_other_rows(qapp):
