@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -193,3 +194,21 @@ def _npx_cli_path(node_bin: Path) -> Path:
     if real.name.lower() == "node.exe" or sys.platform == "win32" and real.suffix.lower() == ".exe":
         return real.parent / "node_modules" / "npm" / "bin" / "npx-cli.js"
     return real.parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js"
+
+
+def path_with_node(node_bin: Path, base: str | None = None) -> str:
+    """PATH, в начале которого лежит каталог с нашим `node`.
+
+    Нужно не нам, а самому npm: `npx-cli.js` порождает дочерние процессы
+    командой `node` и ищет её в PATH. Без этого агент на машине без Node
+    умирает до первого байта, а клиент видит только «соединение закрыто» —
+    диагностировать это со стороны панели практически нечем.
+
+    Дописываем в начало к тому PATH, который уже есть, а не заменяем его:
+    агенту могут понадобиться и другие инструменты с машины, и отбирать их
+    у него мы не собираемся.
+    """
+    node_dir = str(node_bin.parent)
+    existing = base if base is not None else os.environ.get("PATH", "")
+    parts = [node_dir] + [part for part in existing.split(os.pathsep) if part and part != node_dir]
+    return os.pathsep.join(parts)

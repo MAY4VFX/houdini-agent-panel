@@ -272,10 +272,22 @@ def _make_executable(path: Path) -> None:
 
 
 def _npx_launch_spec(node_bin: Path, dist: NpxDistribution) -> LaunchSpec:
+    """Команда запуска npx-агента вместе с PATH до нашего Node.
+
+    Звать `npx-cli.js` нашим `node` недостаточно, хотя выглядит достаточным:
+    `npx-cli.js` сам порождает дочерние процессы командой `node`, то есть
+    ищет его в PATH. На машине без Node это падает мгновенно и молча —
+    процесс агента умирает до первого байта, а клиент видит только
+    `ConnectionError: Connection closed` (проверено запуском с урезанным
+    PATH). Поэтому каталог нашего Node уезжает в PATH процесса агента —
+    и только его: система не трогается, это ровно то, что обещано в дизайне.
+    """
     from . import node as node_module
 
     args = node_module.npx_argv(node_bin, dist.package, dist.args)
-    return LaunchSpec(command=args[0], args=args[1:], env=dict(dist.env))
+    env = dict(dist.env)
+    env["PATH"] = node_module.path_with_node(node_bin, env.get("PATH"))
+    return LaunchSpec(command=args[0], args=args[1:], env=env)
 
 
 def _binary_launch_spec(version_dir: Path, dist: BinaryDistribution) -> LaunchSpec:
