@@ -11,3 +11,5 @@ wheels/
 # dev
 .venv/
 logs/
+
+dist/

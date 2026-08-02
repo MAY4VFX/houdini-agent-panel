@@ -28,9 +28,26 @@ Claude Agent, Codex, Gemini CLI, Grok Build, Kimi CLI, OpenCode — плюс «�
 
 ## Установка
 
+Одной командой, ничего заранее ставить не надо:
+
 ```bash
-pip install houdini-agent-panel
-python -m houdini_agent_panel install --agents opencode
+curl -fsSL https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.sh | sh -s -- --agents opencode
+```
+
+Windows, PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.ps1 | iex
+```
+
+Скрипт находит, чем запустить пакет (`uvx`, `pipx`), а если нечем — приносит
+`uv` одним статическим бинарём в домашнюю папку, без прав root и без пакетного
+менеджера системы. В систему он ничего больше не кладёт.
+
+Если `uv` или `pipx` уже есть, команда короче и скрипт не нужен:
+
+```bash
+uvx --from houdini-agent-panel python -m houdini_agent_panel install --agents opencode
 ```
 
 Перезапустить Houdini → панель появится в меню панелей (Tab → Python Panels → Agent).
