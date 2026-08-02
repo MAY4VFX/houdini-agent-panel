@@ -619,3 +619,61 @@ def executeInMainThreadWithResult(code, *args, **kwargs):
 - В `hou.py` не найден метод вида `hou.ui.qtStyleSheet()` — если он
   существует, он не встретился при grep по этому файлу; не утверждаю ни
   наличие, ни отсутствие сверх этого.
+
+---
+
+## 9. asyncio внутри Houdini — `haio` (найдено при интеграции, ломает наивный QThread)
+
+Houdini подменяет политику asyncio своей: `asyncio.get_event_loop_policy()`
+возвращает `haio.HoudiniEventLoopPolicy`, а `asyncio.new_event_loop()` —
+`haio.HoudiniEventLoop`. Проверено запуском в обеих версиях
+(`python3.11libs/haio.py`, `python3.13libs/haio.py`).
+
+Два следствия, каждое ломает клиент, написанный «как обычно»:
+
+**1. Цикл Houdini работает только на главном потоке.**
+```
+RuntimeError: Current thread is not the main thread
+  haio.py(116): check_thread
+  haio.py(2116): run_forever
+```
+То есть `asyncio.new_event_loop()` + `run_forever()` на рабочем QThread падает.
+Лечится тем, что класс цикла берётся напрямую, минуя политику:
+```python
+loop = asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.SelectorEventLoop()
+```
+
+**2. Подпроцесс через `asyncio.create_subprocess_exec` не поднимается.**
+Стоковый `_UnixSelectorEventLoop._make_subprocess_transport` идёт за child
+watcher через политику, а у Houdini она его не даёт:
+```
+  asyncio/unix_events.py(202): watcher = events.get_child_watcher()
+  asyncio/events.py(842): return get_event_loop_policy().get_child_watcher()
+  haio.py(3084): raise NotImplementedError
+```
+Значит `acp.spawn_agent_process()` внутри Houdini не работает — он построен
+именно на `create_subprocess_exec`.
+
+Рабочий обход, проверенный запуском в Houdini 22.0.368 и 20.5.445: поднимать
+процесс обычным `subprocess.Popen`, а его каналы заводить в цикл публичным
+API, которому watcher не нужен:
+```python
+proc = subprocess.Popen(argv, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=env, cwd=cwd)
+
+reader = asyncio.StreamReader(limit=50 * 1024 * 1024, loop=loop)
+await loop.connect_read_pipe(
+    lambda: asyncio.StreamReaderProtocol(reader, loop=loop), proc.stdout)
+transport, protocol = await loop.connect_write_pipe(
+    lambda: asyncio.streams.FlowControlMixin(loop=loop), proc.stdin)
+writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+
+conn = acp.connect_to_agent(client, writer, reader)   # байтовая форма
+```
+`connect_to_agent` принимает пару StreamWriter/StreamReader — это
+задокументированная форма вызова (см. [`acp-sdk.md`](acp-sdk.md) §1), так что
+обход остаётся на публичном API SDK.
+
+Почему это не поймали юнит-тесты: вне Houdini политика стоковая, и оба вызова
+работают. Тест, который ловит регрессию, обязан подставлять политику,
+имитирующую `haio` — падающую на `run_forever()` не в главном потоке и
+бросающую `NotImplementedError` из `get_child_watcher()`.
