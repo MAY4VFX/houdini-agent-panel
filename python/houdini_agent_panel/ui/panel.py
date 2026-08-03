@@ -195,7 +195,26 @@ class _LaunchPrepWorker(QtCore.QThread):
                     f"{entry.name}: no system Node found, fetching the portable one — "
                     "first launch may take a minute…"
                 )
-            spec = runtime.launch_spec(entry)
+            # `install_agent`, not the cheaper-looking `launch_spec`: for an
+            # already-installed agent (the overwhelming common case — the
+            # chip only ever lists what `installed_agents` already has) it's
+            # exactly `launch_spec` underneath, same cost — `install_agent`'s
+            # very first line is `if is_installed(entry): return
+            # launch_spec(entry)`. The difference only shows up for an agent
+            # that can run without ever having gone through our own install
+            # bookkeeping: an npx agent launches fine on nothing but npx's
+            # own on-demand fetch, so `launch_spec` alone left the manifest
+            # (and therefore the Settings screen and the update check, both
+            # of which read it — see `_installed_record`/`check_updates`)
+            # permanently believing it was never installed, no matter how
+            # long it had actually been running. `install_agent` writes that
+            # manifest as a side effect (for npx: `ensure_node` + one write,
+            # no extra network — npx still does the real package fetch), so
+            # the manifest stays the single source of truth for "is this
+            # here" regardless of which door the agent came in through.
+            if not runtime.is_installed(entry):
+                self.note.emit(f"{entry.name}: installing…")
+            spec = runtime.install_agent(entry)
             self.ready.emit(spec, entry.name)
         except Exception as exc:  # noqa: BLE001 - the reason goes to the feed
             self.prep_failed.emit(f"Could not prepare agent {agent_id}: {exc}")

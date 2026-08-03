@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
-from . import paths
+from . import paths, runtime
 from .network import Fetcher, NetworkError, fetch_json
 from .settings import Settings
 
@@ -294,16 +294,25 @@ def check(
     updates: list[Update] = []
 
     for entry in entries:
-        installed = settings.installed_agents.get(entry.id)
-        if installed is None:
+        # The manifest (`runtime.installed_version`), not `settings.
+        # installed_agents`: those two can disagree — an npx agent launches
+        # fine on nothing but npx's own on-demand fetch, and used to leave
+        # no manifest behind at all despite `settings` remembering it —
+        # and whichever one this reads becomes what the artist sees, while
+        # the Settings screen's own agent rows already read the manifest
+        # (`ui/agents.py::_installed_record`). Reading a different source
+        # here is exactly how the header, the Settings row, and this banner
+        # ended up able to disagree about the same agent.
+        current_version = runtime.installed_version(entry.id)
+        if current_version is None:
             continue
-        if is_newer(entry.version, installed.version):
+        if is_newer(entry.version, current_version):
             updates.append(
                 Update(
                     kind="agent",
                     target=entry.id,
                     label=f"{entry.name} {entry.version}",
-                    current=installed.version,
+                    current=current_version,
                     latest=entry.version,
                 )
             )

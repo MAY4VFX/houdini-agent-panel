@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from houdini_agent_panel import updates
+from houdini_agent_panel import runtime, updates
 from houdini_agent_panel.registry import AgentEntry
 from houdini_agent_panel.settings import InstalledAgent, Settings
 
@@ -71,6 +71,11 @@ def test_check_disabled_makes_no_network_call(fetcher):
 
 def test_check_detects_agent_update(fetcher):
     settings = Settings(check_updates=True)
+    # The manifest is what `check()` now reads (see updates.py) — the
+    # settings record is set too, matching what a real install/update
+    # leaves behind, but it's the manifest write that actually drives this.
+    installed_entry = AgentEntry(id="claude-acp", name="Claude Agent", version="1.0.0")
+    runtime._write_manifest(installed_entry, kind="npx")
     settings.installed_agents["claude-acp"] = InstalledAgent(
         agent_id="claude-acp", version="1.0.0", kind="npx"
     )
@@ -100,6 +105,33 @@ def test_check_skips_not_installed_agent(fetcher):
     )
 
     assert [u for u in result if u.kind == "agent"] == []
+
+
+def test_check_reads_the_manifest_not_settings_when_they_disagree(fetcher):
+    """A real bug, found live: an npx agent can run for a long time on
+    nothing but npx's own on-demand fetch, with `settings.installed_agents`
+    remembering one version while the manifest — the thing the Settings
+    screen's own row already trusts (`ui/agents.py::_installed_record`) —
+    disagrees or is missing outright. Whichever this reads becomes what the
+    update banner claims, and reading a different source than the Settings
+    row is exactly how they end up disagreeing about the same agent.
+    """
+    settings = Settings(check_updates=True)
+    # settings.installed_agents says nothing at all about this agent — the
+    # exact state found on a real machine (settings record gone, manifest
+    # gone too) — yet the manifest is what decides here.
+    installed_entry = AgentEntry(id="claude-acp", name="Claude Agent", version="1.0.0")
+    runtime._write_manifest(installed_entry, kind="npx")
+    entry = AgentEntry(id="claude-acp", name="Claude Agent", version="1.2.0")
+
+    result = updates.check(
+        settings=settings, entries=[entry], fetch=fetcher, panel_version="0.1.0", fx_version="2.10.0"
+    )
+
+    agent_updates = [u for u in result if u.kind == "agent"]
+    assert len(agent_updates) == 1
+    assert agent_updates[0].current == "1.0.0"
+    assert agent_updates[0].latest == "1.2.0"
 
 
 # --- check(): panel/fx via PyPI ----------------------------------------

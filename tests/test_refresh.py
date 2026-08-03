@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from houdini_agent_panel import announcements, refresh, updates
+from houdini_agent_panel import announcements, refresh, runtime, updates
 from houdini_agent_panel.registry import AgentEntry
 from houdini_agent_panel.settings import InstalledAgent, Settings
 
@@ -66,6 +66,9 @@ def test_both_enabled_combines_results(fetcher):
     settings = Settings(check_updates=True, show_announcements=True)
 
     entry = AgentEntry(id="claude-acp", name="Claude Agent", version="2.0.0")
+    # updates.check() reads "currently installed" from the manifest, not
+    # from settings — see updates.py.
+    runtime._write_manifest(AgentEntry(id="claude-acp", name="Claude Agent", version="1.0.0"), kind="npx")
     settings.installed_agents["claude-acp"] = InstalledAgent(
         agent_id="claude-acp", version="1.0.0", kind="npx"
     )

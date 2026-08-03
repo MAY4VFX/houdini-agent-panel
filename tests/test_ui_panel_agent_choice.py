@@ -13,8 +13,11 @@ another session.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from houdini_agent_panel import registry, runtime
 from houdini_agent_panel import settings as settings_mod
 from houdini_agent_panel.ui import panel as panel_mod
 
@@ -65,6 +68,48 @@ def test_choosing_a_just_added_custom_agent_does_not_erase_it(qapp, monkeypatch)
     assert [a.id for a in widget._settings.custom_agents] == ["custom:my"]
 
     widget.shutdown()
+
+
+def test_launching_an_npx_agent_writes_its_manifest(monkeypatch):
+    """Root cause behind a real "the Update button does nothing" report:
+    an npx agent runs fine on nothing but npx's own on-demand fetch, so the
+    old `_LaunchPrepWorker` — which called `runtime.launch_spec` directly —
+    could leave it running for a long time without ever writing a manifest.
+    The Settings screen's agent row and the update banner both end up
+    trusting the manifest (`ui/agents.py::_installed_record`,
+    `updates.py::check`), so "not installed" while it's plainly running was
+    the visible result. Preparing the launch through `runtime.install_agent`
+    instead fixes this — cheap/no-op for anything already installed, since
+    `install_agent`'s own first line is `if is_installed(entry): return
+    launch_spec(entry)`.
+    """
+    entry = registry.AgentEntry(
+        id="npx-agent",
+        name="Npx Agent",
+        version="1.0.0",
+        npx=registry.NpxDistribution(package="@test/agent@1.0.0", args=["--acp"]),
+    )
+    monkeypatch.setattr(registry, "fetch_registry", lambda **k: [entry])
+    monkeypatch.setattr("houdini_agent_panel.node.ensure_node", lambda **k: Path("/fake/node"))
+    monkeypatch.setattr(
+        "houdini_agent_panel.node.npx_argv",
+        lambda node_bin, package, args: [str(node_bin), "/fake/npx-cli.js", "--yes", package, *args],
+    )
+
+    assert runtime.installed_version("npx-agent") is None  # never installed, same as the real bug
+
+    worker = panel_mod._LaunchPrepWorker("npx-agent", settings_mod.Settings())
+    ready_calls = []
+    prep_failed_calls = []
+    worker.ready.connect(lambda spec, name: ready_calls.append((spec, name)))
+    worker.prep_failed.connect(prep_failed_calls.append)
+    worker.run()  # synchronous — this is testing the worker's logic, not real threading
+
+    assert prep_failed_calls == []
+    assert len(ready_calls) == 1
+    assert runtime.installed_version("npx-agent") == "1.0.0", (
+        "launching it must leave the same manifest an explicit Install/Update would"
+    )
 
 
 def test_remember_seen_does_not_clobber_concurrent_settings_writes(qapp):
