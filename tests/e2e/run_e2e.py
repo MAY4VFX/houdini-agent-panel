@@ -37,6 +37,7 @@ clobbered real install records on a developer's own machine.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -84,6 +85,7 @@ _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 from houdini_agent_panel import (  # noqa: E402
     conversations_store,
     logbook,
+    paths,
     registry,
     runtime,
     scene,
@@ -121,11 +123,23 @@ class Harness:
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
         self.panel: panel_mod.AgentPanel | None = None
+        self._restore_agent: str = ""
+        self._restore_autostart: bool = False
         self.events: dict = {"chunks": [], "tools": [], "notes": [], "stderr": []}
 
     def __enter__(self) -> "Harness":
         panel_mod.reset_shared_state_for_tests()
+        # This run drives the REAL settings file — that is the point, it
+        # exercises the installed build the way an artist has it. What it may
+        # not do is keep the changes. Pointing `default_agent` at whatever
+        # agent is under test and forcing autostart, and then leaving both
+        # that way, silently re-pointed the panel of the person whose machine
+        # this is: they open Houdini later and get an agent they never chose.
+        # Whatever it was is put back in `__exit__`, including when a check
+        # fails — especially then.
         current = settings_mod.load()
+        self._restore_agent = current.default_agent
+        self._restore_autostart = current.autostart_agent
         current.default_agent = self.agent_id
         current.autostart_agent = True
         settings_mod.save(current)
@@ -149,6 +163,16 @@ class Harness:
             self.panel.shutdown()
         panel_mod.reset_shared_state_for_tests()
         _app.processEvents()
+        # Give the machine's owner their own settings back. Read fresh rather
+        # than written from a snapshot: the run may legitimately have changed
+        # other fields (an install records itself), and those must survive.
+        try:
+            current = settings_mod.load()
+            current.default_agent = self._restore_agent
+            current.autostart_agent = self._restore_autostart
+            settings_mod.save(current)
+        except Exception as exc:  # noqa: BLE001 - report, never mask the check's own failure
+            print(f"  ! could not restore settings: {exc}")
 
     # --- steps shared by several checks
 
@@ -358,6 +382,165 @@ def check_two_panels_share_one_agent(agent_id: str) -> str:
             second.shutdown()
 
 
+def check_two_tabs_independent_current(agent_id: str) -> str:
+    """Issue #21: two tabs share one agent connection, but not which
+    conversation is on screen. Switching in one must never move the other.
+
+    `SessionPool` used to own a single shared "current" field, so this only
+    showed up when two tabs were on DIFFERENT conversations and one of them
+    switched to a THIRD (or to the other's) — anything less doesn't
+    distinguish the bug from the fix, which is why the sequence below
+    deliberately drives tab 2 onto tab 1's conversation first, then moves
+    tab 1 away.
+    """
+    with Harness(agent_id) as h:
+        h.connect()
+        session_a = h.open_session()
+
+        second_events: dict = {}
+        panel_mod.shared_client().session_started.connect(
+            lambda sid, _s: second_events.setdefault("session", sid)
+        )
+        second = panel_mod.AgentPanel()
+        _app.processEvents()  # fires _boot() -> _adopt_running_client() -> a fresh session, since it has none yet
+        try:
+            wait_for(
+                lambda: "session" in second_events, CONNECT_TIMEOUT_MS, "the second tab's own session"
+            )
+            session_b = second_events["session"]
+            if session_b == session_a:
+                raise Failure("the second tab ended up on tab 1's session instead of getting its own")
+            if second._current_session_id != session_b:
+                raise Failure("the second tab did not default to the session it just opened")
+
+            second._set_current_session(session_a)  # tab 2 deliberately looks at tab 1's conversation
+            h.panel._set_current_session(session_b)  # tab 1 switches away — a real move, not a no-op
+            if second._current_session_id != session_a:
+                raise Failure("switching tab 1's conversation moved tab 2's too")
+            return "tab 1 switching conversations left tab 2's own choice untouched"
+        finally:
+            second.shutdown()
+
+
+def check_launch_writes_manifest(agent_id: str) -> str:
+    """The exact real-world discrepancy that made an agent vanish from the
+    switcher: it can run perfectly while our own bookkeeping says "not
+    installed", because launching used to write nothing (see the #20/#21
+    commits and docs/facts/houdini.md). Simulated here by removing the
+    manifest before a normal connect — the same state a machine reaches
+    naturally the first time an npx agent runs without ever going through
+    the explicit Install button.
+
+    A binary-kind agent will pay for a real re-download here, not a no-op —
+    `is_installed()` only trusts the manifest, so removing it makes the next
+    launch redo the extract. That is the real mechanism being verified, not
+    an accident to work around.
+    """
+    manifest_path = paths.agent_dir(agent_id) / "manifest.json"
+    backup = manifest_path.read_bytes() if manifest_path.exists() else None
+    try:
+        if manifest_path.exists():
+            manifest_path.unlink()
+        runtime.reset_manifest_cache_for_tests()
+
+        with Harness(agent_id) as h:
+            h.connect()
+
+        version = runtime.installed_version(agent_id)
+        if version is None:
+            raise Failure("launching the agent did not leave a manifest behind")
+        return f"manifest present after an ordinary launch: version {version}"
+    finally:
+        # Only restores the backup if the real launch above did NOT write a
+        # fresh manifest of its own — leaving the just-verified real state in
+        # place is correct; only a failed run should be repaired here, so
+        # this check never leaves the agent looking uninstalled afterwards.
+        if not manifest_path.exists() and backup is not None:
+            manifest_path.write_bytes(backup)
+        runtime.reset_manifest_cache_for_tests()
+
+
+def check_session_close_on_delete(agent_id: str) -> str:
+    """Deleting a conversation must hand its session back — `session/close`
+    actually sent, not just forgotten locally. An agent that never declared
+    `sessionCapabilities.close` makes that impossible, and the check has to
+    say so plainly rather than pass quietly: a check that cannot tell "sent"
+    from "the agent can't do this" is worse than no check at all.
+
+    Verified through the on-disk log (`client.py`'s `do_close_session` logs
+    both outcomes), not by assuming the client-side call succeeding means
+    the request reached the agent — those are different claims.
+    """
+    log_records: list[str] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(record.getMessage())
+
+    handler = _Collector()
+    client_logger = logging.getLogger("houdini_agent_panel.client")
+    client_logger.addHandler(handler)
+    stored_title = "E2E session-close check"
+    try:
+        with Harness(agent_id) as h:
+            h.connect()
+            session_id = h.open_session()
+            h.panel._pool.get(session_id).title = stored_title
+            h.panel._model(session_id).append_user("closing this on purpose")
+            h.panel._on_session_removed(session_id)
+
+            wait_for(
+                lambda: any("session/close" in r for r in log_records),
+                15_000,
+                "session/close to be either sent or explicitly skipped",
+            )
+            sent = [r for r in log_records if "session/close sent" in r]
+            skipped = [r for r in log_records if "session/close skipped" in r]
+            if sent:
+                return "session/close sent and logged"
+            if skipped:
+                return "agent has no sessionCapabilities.close — session/close correctly not sent"
+            raise Failure(f"neither sent nor skipped was logged: {log_records}")
+    finally:
+        client_logger.removeHandler(handler)
+        stored = conversations_store.load()
+        remaining = [c for c in stored if c.title != stored_title]
+        if len(remaining) != len(stored):
+            conversations_store.save(remaining, active_id=conversations_store.load_active_id())
+
+
+def check_conversations_scoped_to_scene(agent_id: str) -> str:
+    """A conversation belongs to the scene ($HIP) it happened in — opening
+    a different scene must not show it (see the `fa349f3`/scene-scoping
+    fix)."""
+    real_hip_dir = scene.hip_dir
+    original_active_id = conversations_store.load_active_id()
+    scene_a = "/tmp/hap-e2e-scene-a"
+    scene_b = "/tmp/hap-e2e-scene-b"
+    stored_title = "E2E scene-scoping check"
+    try:
+        scene.hip_dir = lambda: scene_a
+        with Harness(agent_id) as h:
+            h.connect()
+            session_id = h.open_session()
+            h.panel._pool.get(session_id).title = stored_title
+            h.panel._model(session_id).append_user("only visible in scene A")
+            h.panel._persist_conversations()
+
+        scene.hip_dir = lambda: scene_b
+        with Harness(agent_id) as h2:
+            h2.connect()
+            h2.open_session()
+            titles = [s.title for s in h2.panel._pool.all()]
+            if stored_title in titles:
+                raise Failure("a conversation saved in a different scene was visible here")
+            return "a conversation saved in one scene stays hidden when $HIP points elsewhere"
+    finally:
+        scene.hip_dir = real_hip_dir
+        remaining = [c for c in conversations_store.load() if c.title != stored_title]
+        conversations_store.save(remaining, active_id=original_active_id)
+
+
 CHECKS = {
     "connect": check_connect,
     "session": check_session,
@@ -370,6 +553,10 @@ CHECKS = {
     "options": check_config_options,
     "signin": check_sign_in_reachable,
     "panels": check_two_panels_share_one_agent,
+    "panels_independent": check_two_tabs_independent_current,
+    "manifest": check_launch_writes_manifest,
+    "close": check_session_close_on_delete,
+    "scene": check_conversations_scoped_to_scene,
 }
 
 

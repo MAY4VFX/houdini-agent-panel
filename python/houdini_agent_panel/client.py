@@ -822,9 +822,15 @@ class AcpWorker(QtCore.QThread):
             return
         info = self._agent_info
         if info is not None and not info.supports_close_session:
+            # Logged, not just silently skipped: this is the one place that
+            # can tell "the agent doesn't implement it" apart from "it was
+            # sent and we don't know if it landed" — e2e (`run_e2e.py`)
+            # reads this line rather than assume a quiet return means success.
+            _log.info("session/close skipped for %s: agent has no sessionCapabilities.close", session_id)
             return
         try:
             await self._conn.close_session(session_id=session_id)
+            _log.info("session/close sent for %s", session_id)
         except Exception as exc:  # noqa: BLE001 - releasing is best-effort
             _log.debug("closing session %s failed", session_id, exc_info=exc)
 
