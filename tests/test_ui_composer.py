@@ -504,13 +504,13 @@ def test_single_choice_option_draws_no_chip(qapp):
 def test_choosing_a_config_value_reports_id_and_value(qapp):
     composer = Composer()
     composer.show()
-    composer.set_config_options([_option(option_id="reasoning", current="a")])
+    composer.set_config_options([_option(option_id="effort", current="a")])
     received: list[tuple[str, str]] = []
     composer.config_option_selected.connect(lambda cid, value: received.append((cid, value)))
 
     composer._config_chips[0]._choose(1)
 
-    assert received == [("reasoning", "b")]
+    assert received == [("effort", "b")]
 
 
 def test_hiding_the_composer_takes_the_slash_palette_with_it(qapp):

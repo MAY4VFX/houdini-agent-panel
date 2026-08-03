@@ -66,22 +66,36 @@ def test_switching_agents_does_not_carry_the_old_session(qapp, monkeypatch):
     widget.shutdown()
 
 
-def test_transcript_of_the_old_agent_is_not_shown_after_a_switch(qapp, monkeypatch):
+def test_conversation_survives_an_agent_switch(qapp, monkeypatch):
+    """The artist's words are not the agent's property.
+
+    Wiping the transcript on every switch was the bug, not the feature: an
+    agent session id dies with its process, but what was written and read
+    belongs to the person who wrote it.
+    """
+    from houdini_agent_panel import conversations_store as store
+
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
 
     client = panel_mod.shared_client()
     client.session_started.emit("claude-session", _state("claude-session"))
     qapp.processEvents()
+    widget._pool.get("claude-session").title = "Rotor pyro"
     client.message_chunk.emit("claude-session", "m1", "answer from Claude")
     qapp.processEvents()
 
     monkeypatch.setattr(widget, "_start_agent", lambda agent_id: None)
     widget._on_agent_chosen("codex-acp")
 
-    texts = [e.text for e in widget._model("claude-session").entries()]
-    assert texts == [], "the old agent's transcript must not linger"
+    # The dead session id is gone — it means nothing to the new agent.
+    assert widget._pool.all() == []
+    # The conversation is not.
+    saved = store.load()
+    assert [c.title for c in saved] == ["Rotor pyro"]
+    assert any("answer from Claude" in e["text"] for e in saved[0].entries)
     widget.shutdown()
+
 
 
 def test_stop_releases_the_input_even_if_the_agent_never_answers(qapp, monkeypatch):

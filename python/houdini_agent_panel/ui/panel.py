@@ -19,6 +19,7 @@ never touches `hou`.
 
 from __future__ import annotations
 
+import time
 import weakref
 from typing import Any
 
@@ -215,6 +216,10 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_agent_label: str = ""
         #: Blocks typed before any session existed, waiting for `session/new`.
         self._pending_prompt: list | None = None
+        #: Our own conversation id per live agent session. The agent's id
+        #: dies with its process; this one is what survives.
+        self._conversation_ids: dict[str, str] = {}
+        self._restored: list = []
         self._closed = False
 
         self._build()
@@ -521,6 +526,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_AUTH)
 
     def _on_session_started(self, session_id: str, state: Any) -> None:
+        import uuid as _uuid
+
+        self._conversation_ids.setdefault(session_id, _uuid.uuid4().hex)
         # A brand new session cannot be mid-turn. Saying so explicitly keeps a
         # stale flag from a previous agent out of a fresh conversation.
         state.busy = False
@@ -1047,20 +1055,76 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client()
         if client.is_running():
             client.stop()
-        # Sessions belong to the process that issued them. The old agent is
-        # gone, so its conversations cannot be continued by the new one — the
-        # panel must start clean rather than carry ids the new agent never
-        # handed out.
+        # A session id belongs to the process that issued it, so the binding
+        # to the old agent must go. The CONVERSATION does not: it is what the
+        # artist wrote and read, and wiping it on every agent switch was the
+        # bug, not the feature. Transcripts are written to disk first, the
+        # pool is emptied of dead ids, and the drawer keeps showing the same
+        # list.
+        #
+        # Continuing with a different agent does not carry the model's memory
+        # across — no protocol can do that. The transcript stays readable and
+        # the new agent starts from what it is told.
+        self._persist_conversations()
         self._pool.clear()
-        self._models.clear()
         self._pending_permissions.clear()
-        # A message queued for the old agent has nowhere to land: its
-        # transcript is gone, so sending it would put the artist's words into
-        # a conversation they can no longer see.
-        self._pending_prompt = None
-        self._transcript.set_model(self._model("__idle__"))
-        self._transcript.refresh(None)
+        # A message queued for the old agent has nowhere to land yet: the new
+        # one has not opened a session. It is kept and sent once it does.
         self._start_agent(agent_id)
+
+    # --- conversations that outlive the agent and Houdini -----------------
+
+    def _persist_conversations(self) -> None:
+        """Write every transcript we have to disk.
+
+        Called whenever a conversation could be about to lose its live agent
+        session: an agent switch, a panel closing. Failures are swallowed —
+        losing history is bad, taking the panel down with it is worse.
+        """
+        try:
+            from .. import conversations_store as store
+
+            existing = {c.id: c for c in store.load()}
+            for session_id, model in self._models.items():
+                if session_id == "__idle__":
+                    continue
+                conversation_id = self._conversation_ids.get(session_id)
+                if conversation_id is None:
+                    continue
+                records = model.to_records()
+                if not records:
+                    continue
+                conversation = existing.get(conversation_id) or store.StoredConversation.new()
+                conversation.id = conversation_id
+                state = self._pool.get(session_id)
+                if state is not None:
+                    conversation.title = state.title
+                conversation.agent_id = self._settings.default_agent or ""
+                conversation.entries = records
+                conversation.updated_at = time.time()
+                existing[conversation_id] = conversation
+            store.save(list(existing.values()))
+        except Exception:  # noqa: BLE001 - history is never worth a crash
+            pass
+
+    def _restore_conversations(self) -> None:
+        """Show what was written last time, before any agent is up.
+
+        Read-only history: these transcripts have no live session behind
+        them, and the first message the artist sends opens a fresh one.
+        """
+        try:
+            from .. import conversations_store as store
+
+            stored = store.load()
+        except Exception:  # noqa: BLE001
+            return
+        if not stored:
+            return
+        self._restored = stored
+        self._conversations.set_restored(stored) if hasattr(
+            self._conversations, "set_restored"
+        ) else None
 
     def _note(self, text: str) -> None:
         current = self._pool.current()
@@ -1084,6 +1148,7 @@ class AgentPanel(QtWidgets.QWidget):
         if self._closed:
             return
         self._closed = True
+        self._persist_conversations()
         _live_panels.discard(self)
 
         worker = self._refresh_worker

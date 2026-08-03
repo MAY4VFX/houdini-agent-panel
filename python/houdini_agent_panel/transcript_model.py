@@ -217,5 +217,33 @@ class TranscriptModel:
         self._entries.append(entry)
         return entry
 
+    # --- persistence ------------------------------------------------------
+    #
+    # Only text survives a restart. Tool calls, plans and permission requests
+    # are live state belonging to an agent process that no longer exists —
+    # restoring a permission prompt nobody can answer, or a tool call frozen
+    # at "in progress", would be worse than not restoring it. What the artist
+    # reads back is the conversation, which is the part that was theirs.
+
+    def to_records(self) -> list[dict]:
+        return [
+            {"kind": entry.kind, "id": entry.id, "text": entry.text}
+            for entry in self._entries
+            if entry.kind in ("user", "agent", "error") and entry.text
+        ]
+
+    def load_records(self, records: list[dict]) -> None:
+        self._entries = [
+            Entry(
+                kind=record.get("kind", "agent"),
+                id=str(record.get("id") or uuid.uuid4()),
+                text=str(record.get("text") or ""),
+            )
+            for record in records or []
+            if isinstance(record, dict) and record.get("text")
+        ]
+        self._by_message_id.clear()
+        self._by_tool_call_id.clear()
+
     def entries(self) -> list[Entry]:
         return list(self._entries)

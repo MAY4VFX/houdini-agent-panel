@@ -259,6 +259,20 @@ class _ComposerSurface(QtWidgets.QFrame):
             self._target.setFocus(QtCore.Qt.MouseFocusReason)
 
 
+#: Options that stay on the bar under the input. Matched by id fragment
+#: rather than an exact list, because the same setting is named differently
+#: by different agents ("effort" in Claude, "reasoning effort" in Codex) and
+#: hardcoding both spellings would break on the third agent.
+_BAR_OPTION_HINTS = ("model", "effort")
+
+
+def _is_bar_option(option) -> bool:
+    identifier = (getattr(option, "id", "") or "").lower()
+    name = (getattr(option, "name", "") or "").lower()
+    return any(hint in identifier or hint in name for hint in _BAR_OPTION_HINTS)
+
+
+
 class Composer(QtWidgets.QWidget):
     """Bottom of the panel: growing field, "+", microphone, chips, counter, send/stop."""
 
@@ -479,6 +493,14 @@ class Composer(QtWidgets.QWidget):
         Each element is duck-typed: `id`, `name`, `current_value` and
         `choices` of `value`/`name`. That keeps this widget from importing
         `client.py`, exactly like the rest of `ui/`.
+
+        Not every option earns a chip. Agents publish a lot of them — Codex
+        alone sends approval, collaboration mode, model, reasoning effort and
+        fast mode — and a row of five dropdowns under the input turns the
+        thing an artist looks at most into a control panel. Only what gets
+        touched mid-conversation stays on the bar; the rest is still offered,
+        just not competing for the same space. Nothing is dropped: an option
+        the agent sent is always reachable.
         """
         while self._config_layout.count():
             item = self._config_layout.takeAt(0)
@@ -488,7 +510,10 @@ class Composer(QtWidgets.QWidget):
                 widget.deleteLater()
         self._config_chips = []
 
-        for option in options:
+        self._overflow_options = [
+            o for o in options if not _is_bar_option(o) and len(getattr(o, "choices", ()) or ()) >= 2
+        ]
+        for option in [o for o in options if _is_bar_option(o)]:
             choices = list(getattr(option, "choices", ()) or ())
             if len(choices) < 2:
                 # Nothing to pick between — a one-entry dropdown is a label
