@@ -679,6 +679,64 @@ own) and targeted `setStyleSheet` calls on individual widgets. We don't
 touch the application's global style: this is someone else's window, and
 the rest of Houdini lives in it.
 
+Every colour a `setStyleSheet` call needs as a literal — not just a
+`palette(...)` reference — comes from `ui/theme.py`, never a `#rrggbb` or a
+numeric `QColor(r, g, b)` written by hand (two tests enforce this by
+grepping `ui/*.py`). `theme.py` carries the panel's one accent
+(`accent_color()`) and the shared recipe for every flat popup surface
+(`popup_stylesheet()`, `popup_background()`/`popup_border()`/
+`popup_hover_background()`).
+
+**`QApplication.palette()` is the only source `color()`/`accent_color()`
+read — `hou.qt.getColor` isn't consulted first any more, and for most roles
+not at all.** Got backwards once, worth spelling out why, and worth being
+precise about what part of that reasoning is an observed fact versus an
+open question this project genuinely cannot settle by itself.
+
+Certain: Houdini fills the live Qt palette from whatever theme is active,
+on every version the panel supports, with no version-specific code needed.
+Colour themes as an artist-facing feature (52 presets, each an HSV triple,
+in `$HFS/houdini/config/Themes/default.theme.json`) are new in Houdini 22 —
+20.5 and 21 have no such file, and a preset recolouring the live palette is
+the only way `QApplication.palette()` could ever show one of them at all —
+that part isn't speculative.
+
+Not established: whether `hou.qt.getColor("SomeSchemeName")` follows a
+preset the same way, or keeps answering from the static `.hcs` file
+underneath it. Checking that needs a GUI session with a preset active, and
+`hou.qt` doesn't exist even in `hython` on either 20.5.445 or 22.0.368
+(that part IS confirmed, by running it) — so this project has never been
+able to observe what the scheme-name lookup does under a preset, in either
+direction. Believing it stays stale is a plausible, well-motivated guess
+(Plumtree's `highlight: [356, 30, 50]` computes to `#7f595b`, nothing like
+`SelectedTextBG`'s `SELECTION_BASE`, `HSV 40 0.825 0.725` — the stock
+amber; the owner's screenshot showed the mode chip and status dot amber
+under Plumtree), not a measurement of the lookup itself — at the time of
+that screenshot the panel was reading a hardcoded `#dfa047`, not
+`SelectedTextBG`, so the screenshot alone says nothing about what the
+lookup would have returned. The palette needing no such guess, on any
+version, preset active or not, is reason enough to read it first on its
+own — the open question doesn't have to resolve either way for that to
+hold.
+
+`_HOU_COLOR_NAMES` (the table `color()` used to consult first, for
+`Window`/`Base`/`AlternateBase`/`Text`/`WindowText`/`ButtonText`/
+`Highlight`/`Mid`) is gone entirely, not just reordered: every role in it
+already has a direct `QPalette` equivalent, so once the palette leads,
+nothing was left for that table to do — keeping it "for symmetry" would
+have been a mapping that looked like a working mechanism while doing
+nothing. `color()` is now exactly `palette().color(group, role)`.
+`accent_color()` keeps one narrow `.hcs` fallback of its own, reached only
+if the palette has no usable `Highlight` at all (not observed) — see its
+docstring in `ui/theme.py`.
+
+Colours are read fresh at the point of use — in `__init__` and again in
+`showEvent` — never cached in a module-level constant, so a widget built
+under one Houdini colour scheme and later shown again still reflects
+whatever's active. There's no known Houdini signal for "the scheme changed
+while this pane is already open and visible"; picking that up means hiding
+and reshowing the pane (or opening a new tab), not a background poll.
+
 ---
 
 ## 11. Tests

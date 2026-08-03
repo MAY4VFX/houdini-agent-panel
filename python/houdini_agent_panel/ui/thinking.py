@@ -12,6 +12,7 @@ import os
 import time
 from pathlib import Path
 
+from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -45,7 +46,6 @@ _IDLE_FRAME_MS = 650
 _AMBIENT_CYCLE_MS = 14_000
 _THINK_START_MS = 11_200
 _THINK_FRAME_MS = 700
-_HOUDINI_AMBER = QtGui.QColor(222, 142, 74)
 
 
 def _format_duration(milliseconds: int) -> str:
@@ -290,8 +290,11 @@ class ThinkingIndicator(QtWidgets.QWidget):
         frame = 0 if self._reduced_motion else (elapsed // _DOT_FRAME_MS) % len(_DOT_FRAMES)
         self._dot.setText("●" if self._reduced_motion else _DOT_FRAMES[frame])
         self._dot.show()
+        # The pulsing dot's own colour — the theme's live accent, read fresh
+        # on every frame (this used to be a fixed "Houdini amber" that
+        # stayed amber under a Houdini 22 "Edit Theme" preset like Plumtree).
         palette = self._dot.palette()
-        palette.setColor(QtGui.QPalette.WindowText, _HOUDINI_AMBER)
+        palette.setColor(QtGui.QPalette.WindowText, theme.accent_color())
         self._dot.setPalette(palette)
 
         timer = f"  ·  {_format_duration(elapsed)}" if elapsed >= _TIMER_AFTER_MS else ""

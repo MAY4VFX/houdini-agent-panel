@@ -33,6 +33,33 @@ import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+
+def _select_source() -> str:
+    """Decide which copy of the package this run exercises, and say so.
+
+    `hython` does not honour PYTHONPATH ordering: Houdini rebuilds `sys.path`
+    with its own `site-packages-forced` entries first, so putting the source
+    tree ahead of the installed deps tree in PYTHONPATH silently does
+    nothing. A whole run once reported on code that was never loaded — every
+    check exercised the installed build while the fix under test sat on
+    disk, unread.
+
+    So the choice is explicit and printed. `--source installed` (the
+    default) is what an artist actually runs; `--source repo` is what you
+    want after editing, and it wins by going in at `sys.path[0]`.
+    """
+    wanted = "repo" if "--source=repo" in sys.argv or (
+        "--source" in sys.argv and sys.argv[sys.argv.index("--source") + 1 :][:1] == ["repo"]
+    ) else os.environ.get("HAP_E2E_SOURCE", "installed")
+    if wanted == "repo":
+        source = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "python")
+        sys.path.insert(0, source)
+    return wanted
+
+
+_SOURCE = _select_source()
+
 from houdini_agent_panel.ui.qt import QtCore, QtWidgets  # noqa: E402
 
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -334,6 +361,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent", default="claude-acp", help="agent id from the ACP registry")
     parser.add_argument("--only", default="", help="comma-separated subset of checks")
     parser.add_argument("--list", action="store_true", help="list the checks and exit")
+    parser.add_argument(
+        "--source", default="installed", choices=("installed", "repo"),
+        help="which copy of the package to exercise (see _select_source)",
+    )
     args = parser.parse_args(argv)
 
     if args.list:
@@ -350,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     logbook.setup()
     print(f"agent: {args.agent}")
     print(f"houdini: {scene.houdini_version()}, fx port: {scene.fx_port()}")
+    print(f"source: {_SOURCE} — {os.path.dirname(panel_mod.__file__)}")
     print("-" * 72)
 
     failures = 0

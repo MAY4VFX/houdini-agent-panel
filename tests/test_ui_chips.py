@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from houdini_agent_panel.sessions import SessionMode
+from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.chips import ChoiceButton, HeaderBar, ModeChip
 
 
@@ -197,3 +198,50 @@ def test_set_modes_does_not_emit_mode_selected(qapp):
     chip.mode_selected.connect(seen.append)
     chip.set_modes([SessionMode(id="ask", name="Ask")], "ask")
     assert seen == []
+
+
+# --- follows the live Houdini theme (no hardcoded accent) ------------------
+
+
+def test_mode_chip_accent_follows_the_application_palette(qapp):
+    """The mode chip's accent text used to be a fixed amber hex — it has to
+    track whatever the active Houdini colour scheme's accent is instead
+    (Plumtree's pink, or anything else)."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#ff33aa"))
+    qapp.setPalette(palette)
+
+    combo = ChoiceButton(accent=True)
+
+    assert theme.to_hex(QtGui.QColor("#ff33aa")) in combo.styleSheet()
+
+
+def test_choice_popup_stylesheet_refreshes_on_show(qapp):
+    """Colours are read fresh on `showEvent`, not cached from construction —
+    a widget built under one palette and shown after the palette changed
+    must not keep painting the old scheme."""
+    combo = ChoiceButton(accent=True)
+
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#00ffaa"))
+    qapp.setPalette(palette)
+    combo.show()
+    qapp.processEvents()
+
+    assert theme.to_hex(QtGui.QColor("#00ffaa")) in combo.styleSheet()
+
+
+def test_agent_chip_fallback_dot_uses_the_theme_accent(qapp):
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#ff33aa"))
+    qapp.setPalette(palette)
+
+    header = HeaderBar()
+    header.set_agent("Some Agent", None)  # icon=None draws the fallback dot
+
+    icon = header._agent_button.icon()
+    pixmap = icon.pixmap(10, 10)
+    image = pixmap.toImage()
+    # Sample the dot's centre — it's drawn at (2, 2, 7, 7) in a 10x10 pixmap.
+    sampled = image.pixelColor(5, 5)
+    assert sampled == QtGui.QColor("#ff33aa")

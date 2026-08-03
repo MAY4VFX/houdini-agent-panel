@@ -21,6 +21,7 @@ import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import theme
 from .chips import ChoiceButton, ModeChip
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import _BuddySprite
@@ -100,20 +101,46 @@ class _CommandPopup(QtWidgets.QListWidget):
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setUniformItemSizes(True)
         self.setSpacing(1)
+        self._commands: list[Any] = []
+        self._apply_theme()
+        self.hide()
+
+    def _apply_theme(self) -> None:
+        """(Re)build every colour here from the live theme — see
+        `ChoiceButton._apply_theme` for why this isn't a constant baked in
+        once. Also rebuilds the visible rows: their name/description labels
+        paint their own colour directly (`set_commands`), which a plain
+        stylesheet reapply wouldn't touch.
+        """
+        bg = theme.to_hex(theme.popup_background())
+        border = theme.to_hex(theme.popup_border())
+        selected_bg = theme.to_hex(theme.popup_hover_background())
         self.setStyleSheet(
             "QListWidget#commandPalette {"
-            " background: #282828; border: 1px solid #414141; border-radius: 15px;"
+            f" background: {bg}; border: 1px solid {border}; border-radius: 15px;"
             " padding: 5px; outline: none;"
             "}"
             "QListWidget#commandPalette::item {"
             " min-height: 34px; border: none; border-radius: 8px;"
             "}"
-            "QListWidget#commandPalette::item:selected { background: #3a3a3a; }"
+            f"QListWidget#commandPalette::item:selected {{ background: {selected_bg}; }}"
         )
-        self.hide()
+        if self._commands:
+            self.set_commands(self._commands)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._apply_theme()
 
     def set_commands(self, commands: list[Any]) -> None:
+        self._commands = list(commands)
         self.clear()
+        # Straight from the live palette (not `theme.color()`'s `hou.qt`-first
+        # path) — see `theme.popup_background`'s docstring for why.
+        name_color = theme.to_hex(theme.palette().color(QtGui.QPalette.Text))
+        description_color = theme.to_hex(
+            theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        )
         for cmd in commands:
             item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, cmd.name)
@@ -125,12 +152,12 @@ class _CommandPopup(QtWidgets.QListWidget):
             row_layout.setContentsMargins(10, 0, 10, 0)
             row_layout.setSpacing(18)
             name = QtWidgets.QLabel(f"/{cmd.name}", row)
-            name.setStyleSheet("color: #e5e3df; background: transparent;")
+            name.setStyleSheet(f"color: {name_color}; background: transparent;")
             row_layout.addWidget(name)
             row_layout.addStretch(1)
             description = QtWidgets.QLabel(cmd.description or "", row)
             description.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            description.setStyleSheet("color: #8f8c87; background: transparent;")
+            description.setStyleSheet(f"color: {description_color}; background: transparent;")
             row_layout.addWidget(description)
             self.setItemWidget(item, row)
         if self.count():
@@ -314,7 +341,9 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.setFrameShape(QtWidgets.QFrame.NoFrame)
         input_palette = self._text_edit.palette()
         placeholder_role = getattr(QtGui.QPalette, "PlaceholderText", QtGui.QPalette.Text)
-        input_palette.setColor(placeholder_role, QtGui.QColor("#85827d"))
+        input_palette.setColor(
+            placeholder_role, theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        )
         self._text_edit.setPalette(input_palette)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.submit_requested.connect(self._submit)
@@ -635,6 +664,22 @@ class Composer(QtWidgets.QWidget):
         """
         super().hideEvent(event)
         self._hide_popup()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
+        """Refresh the placeholder colour from the live theme.
+
+        Same reasoning as `ChoiceButton._apply_theme`: re-read rather than
+        cache, so a pane hidden then shown again under a different Houdini
+        colour scheme doesn't keep a placeholder tone from the scheme that
+        was active when the composer was first built.
+        """
+        super().showEvent(event)
+        input_palette = self._text_edit.palette()
+        placeholder_role = getattr(QtGui.QPalette, "PlaceholderText", QtGui.QPalette.Text)
+        input_palette.setColor(
+            placeholder_role, theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
+        )
+        self._text_edit.setPalette(input_palette)
 
     # --- attachments: "+", drag & drop ------------------------------------
 

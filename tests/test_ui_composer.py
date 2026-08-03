@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from houdini_agent_panel.client import AgentInfo
 from houdini_agent_panel.sessions import AvailableCommand, SessionMode, Usage
+from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.composer import Composer, build_attachment_block
 
 
@@ -354,6 +355,20 @@ def test_slash_popup_shows_and_filters(qapp):
     assert composer._popup.isVisible()
     names = [composer._popup.item(i).data(QtCore.Qt.UserRole) for i in range(composer._popup.count())]
     assert names == ["model", "mode"]
+
+
+def test_slash_popup_follows_the_theme_accent(qapp):
+    """`::item:selected` used to be a fixed dark grey — it has to come from
+    the live theme's own popup-hover tone (`theme.popup_hover_background`)."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#223344"))
+    qapp.setPalette(palette)
+
+    composer = Composer()
+    composer.set_commands(_commands())
+
+    expected = theme.to_hex(theme.popup_background())
+    assert expected in composer._popup.styleSheet()
 
 
 def test_slash_popup_is_scrollbar_free_panel_overlay(qapp):

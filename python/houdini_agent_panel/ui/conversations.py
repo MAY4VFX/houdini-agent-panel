@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from ..sessions import SessionState
+from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _DRAWER_WIDTH = 286
-_AMBER = "#dfa047"
 
 #: What's left for the title once the drawer's own margins and the pin/more
 #: icon buttons take their share. `QPushButton` doesn't elide overflowing
@@ -43,7 +43,12 @@ def sidebar_icon() -> QtGui.QIcon:
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)
     painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-    pen = QtGui.QPen(QtGui.QColor("#aaa7a1"), 1.2)
+    # Muted like every other chrome icon in the header (`palette(disabled,
+    # text)`) — read fresh each call, so a caller that redraws this on a
+    # theme refresh (`HeaderBar._apply_theme`) actually gets a new tone.
+    # Straight from the palette, not `theme.color()`'s `hou.qt`-first path —
+    # see `theme.popup_background`'s docstring for why.
+    pen = QtGui.QPen(theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text), 1.2)
     painter.setPen(pen)
     painter.setBrush(QtCore.Qt.NoBrush)
     painter.drawRoundedRect(QtCore.QRectF(2.25, 3.25, 13.5, 11.5), 2.0, 2.0)
@@ -71,24 +76,20 @@ def summarize_title(text: str, limit: int = 60) -> str:
     return truncated.rstrip() + "…"
 
 
-_ROW_MENU_STYLESHEET = (
-    "QFrame#rowMenu {"
-    " background: #262626;"
-    " border: 1px solid #3a3a3a;"
-    " border-radius: 10px;"
-    "}"
-    "QPushButton {"
-    " min-height: 30px;"
-    " padding: 0 10px;"
-    " border: none;"
-    " border-radius: 6px;"
-    " color: #d7d4ce;"
-    " background: transparent;"
-    " text-align: left;"
-    "}"
-    "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
-    "QPushButton#rowMenuDelete:hover { background: #3a2323; color: #e3a3a3; }"
-)
+def _row_menu_stylesheet() -> str:
+    """Same recipe as every other popup surface (`theme.popup_stylesheet`),
+    plus the delete action's own muted-warning tone instead of a fixed red —
+    `QPalette` has no "error" role (see `theme.status_color`'s own docstring
+    for why this codebase never invents one), so the delete button reuses
+    the same `pending`-style tone permission prompts use for a reject
+    button, on the shared hover background rather than a second fixed hue.
+    """
+    warning = theme.to_hex(theme.status_color("pending"))
+    hover_bg = theme.to_hex(theme.popup_hover_background())
+    return theme.popup_stylesheet("rowMenu") + (
+        f"QPushButton#rowMenuDelete {{ color: {warning}; }}"
+        f"QPushButton#rowMenuDelete:hover {{ background: {hover_bg}; color: {warning}; }}"
+    )
 
 
 class ConversationDrawer(QtWidgets.QFrame):
@@ -166,6 +167,19 @@ class ConversationDrawer(QtWidgets.QFrame):
         self._animation.finished.connect(self._on_animation_finished)
         self._closing = False
 
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        """(Re)build the drawer's colours from the live theme.
+
+        Everything here is `palette(...)` already except the pinned icon's
+        accent, which — same reasoning as `ChoiceButton._apply_theme` — is
+        read fresh rather than baked in once. Called from `__init__` and
+        `showEvent`; also re-draws the rows so their busy/unread dots (which
+        paint the accent onto a `QPixmap`, not through the stylesheet) pick
+        up the refreshed colour too.
+        """
+        accent = theme.to_hex(theme.accent_color())
         self.setStyleSheet(
             "QFrame#conversationDrawer {"
             " background: palette(window);"
@@ -197,8 +211,14 @@ class ConversationDrawer(QtWidgets.QFrame):
             "QToolButton#rowPin:hover, QToolButton#rowMore:hover {"
             " color: palette(text); background: palette(alternate-base);"
             "}"
-            f"QToolButton#rowPin[pinned=\"true\"] {{ color: {_AMBER}; }}"
+            f"QToolButton#rowPin[pinned=\"true\"] {{ color: {accent}; }}"
         )
+        if self._states:
+            self.set_sessions(list(self._states.values()), self._current_id)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._apply_theme()
 
     def set_sessions(self, states: list[SessionState], current_id: str | None) -> None:
         self._current_id = current_id
@@ -243,7 +263,7 @@ class ConversationDrawer(QtWidgets.QFrame):
         busy_dot.setObjectName("rowBusyDot")
         busy_dot.setFixedSize(_DOT_SIZE + 4, _DOT_SIZE + 4)
         busy_dot.setAlignment(QtCore.Qt.AlignCenter)
-        busy_dot.setPixmap(_dot_pixmap(QtGui.QColor(_AMBER)))
+        busy_dot.setPixmap(_dot_pixmap(theme.accent_color()))
         busy_dot.setToolTip("The agent is working on this conversation")
         busy_dot.setVisible(state.busy)
         row_layout.addWidget(busy_dot)
@@ -267,7 +287,7 @@ class ConversationDrawer(QtWidgets.QFrame):
         unread_dot.setObjectName("rowUnreadDot")
         unread_dot.setFixedSize(_DOT_SIZE + 4, _DOT_SIZE + 4)
         unread_dot.setAlignment(QtCore.Qt.AlignCenter)
-        unread_dot.setPixmap(_dot_pixmap(QtGui.QColor(_AMBER)))
+        unread_dot.setPixmap(_dot_pixmap(theme.accent_color()))
         unread_dot.setToolTip("Unread reply")
         unread_dot.setVisible(state.unread)
         row_layout.addWidget(unread_dot)
@@ -384,7 +404,7 @@ class ConversationDrawer(QtWidgets.QFrame):
         menu = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
         menu.setObjectName("rowMenu")
         menu.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
-        menu.setStyleSheet(_ROW_MENU_STYLESHEET)
+        menu.setStyleSheet(_row_menu_stylesheet())
         menu_layout = QtWidgets.QVBoxLayout(menu)
         menu_layout.setContentsMargins(5, 5, 5, 5)
         menu_layout.setSpacing(2)

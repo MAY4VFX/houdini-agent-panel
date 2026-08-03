@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from houdini_agent_panel.transcript_model import PermissionView
+from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.permissions import PermissionRow
+from houdini_agent_panel.ui.qt import QtGui
 
 
 def _view(**overrides) -> PermissionView:
@@ -123,3 +125,38 @@ def test_apply_view_is_a_noop_when_still_unanswered(qapp):
     row.apply_view(_view())
     assert row._status_label.isHidden() is True
     assert all(button.isEnabled() for button in row._buttons.values())
+
+
+# --- follows the live Houdini theme (no hardcoded accent) ------------------
+
+
+def test_primary_button_background_follows_the_theme_accent(qapp):
+    """The primary ("Allow once") button used to be painted a fixed amber —
+    it has to track the active Houdini colour scheme's accent instead."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#ff33aa"))
+    qapp.setPalette(palette)
+
+    row = PermissionRow(_view())
+
+    assert theme.to_hex(QtGui.QColor("#ff33aa")) in row.styleSheet()
+
+
+def test_primary_button_text_contrasts_with_a_dark_accent(qapp):
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#101010"))
+    qapp.setPalette(palette)
+
+    row = PermissionRow(_view())
+
+    assert theme.to_hex(QtGui.QColor(240, 240, 240)) in row.styleSheet()
+
+
+def test_primary_button_text_contrasts_with_a_light_accent(qapp):
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#f0f0f0"))
+    qapp.setPalette(palette)
+
+    row = PermissionRow(_view())
+
+    assert theme.to_hex(QtGui.QColor(20, 20, 20)) in row.styleSheet()

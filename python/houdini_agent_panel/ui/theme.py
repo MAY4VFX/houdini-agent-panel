@@ -6,14 +6,43 @@ fonts and colours don't drift apart. The panel lives inside Houdini as a guest
 in someone else's window, so colour is never hardcoded as hex — Houdini's
 theme can be dark, light or entirely custom (see facts/houdini.md §5).
 
-Houdini 22's "Edit Theme" presets (e.g. "Ponycorn Adventure") repaint the
-whole application's own widgets, but `QApplication.palette()` alone does not
-follow that — `color()` below tries Houdini's own live theme first
-(`hou.qt.getColor`) and falls back to the app palette for everything else:
-Houdini 20.5 (no such presets), outside Houdini entirely (unit tests,
-`dev_preview`), and any `QPalette` role with no solid Houdini scheme analog.
-`hou` is only ever imported lazily, inside a try/except, from `color()` —
-this module still has to work with no `hou` on the path at all.
+`QApplication.palette()` is THE source of colour — `color()`/`accent_color()`
+and everything built on them read it directly, nothing else. Houdini fills
+the live Qt palette from whatever theme is active, and does so identically
+on every version the panel supports: `QPalette.Highlight` is the accent,
+`Window`/`Base`/`Text`/`Mid` are surfaces and borders, one code path for
+20.5, 21 and 22, no version checks.
+
+This used to also consult `hou.qt.getColor(name)` — the `.hcs` scheme files
+— FIRST, for roles with a checked scheme-name analog (`_HOU_COLOR_NAMES`,
+now gone). That table mapped every one of its roles to something the
+palette already covers directly, so once the palette leads, the `.hcs` path
+had nothing left to do there — keeping it "for symmetry" would have been a
+dead mapping dressed up as a working mechanism.
+
+The deeper reason the palette leads, not just here but for `accent_color()`
+too: a Houdini 22 "Edit Theme" preset (52 of them in
+`$HFS/houdini/config/Themes/default.theme.json`, each an HSV triple)
+recolours the live palette — that part is certain, it's the only way
+`QApplication.palette()` could show Plumtree's own tone at all. What is
+NOT established is whether `hou.qt.getColor("SomeSchemeName")` follows that
+same recolouring or keeps answering from the static `.hcs` file underneath
+it — that would need calling `hou.qt.getColor` inside a GUI session with a
+preset active, and `hou.qt` doesn't exist even in `hython` on either
+20.5.445 or 22.0.368 (that part IS confirmed, by running it), so this
+project has never been able to check it either way. The palette needs no
+such check — it works identically on 20.5, 21 and 22, preset active or
+not — so it goes first regardless of how that open question resolves.
+`accent_color()` keeps a narrow `.hcs` fallback of its own (only reached if
+the palette has no usable `Highlight` at all, which hasn't been observed)
+— see its docstring for the same reasoning spelled out for the accent
+specifically.
+
+`hou` is only ever imported lazily, inside a try/except (`_hou_scheme_color`)
+— this module has to work with no `hou` on the path at all (unit tests,
+`dev_preview`), and `hou.qt` specifically doesn't exist even inside `hython`
+on either 20.5.445 or 22.0.368 (confirmed), so nothing here can depend on it
+answering at all, let alone correctly.
 """
 
 from __future__ import annotations
@@ -75,37 +104,15 @@ def palette() -> QtGui.QPalette:
     return QtWidgets.QApplication.palette()
 
 
-#: `QPalette` role -> Houdini scheme color name, for roles with a solid,
-#: checked analog. Verified by hand against Houdini 22.0.368's own
-#: `houdini/config/UIDark.hcs` (and cross-checked against `UILight.hcs`) —
-#: guessing a name here and getting `hou.OperationFailed` at paint time is
-#: worse than just falling back, so a role stays out of this table rather
-#: than get a shaky guess.
-_HOU_COLOR_NAMES: dict[QtGui.QPalette.ColorRole, str] = {
-    QtGui.QPalette.Window: "BackColor",
-    QtGui.QPalette.Base: "BackColor",
-    QtGui.QPalette.AlternateBase: "MenuBG",
-    QtGui.QPalette.Text: "TextColor",
-    QtGui.QPalette.WindowText: "TextColor",
-    QtGui.QPalette.ButtonText: "TextColor",
-    QtGui.QPalette.Highlight: "MenuSelectedBG",
-    QtGui.QPalette.Mid: "SplitBarBackground",
-}
-
-#: The one `(group, role)` pair that needs a different scheme name than its
-#: `Active` counterpart — everything else falls back to the app palette for
-#: any non-`Active` group, which is what every call site needs today.
-_HOU_DISABLED_TEXT = "DisabledTextColor"
-
-
 def _hou_scheme_color(name: str) -> QtGui.QColor | None:
     """`hou.qt.getColor(name)`, or `None` for any reason at all.
 
     `hou` may not be importable (outside Houdini entirely), `hou.qt` may not
-    exist (Houdini 20.5 hython confirmed: `hou.isUIAvailable()` is `False`
-    and `hou.qt` isn't even there), or the name may not exist in whatever
-    scheme is active. All three, and anything else, mean "fall back to the
-    app palette" — this never raises.
+    exist (confirmed absent in `hython` on both 20.5.445 and 22.0.368), or
+    the name may not exist in whatever scheme is active. All three, and
+    anything else, mean "there is nothing usable here" — this never raises.
+    The only remaining caller is `accent_color()`'s narrow fallback; `color()`
+    below no longer consults `hou` at all (see the module docstring).
     """
     try:
         import hou
@@ -123,24 +130,18 @@ def color(
     role: QtGui.QPalette.ColorRole,
     group: QtGui.QPalette.ColorGroup = QtGui.QPalette.Active,
 ) -> QtGui.QColor:
-    """One color: Houdini's own live theme first, the app palette otherwise.
+    """The live Qt palette — the one entry point every call site goes
+    through instead of reading `self.palette()`/`QApplication.palette()`
+    directly (a test greps for that).
 
-    This is the entry point every call site that used to read
-    `self.palette()`/`QApplication.palette()` for a single role goes
-    through now — a Houdini 22 "Edit Theme" preset changes what this
-    returns without the panel doing anything theme-specific itself. Houdini
-    20.5 and anything outside Houdini fall straight through to
-    `palette().color(group, role)`, byte-for-byte what every call site
-    already did before this existed.
+    No `hou.qt.getColor` lookup happens here any more (see the module
+    docstring for why: it used to run first, for a table of roles that all
+    had a direct palette equivalent anyway, and it couldn't be trusted to
+    follow a Houdini 22 "Edit Theme" preset). If a role ever needs a Houdini
+    scheme name with no palette analog at all, that's a new, individually
+    justified function — the way `accent_color()` keeps its own narrow
+    `.hcs` fallback — not a reason to route every role through `hou` again.
     """
-    if group == QtGui.QPalette.Disabled and role == QtGui.QPalette.Text:
-        name = _HOU_DISABLED_TEXT
-    else:
-        name = _HOU_COLOR_NAMES.get(role)
-    if name is not None:
-        hou_color = _hou_scheme_color(name)
-        if hou_color is not None:
-            return QtGui.QColor(hou_color)
     return palette().color(group, role)
 
 
@@ -195,6 +196,163 @@ def status_label(status: str) -> str:
     return _STATUS_LABEL.get(status, status)
 
 
+#: Scheme names consulted for the accent, and ONLY as a refinement — see
+#: `accent_color`. Both are present in `UIDark.hcs` and `UILight.hcs` under
+#: 20.5 and 22 alike.
+_ACCENT_SCHEME_NAMES: tuple[str, ...] = ("SelectedTextBG", "ActiveHandleColor")
+
+
+def accent_color() -> QtGui.QColor:
+    """The active theme's accent — read from the Qt palette, not from a file.
+
+    The mode chip, the sidebar's busy/unread dots, a pinned conversation and
+    the checked item in every popup all read this instead of a hardcoded
+    hex, so changing Houdini's theme actually changes what they look like.
+
+    Source order is deliberate and was got wrong once. `QPalette.Highlight`
+    comes FIRST because Houdini fills the palette from whatever theme is
+    live, and it does so on every version the panel supports — colour themes
+    as an artist-facing feature are new in Houdini 22 (52 presets in
+    `$HFS/houdini/config/Themes/default.theme.json`, each an HSV triple),
+    and 20.5 and 21 have no such file at all. One palette read covers all
+    three with no version checks.
+
+    The `.hcs` scheme names are consulted only where the palette has no
+    usable highlight, and never in front of it: `SelectedTextBG` resolves to
+    `SELECTION_BASE`, which is `HSV 40 0.825 0.725` — the stock amber. If
+    that lookup ignores the chosen preset (it reads scheme files, and
+    whether a Houdini 22 theme rewrites them is NOT something this project
+    has verified — `hou.qt` does not exist in `hython`, so it cannot be
+    checked outside a GUI session), putting it first would hand back amber
+    under a pink theme and reintroduce exactly the bug this replaced.
+    """
+    from_palette = palette().color(QtGui.QPalette.Highlight)
+    if from_palette.isValid():
+        return from_palette
+    for name in _ACCENT_SCHEME_NAMES:
+        found = _hou_scheme_color(name)
+        if found is not None:
+            return QtGui.QColor(found)
+    return from_palette
+
+
+def to_hex(color_value: QtGui.QColor) -> str:
+    """`#rrggbb` for the stylesheet strings the popup surfaces build by hand.
+
+    `setStyleSheet` takes a literal, not a `QColor` — this is the one place
+    a colour ever turns into text, and it happens at the point of use, from
+    whatever `color()`/`accent_color()` return THIS time, never from a
+    module-level constant frozen at import time.
+    """
+    return color_value.name(QtGui.QColor.HexRgb)
+
+
+def _blend(base: QtGui.QColor, other: QtGui.QColor, amount: float) -> QtGui.QColor:
+    """`base` shifted toward `other` by `amount` (0..1) — for tones that need
+    to sit a little apart from a palette role (a popup's hover row, the
+    tinted background behind a checked item) without inventing a fixed
+    colour of our own to do it."""
+    amount = max(0.0, min(1.0, amount))
+    return QtGui.QColor(
+        int(base.red() + (other.red() - base.red()) * amount),
+        int(base.green() + (other.green() - base.green()) * amount),
+        int(base.blue() + (other.blue() - base.blue()) * amount),
+    )
+
+
+def contrasting_text_color(background: QtGui.QColor) -> QtGui.QColor:
+    """Black or white — whichever reads better on `background`.
+
+    For text painted directly onto the accent colour (the primary button in
+    a permission prompt): the accent can be a warm amber or a bright
+    Plumtree pink, and pairing every possible accent with one fixed text
+    tone isn't safe the way pairing it with a `QPalette` role would be, so
+    this picks by measured luminance instead of assuming light-on-dark.
+    """
+    luminance = 0.299 * background.red() + 0.587 * background.green() + 0.114 * background.blue()
+    return QtGui.QColor(20, 20, 20) if luminance > 140 else QtGui.QColor(240, 240, 240)
+
+
+# --- popup / floating-menu surfaces --------------------------------------
+#
+# The agent switcher, the mode/model choice popups, and a conversation row's
+# "more" menu all draw their own flat, non-native surface (design.md: no
+# native `QMenu`/`QComboBox` chrome). What that surface is built FROM has to
+# be the live theme, not a fixed dark palette — a light Houdini scheme drew
+# a dark popup floating on a light panel until these existed.
+
+
+def popup_background() -> QtGui.QColor:
+    """Menu/popup fill — `QApplication.palette()`'s own `AlternateBase`.
+
+    Read directly from the palette, NOT through `color()` (which tries
+    `hou.qt.getColor("MenuBG")` first): same reasoning as `accent_color` —
+    a Houdini 22 "Edit Theme" preset recolours the live palette, and there is
+    no verified way to know whether the `.hcs`-based scheme-name lookup
+    follows it too. The palette is the one source proven to track a preset,
+    on every version the panel supports.
+    """
+    return palette().color(QtGui.QPalette.AlternateBase)
+
+
+def popup_border() -> QtGui.QColor:
+    return palette().color(QtGui.QPalette.Mid)
+
+
+def popup_hover_background() -> QtGui.QColor:
+    """A touch lighter than the resting surface — blended toward the text
+    colour rather than a second fixed tone, so it stays inside whatever
+    contrast the active theme itself uses."""
+    return _blend(popup_background(), palette().color(QtGui.QPalette.Text), 0.12)
+
+
+def popup_selected_background() -> QtGui.QColor:
+    """The tinted background behind a popup's currently-checked item — the
+    accent blended low into the surface, not a second hardcoded hex."""
+    return _blend(popup_background(), accent_color(), 0.22)
+
+
+def popup_stylesheet(frame_object_name: str) -> str:
+    """Shared QSS for every free-floating popup surface in the panel.
+
+    Built fresh from the live theme each time a popup is (re)created —
+    called from `__init__`/`showEvent`, never stored as a module-level
+    constant — so a panel opened under a different Houdini colour scheme (or
+    a different `QApplication` palette in tests/the dev preview) gets that
+    scheme's own tones, not whatever was active when this module first ran.
+    """
+    bg = to_hex(popup_background())
+    border = to_hex(popup_border())
+    hover_bg = to_hex(popup_hover_background())
+    # Straight from the palette, same reasoning as `popup_background` above —
+    # not `color()`'s `hou.qt`-first path.
+    resting_text = to_hex(palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
+    hover_text = to_hex(palette().color(QtGui.QPalette.Text))
+    selected_bg = to_hex(popup_selected_background())
+    accent = to_hex(accent_color())
+    return (
+        f"QFrame#{frame_object_name} {{"
+        f" background: {bg};"
+        f" border: 1px solid {border};"
+        " border-radius: 10px;"
+        "}"
+        "QFrame[popupSeparator=\"true\"] {"
+        f" background: {border}; max-height: 1px; min-height: 1px; margin: 4px 6px;"
+        "}"
+        "QPushButton {"
+        " min-height: 30px;"
+        " padding: 0 10px;"
+        " border: none;"
+        " border-radius: 6px;"
+        f" color: {resting_text};"
+        " background: transparent;"
+        " text-align: left;"
+        "}"
+        f"QPushButton:hover, QPushButton:focus {{ background: {hover_bg}; color: {hover_text}; }}"
+        f'QPushButton[checkedChoice="true"] {{ color: {accent}; background: {selected_bg}; }}'
+    )
+
+
 def status_color(status: str) -> QtGui.QColor:
     """Status colour — `QPalette` roles only, nothing of our own.
 
@@ -219,12 +377,20 @@ __all__ = [
     "SPACING",
     "SPACING_TIGHT",
     "TOOL_KINDS",
+    "accent_color",
     "color",
+    "contrasting_text_color",
     "kind_glyph",
     "kind_icon",
     "monospace_font",
     "palette",
+    "popup_background",
+    "popup_border",
+    "popup_hover_background",
+    "popup_selected_background",
+    "popup_stylesheet",
     "status_color",
     "status_glyph",
     "status_label",
+    "to_hex",
 ]

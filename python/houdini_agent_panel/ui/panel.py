@@ -19,6 +19,7 @@ never touches `hou`.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import weakref
 from dataclasses import replace
@@ -388,16 +389,21 @@ class AgentPanel(QtWidgets.QWidget):
             # label and the chip fell back to "@agentclientprotocol/…".
             self._pending_agent_label = self._display_label(self._settings.default_agent or "")
             self._header.set_agent(
-            self._pending_agent_label
-            or self._display_label(self._settings.default_agent or "")
-            or info.name,
-            None,
-        )
+                self._pending_agent_label
+                or self._display_label(self._settings.default_agent or "")
+                or info.name,
+                None,
+            )
             self._header.set_can_sign_in(bool(info.auth_methods))
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
         current = self._pool.current()
         if current is None:
+            self._start_new_session()
+        elif current.session_id.startswith(_RESTORED_PREFIX):
+            # Same reasoning as in `_on_connected`: a transcript off disk
+            # has no session under it, so it has no modes and no model.
+            self._adopting_restored = current.session_id
             self._start_new_session()
         else:
             self._show_session(current.session_id)
@@ -515,7 +521,18 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.set_can_sign_in(bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
-        if self._pool.current() is None:
+        current = self._pool.current()
+        if current is None:
+            self._start_new_session()
+        elif current.session_id.startswith(_RESTORED_PREFIX):
+            # What's on screen was read back from disk and has no agent
+            # behind it. Waiting for the artist's first message before
+            # opening a session looked harmless, but modes, slash commands
+            # and the model picker all arrive with `session/new` — so until
+            # they typed, the panel showed a conversation with no controls
+            # under it. Adopt the restored transcript into a live session
+            # right away; `_on_session_started` carries the words over.
+            self._adopting_restored = current.session_id
             self._start_new_session()
 
     def _on_disconnected(self, reason: str) -> None:
@@ -1325,14 +1342,30 @@ class AgentPanel(QtWidgets.QWidget):
         self._persist_conversations()
         _live_panels.discard(self)
 
+        # Background threads are asked to stop, but a thread in the middle of
+        # a network round trip does not stop on request — it stops when the
+        # socket does. Whatever it does afterwards must not reach this panel:
+        # its widgets are about to be deleted, and a signal arriving after
+        # that is "RuntimeError: The SignalInstance object was already
+        # deleted". Disconnecting first is what makes the wait a courtesy
+        # rather than a race we have to win.
         worker = self._refresh_worker
         if worker is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                worker.done.disconnect(self._on_refresh_done)
             worker.requestInterruption()
             worker.wait(2000)
             self._refresh_worker = None
 
         launch = self._launch_worker
         if launch is not None:
+            for signal, slot in (
+                (launch.ready, self._on_launch_ready),
+                (launch.prep_failed, self._on_launch_prep_failed),
+                (launch.note, self._note),
+            ):
+                with contextlib.suppress(RuntimeError, TypeError):
+                    signal.disconnect(slot)
             launch.wait(3000)
             self._launch_worker = None
 

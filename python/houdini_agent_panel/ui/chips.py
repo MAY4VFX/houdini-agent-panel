@@ -8,6 +8,7 @@ popup surface so the OS/Qt style can never leak into the panel.
 from __future__ import annotations
 
 from ..sessions import SessionMode
+from . import theme
 from .conversations import sidebar_icon
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
@@ -17,7 +18,6 @@ _RAIL_WIDTH = 736
 #: header's minimum, the header's minimum became the panel's, and the panel
 #: could not be docked into any Houdini pane narrower than 736px.
 _MIN_RAIL_WIDTH = 180
-_AMBER = "#dfa047"
 
 
 #: How wide a chip label may get before it is elided. Model names run
@@ -57,6 +57,21 @@ class ChoiceButton(QtWidgets.QWidget):
         self._popup_layout: QtWidgets.QVBoxLayout | None = None
         self._popup_scroll: QtWidgets.QScrollArea | None = None
 
+        self._apply_theme()
+        self._sync_text()
+
+    def _apply_theme(self) -> None:
+        """(Re)build every colour here from the live theme.
+
+        Called from `__init__` and `showEvent` — never computed once and
+        cached, so a panel opened under a different Houdini colour scheme (or
+        a different `QApplication` palette in the dev preview/tests) gets
+        that scheme's own accent instead of a colour frozen at import time.
+        There is no known Houdini signal for "the colour scheme changed
+        while this widget is already open" — see `HeaderBar._apply_theme`
+        for the same caveat.
+        """
+        accent = theme.to_hex(theme.accent_color())
         self.setStyleSheet(
             "QToolButton#choiceTrigger, QToolButton#choiceTriggerAccent {"
             " border: none;"
@@ -65,30 +80,18 @@ class ChoiceButton(QtWidgets.QWidget):
             " padding: 4px 8px;"
             "}"
             "QToolButton#choiceTrigger { color: palette(disabled, text); }"
-            f"QToolButton#choiceTriggerAccent {{ color: {_AMBER}; font-weight: 500; }}"
+            f"QToolButton#choiceTriggerAccent {{ color: {accent}; font-weight: 500; }}"
             "QToolButton#choiceTrigger:hover, QToolButton#choiceTriggerAccent:hover {"
             " background: palette(alternate-base);"
             "}"
         )
-        self._popup_stylesheet = (
-            "QFrame#choicePopup {"
-            " background: #262626;"
-            " border: 1px solid #3a3a3a;"
-            " border-radius: 10px;"
-            "}"
-            "QPushButton {"
-            " min-height: 30px;"
-            " padding: 0 10px;"
-            " border: none;"
-            " border-radius: 6px;"
-            " color: #d7d4ce;"
-            " background: transparent;"
-            " text-align: left;"
-            "}"
-            "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
-            f"QPushButton[checkedChoice=\"true\"] {{ color: {_AMBER}; background: #332a20; }}"
-        )
-        self._sync_text()
+        self._popup_stylesheet = theme.popup_stylesheet("choicePopup")
+        if self._popup is not None:
+            self._popup.setStyleSheet(self._popup_stylesheet)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._apply_theme()
 
     def _ensure_popup(self) -> QtWidgets.QFrame:
         if self._popup is not None:
@@ -348,27 +351,29 @@ class HeaderBar(QtWidgets.QWidget):
 
         self._agent_popup: QtWidgets.QFrame | None = None
         self._agent_popup_layout: QtWidgets.QVBoxLayout | None = None
-        self._agent_popup_stylesheet = (
-            "QFrame#agentPopup {"
-            " background: #262626;"
-            " border: 1px solid #3a3a3a;"
-            " border-radius: 10px;"
-            "}"
-            "QFrame#agentMenuSeparator {"
-            " background: #3a3a3a; max-height: 1px; min-height: 1px; margin: 4px 6px;"
-            "}"
-            "QPushButton {"
-            " min-height: 30px;"
-            " padding: 0 10px;"
-            " border: none;"
-            " border-radius: 6px;"
-            " color: #d7d4ce;"
-            " background: transparent;"
-            " text-align: left;"
-            "}"
-            "QPushButton:hover, QPushButton:focus { background: #333333; color: #f2efea; }"
-            f"QPushButton[checkedChoice=\"true\"] {{ color: {_AMBER}; background: #332a20; }}"
-        )
+        self._agent_popup_stylesheet = theme.popup_stylesheet("agentPopup")
+        #: Whether the chip currently shows a real registry icon rather than
+        #: the synthesized accent dot (`set_agent`'s `icon=None` case) — the
+        #: dot has to be redrawn on a theme refresh, a real icon doesn't.
+        self._agent_has_custom_icon = False
+
+    def _apply_theme(self) -> None:
+        """(Re)build every colour here from the live theme — see
+        `ChoiceButton._apply_theme` for why this isn't computed once and
+        cached. There is no known Houdini signal for "the colour scheme
+        changed while this panel is already open" — a fresh tab (or this
+        widget's `showEvent`, e.g. the pane becoming visible again) is what
+        picks up a scheme switched in the meantime, not a live repaint.
+        """
+        self._agent_popup_stylesheet = theme.popup_stylesheet("agentPopup")
+        if self._agent_popup is not None:
+            self._agent_popup.setStyleSheet(self._agent_popup_stylesheet)
+        if not self._agent_has_custom_icon:
+            self._agent_button.setIcon(self._fallback_agent_icon())
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._apply_theme()
 
     def _ensure_agent_popup(self) -> QtWidgets.QFrame:
         if self._agent_popup is not None:
@@ -407,17 +412,23 @@ class HeaderBar(QtWidgets.QWidget):
 
     def set_agent(self, name: str, icon: QtGui.QIcon | None) -> None:
         self._agent_button.setText(name)
-        if icon is None:
-            dot = QtGui.QPixmap(10, 10)
-            dot.fill(QtCore.Qt.transparent)
-            painter = QtGui.QPainter(dot)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)
-            painter.setBrush(QtGui.QColor(_AMBER))
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.drawEllipse(2, 2, 7, 7)
-            painter.end()
-            icon = QtGui.QIcon(dot)
-        self._agent_button.setIcon(icon)
+        self._agent_has_custom_icon = icon is not None
+        self._agent_button.setIcon(icon if icon is not None else self._fallback_agent_icon())
+
+    def _fallback_agent_icon(self) -> QtGui.QIcon:
+        """A small accent-coloured dot — used until the registry's real icon
+        for the current agent arrives. The colour is the theme's own accent,
+        read fresh every time this is drawn (`_apply_theme`), not a fixed
+        amber baked in once."""
+        dot = QtGui.QPixmap(10, 10)
+        dot.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(dot)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setBrush(theme.accent_color())
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(2, 2, 7, 7)
+        painter.end()
+        return QtGui.QIcon(dot)
 
     def set_agent_menu(self, agents: list[tuple[str, str]], current_id: str | None) -> None:
         """Feed the chip the list of installed agents, as ``(agent_id, label)``.
@@ -454,6 +465,7 @@ class HeaderBar(QtWidgets.QWidget):
         if self._agent_items:
             separator = QtWidgets.QFrame(self._agent_popup)
             separator.setObjectName("agentMenuSeparator")
+            separator.setProperty("popupSeparator", True)
             separator.setFrameShape(QtWidgets.QFrame.HLine)
             self._agent_popup_layout.addWidget(separator)
         if self._can_sign_in:

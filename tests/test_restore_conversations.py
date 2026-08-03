@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from houdini_agent_panel import client as client_mod
 from houdini_agent_panel import conversations_store as store
 from houdini_agent_panel import sessions
 from houdini_agent_panel.ui import panel as panel_mod
@@ -107,4 +108,43 @@ def test_the_transcript_moves_onto_the_live_session(qapp, monkeypatch):
     assert "and more" in texts
     assert widget._pool.get(panel_mod._RESTORED_PREFIX + conversation.id) is None
     assert widget._pool.get("live-1").title == "Rotor pyro"
+    widget.shutdown()
+
+
+def test_connecting_gives_the_restored_conversation_a_live_session(qapp, monkeypatch):
+    """A transcript off disk must not sit there without an agent under it.
+
+    Modes, slash commands and the model picker all arrive with `session/new`.
+    While the panel waited for the artist's first message before opening a
+    session, a restored conversation came back on screen with no controls
+    beneath it — no mode chip, no model — and nothing said why.
+    """
+    conversation = _stored("Rotor pyro", "make dust")
+    store.save([conversation])
+
+    widget = panel_mod.AgentPanel()
+    widget._restore_conversations()
+    qapp.processEvents()
+
+    opened: list[bool] = []
+    monkeypatch.setattr(widget, "_start_new_session", lambda: opened.append(True))
+
+    widget._on_connected(
+        client_mod.AgentInfo(
+            name="claude",
+            version="1.0",
+            protocol_version=1,
+            supports_image=False,
+            supports_audio=False,
+            supports_embedded_context=False,
+            supports_load_session=False,
+            supports_logout=False,
+            auth_methods=(),
+        )
+    )
+
+    assert opened, "connecting must open a session for the restored conversation"
+    assert widget._adopting_restored == panel_mod._RESTORED_PREFIX + conversation.id
+    # Nothing was typed, so nothing may be queued to send.
+    assert not widget._pending_prompt
     widget.shutdown()

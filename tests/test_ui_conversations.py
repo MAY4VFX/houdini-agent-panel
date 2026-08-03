@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from houdini_agent_panel.sessions import SessionState
 from houdini_agent_panel.ui import conversations as conversations_mod
+from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.conversations import ConversationDrawer, summarize_title
+from houdini_agent_panel.ui.qt import QtGui
 
 
 def _state(session_id: str, title: str, created_at: float) -> SessionState:
@@ -56,6 +58,35 @@ def test_busy_and_unread_markers_are_independent(qapp):
 
     assert host._busy_dots["s1"].isHidden() is False
     assert host._unread_dots["s1"].isHidden() is False
+
+
+def _sampled_dot_color(label) -> QtGui.QColor:
+    pixmap = label.pixmap()
+    image = pixmap.toImage()
+    center = pixmap.width() // 2
+    return image.pixelColor(center, center)
+
+
+def test_busy_and_unread_dots_follow_the_theme_accent(qapp, monkeypatch):
+    monkeypatch.setattr(theme, "accent_color", lambda: QtGui.QColor("#ff33aa"))
+    host = ConversationDrawer()
+    state = _state("s1", "Chat", 1.0)
+    state.busy = True
+    state.unread = True
+    host.set_sessions([state], "s2")
+
+    assert _sampled_dot_color(host._busy_dots["s1"]) == QtGui.QColor("#ff33aa")
+    assert _sampled_dot_color(host._unread_dots["s1"]) == QtGui.QColor("#ff33aa")
+
+
+def test_pin_icon_color_follows_the_theme_accent(qapp):
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#ff33aa"))
+    qapp.setPalette(palette)
+
+    host = ConversationDrawer()
+
+    assert theme.to_hex(QtGui.QColor("#ff33aa")) in host.styleSheet()
 
 
 def test_selecting_conversation_emits_id_and_closes_drawer(qapp):

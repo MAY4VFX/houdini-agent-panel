@@ -148,7 +148,7 @@ class _AgentRow(QtWidgets.QWidget):
         self._state_label.setMinimumWidth(self._STATE_COLUMN_WIDTH)
         self._state_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         if unavailable_reason:
-            self._state_label.setStyleSheet("color: gray;")
+            self._state_label.setStyleSheet("color: palette(disabled, text);")
         layout.addWidget(self._state_label)
 
         self._progress = QtWidgets.QProgressBar(self)

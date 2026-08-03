@@ -321,6 +321,9 @@ class AcpWorker(QtCore.QThread):
         self._writer: asyncio.StreamWriter | None = None
         self._reader: asyncio.StreamReader | None = None
         self._stderr_reader: asyncio.StreamReader | None = None
+        #: Bumped by every `do_start`; a launch whose epoch is stale has been
+        #: superseded and must stay silent (see `do_start`).
+        self._start_epoch = 0
         self._stderr_task: asyncio.Task | None = None
         self._exit_watch_task: asyncio.Task | None = None
         self._closing = False
@@ -449,6 +452,31 @@ class AcpWorker(QtCore.QThread):
     # --- operations scheduled by the facade via submit() ------------------------
 
     async def do_start(self, spec: "LaunchSpec", cwd: str) -> None:
+        # Whatever was running here goes down FIRST. `AcpClient.start` reuses
+        # a live worker, so starting a second agent on it used to overwrite
+        # `_conn`, `_writer` and `_process` while the previous connection was
+        # still up: its process kept running, its pipes stayed open, and the
+        # SDK's own receive/dispatch/send tasks stayed on this loop with
+        # nothing left holding them. That is where "Task was destroyed but it
+        # is pending" and "cannot reuse already awaited coroutine" came from
+        # — orphans surfacing when the loop finally closed, one set per
+        # agent switch or restart.
+        #
+        # Superseding an in-flight launch is a normal thing to do (the artist
+        # picked another agent while this one was still coming up), so the
+        # launch being torn down must not report a failure: closing its
+        # connection makes its own `initialize` raise "Connection closed",
+        # and emitting that would put "agent did not start" on screen while
+        # the agent the artist actually asked for connects fine behind it.
+        # Each launch carries the epoch it began in and stays quiet once a
+        # newer one has started.
+        self._start_epoch += 1
+        epoch = self._start_epoch
+        if self._conn is not None or self._process is not None:
+            self._closing = True
+            await self.do_stop()
+        if epoch != self._start_epoch:
+            return
         self._closing = False
         try:
             # `acp.spawn_agent_process` doesn't work inside Houdini (see the
@@ -487,6 +515,11 @@ class AcpWorker(QtCore.QThread):
             self._conn = conn
 
             self._exited = self.loop.create_future()
+            # A previous connection's pump and exit watcher must be gone
+            # before this one's start, not merely asked to stop: cancelling
+            # is a request, and a task that is still awaiting a pipe read
+            # when we attach the next one is a second reader on it.
+            await self._cancel_and_await(self._stderr_task, self._exit_watch_task)
             self._stderr_task = self.loop.create_task(self._pump_stderr())
             self._exit_watch_task = self.loop.create_task(self._watch_process_exit(process))
 
@@ -494,10 +527,14 @@ class AcpWorker(QtCore.QThread):
             if init is None:
                 return
         except Exception as exc:  # noqa: BLE001 - anything at startup -> failed, not a crash
+            if epoch != self._start_epoch:
+                return  # a newer launch took over; this one's error is its own doing
             await self._cleanup()
             self.failed.emit(self._describe_failure(str(exc)))
             return
 
+        if epoch != self._start_epoch:
+            return
         self._agent_info = _agent_info_from(init)
         self.connected.emit(self._agent_info)
 
@@ -522,6 +559,14 @@ class AcpWorker(QtCore.QThread):
                 client_capabilities=ClientCapabilities(),  # we don't declare fs/terminal
                 client_info=Implementation(name="houdini-agent-panel", version=__version__),
             )
+        )
+        # If this launch is superseded, `do_stop` cancels the coroutine that
+        # is awaiting below, and `init_task`'s own ConnectionError is then
+        # never collected by anyone — asyncio reports that at GC time as
+        # "Task exception was never retrieved", a scary paragraph about a
+        # failure that was entirely expected. Collect it unconditionally.
+        init_task.add_done_callback(
+            lambda t: None if t.cancelled() else t.exception()
         )
         waiters = {init_task, self._exited}
         done, _pending = await asyncio.wait(
@@ -571,8 +616,15 @@ class AcpWorker(QtCore.QThread):
         self._exit_watch_task = None
 
         if self._conn is not None:
-            with contextlib.suppress(Exception):
+            # Not silently suppressed. `Connection.close` is what cancels and
+            # awaits the SDK's own receive/dispatch/send tasks; if it raises
+            # part-way through, those tasks stay pending and the loop closes
+            # on top of them — which is exactly where "Task was destroyed but
+            # it is pending" comes from. Swallowing the error hid the cause.
+            try:
                 await self._conn.close()
+            except Exception as exc:  # noqa: BLE001 - shutdown continues regardless
+                _log.warning("closing the ACP connection failed", exc_info=exc)
             self._conn = None
 
         await self._close_writer()
@@ -779,12 +831,22 @@ class AcpWorker(QtCore.QThread):
         `process.stderr` from `subprocess.Popen` is a plain blocking file
         object; reading it directly in a coroutine would block the whole
         loop. So stderr gets its own `StreamReader`, hooked up via
-        `connect_read_pipe` in `do_start`, exactly like stdout."""
-        if self._stderr_reader is None:
+        `connect_read_pipe` in `do_start`, exactly like stdout.
+
+        The reader is bound once, here, and never re-read from `self`. A
+        pump that looked `self._stderr_reader` up on every iteration would
+        follow the attribute onto the NEXT agent's pipe if it outlived its
+        own connection by even one loop tick — two coroutines on one reader,
+        which asyncio answers with "readuntil() called while another
+        coroutine is already waiting for incoming data". That is precisely
+        what a restart used to produce.
+        """
+        reader = self._stderr_reader
+        if reader is None:
             return
         try:
             while True:
-                line = await self._stderr_reader.readline()
+                line = await reader.readline()
                 if not line:
                     break
                 text = line.decode(errors="replace").rstrip("\n")
@@ -1009,6 +1071,26 @@ class AcpClient(QtCore.QObject):
             future.result(timeout=10.0)
         worker.request_loop_stop()
         worker.wait(5000)
+
+        # Cut the worker loose from this facade BEFORE letting go of it. A
+        # worker that outlives its `wait()` (below, `_retired`) is still a
+        # live thread with live signals; if the facade is collected first,
+        # its next emit lands on a deleted C++ object — "RuntimeError: The
+        # SignalInstance object was already deleted", once per teardown.
+        # Nothing downstream wants to hear from a worker we have stopped
+        # caring about, so the wiring goes rather than the emit being
+        # guarded at every one of the twenty call sites.
+        for name in _FORWARDED_SIGNALS:
+            with contextlib.suppress(RuntimeError, TypeError):
+                getattr(worker, name).disconnect(getattr(self, name).emit)
+        for signal, slot in (
+            (worker.connected, self._on_connected),
+            (worker.disconnected, self._on_stopped),
+            (worker.failed, self._on_stopped),
+        ):
+            with contextlib.suppress(RuntimeError, TypeError):
+                signal.disconnect(slot)
+
         self._worker = None
         # Keep only workers whose thread is genuinely still winding down.
         # The list used to grow forever: every agent switch left a finished

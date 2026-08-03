@@ -80,6 +80,13 @@ class PermissionRow(QtWidgets.QWidget):
         if self._answered is not None:
             self._apply_answered(self._answered)
 
+        # The primary button (`allow_once`) is painted straight onto the
+        # theme's accent — which can be a warm amber or a bright Plumtree
+        # pink — so its text has to be chosen for contrast against THAT
+        # colour rather than assumed, unlike everything else here that just
+        # reads a `palette(...)` role.
+        primary_bg = theme.to_hex(theme.accent_color())
+        primary_text = theme.to_hex(theme.contrasting_text_color(theme.accent_color()))
         self.setStyleSheet(
             "QWidget#permissionPopover {"
             " background: palette(base);"
@@ -97,14 +104,24 @@ class PermissionRow(QtWidgets.QWidget):
             "}"
             "QWidget#permissionPopover QPushButton[permissionPrimary=\"true\"] {"
             " border-color: transparent;"
-            " color: #24180c;"
-            " background: #e5a047;"
+            f" color: {primary_text};"
+            f" background: {primary_bg};"
             "}"
         )
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
         shadow.setOffset(0, 7)
-        shadow.setColor(QtGui.QColor(0, 0, 0, 115))
+        # Deliberately NOT `theme.color(QtGui.QPalette.Shadow)`: checked
+        # against a hand-built `QPalette` (no `hou` here to ask), `Shadow`
+        # stayed black even with every other role swapped to a light scheme —
+        # but that's a bare `QPalette`, not Houdini's own light-scheme output,
+        # and there's no way to confirm the same holds there without a real
+        # light-themed Houdini GUI session. A shadow's whole job is to read as
+        # depth/occlusion, which is dark by convention in light AND dark UI
+        # (this codebase's own `.hcs` files don't even define a scheme name
+        # for it) — a fixed near-black with alpha is the safe choice here,
+        # not a gap in the "no hardcoded colour" rule.
+        shadow.setColor(QtGui.QColor(0, 0, 0, 115))  # theme-exception: see comment above
         self.setGraphicsEffect(shadow)
 
     def request_key(self) -> str:
