@@ -376,7 +376,17 @@ class AgentPanel(QtWidgets.QWidget):
     def _adopt_running_client(self) -> None:
         info = shared_client().agent_info()
         if info is not None:
-            self._header.set_agent(info.name, None)
+            # The artist's name for it, not the npm package from `initialize`.
+            # This path skips `_start_agent`, so nothing had set the pending
+            # label and the chip fell back to "@agentclientprotocol/…".
+            self._pending_agent_label = self._display_label(self._settings.default_agent or "")
+            self._header.set_agent(
+            self._pending_agent_label
+            or self._display_label(self._settings.default_agent or "")
+            or info.name,
+            None,
+        )
+            self._header.set_can_sign_in(bool(info.auth_methods))
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
         current = self._pool.current()
