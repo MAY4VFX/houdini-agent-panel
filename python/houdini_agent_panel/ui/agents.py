@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 from .. import registry, runtime
+from ..updates import is_newer
 from .. import settings as settings_module
 from .qt import QtCore, QtWidgets, Signal
 
@@ -49,13 +50,26 @@ class _InstallWorker(QtCore.QThread):
         self._fetch = fetch
 
     def run(self) -> None:  # noqa: D102 - QThread.run override
+        # `Exception`, not just `runtime.InstallError`: this is a QThread
+        # boundary, and this method is the only place that can ever turn a
+        # failure into a signal. Caught live, by instrumentation, not
+        # guessed: `node.NpxNotFoundError` (a plain `RuntimeError`, not an
+        # `InstallError` — raised by `node.npx_argv` when no npm sits next
+        # to the detected Node) escaped the narrower catch, which meant
+        # neither `succeeded` nor `failed` ever fired. The consequences
+        # compounded silently — `AgentsView._installing` is only cleared in
+        # `_on_installed`/`_on_install_failed`, so the agent stayed marked
+        # "installing" forever, permanently blocking every later click on
+        # its Install/Update button too — and PySide only prints the
+        # traceback to stderr, which no Houdini GUI artist has open. Exactly
+        # "Remove, then Install — nothing happens", reproduced.
         try:
             spec = runtime.install_agent(
                 self._entry,
                 progress=lambda done, total, note: self.progressed.emit(done, total, note),
                 fetch=self._fetch,
             )
-        except runtime.InstallError as exc:
+        except Exception as exc:  # noqa: BLE001 - see the comment above
             self.failed.emit(str(exc))
             return
         self.succeeded.emit(spec)
@@ -77,9 +91,20 @@ def _installed_record(agent_id: str, current_settings) -> "settings_module.Insta
 
 
 def _state_text(installed, update: "Update | None") -> str:
+    """What this agent's row says about itself.
+
+    The update is checked against the version on disk RIGHT NOW, not taken
+    on trust. Update results are cached for a day, `installed` comes from
+    the manifest, and the manifest changes the moment the agent is launched
+    or installed — so a row could pair a fresh fact with a stale one and
+    announce "installed 0.64.2 — update available: 0.64.2". An artist then
+    presses Update, nothing observable happens (there is nothing to do), and
+    the button looks broken. The stale half is dropped here, at the point of
+    use: the cache is allowed to lag, the sentence is not.
+    """
     if installed is None:
         return "not installed"
-    if update is not None:
+    if update is not None and is_newer(update.latest, installed.version):
         return f"installed {installed.version} — update available: {update.latest}"
     return f"installed {installed.version}"
 
@@ -371,7 +396,14 @@ class AgentsView(QtWidgets.QWidget):
                 state_text=_state_text(installed, update),
                 unavailable_reason=reason,
                 is_installed=installed is not None,
-                has_update=update is not None,
+                # Same guard as `_state_text`: an Update button for an
+                # update that is not newer than what is installed is a
+                # button that cannot do anything.
+                has_update=(
+                    update is not None
+                    and installed is not None
+                    and is_newer(update.latest, installed.version)
+                ),
                 can_sign_in=(entry.id == self._current_agent_id and self._current_agent_can_sign_in),
                 parent=self,
             )

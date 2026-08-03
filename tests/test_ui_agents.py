@@ -11,7 +11,7 @@ import zipfile
 from PySide6 import QtTest, QtWidgets
 
 from houdini_agent_panel import settings as settings_module
-from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
+from houdini_agent_panel.registry import AgentEntry, BinaryDistribution, NpxDistribution
 from houdini_agent_panel.ui.agents import AgentsView
 
 
@@ -122,6 +122,54 @@ def test_install_flow_runs_in_background_and_updates_row(qapp, monkeypatch, fetc
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
     assert buttons == {"Remove"}
+
+
+def test_install_failure_not_an_installerror_still_reports_and_unlocks(qapp, monkeypatch):
+    """A real bug, found live: `_InstallWorker.run()` only caught
+    `runtime.InstallError`. `node.NpxNotFoundError` (raised by
+    `node.npx_argv` when there is no npm next to the detected Node) is a
+    plain `RuntimeError`, not an `InstallError` — it escaped the catch
+    entirely. Confirmed by fault injection in hython: neither `succeeded`
+    nor `failed` ever fired, PySide only printed the traceback to a
+    terminal no Houdini artist has open, and `_installing` was never
+    cleared — permanently locking every later click on that agent's
+    Install/Update button too. This is exactly what "Remove it, then
+    Install — nothing happens, and it stays broken" looks like from the
+    artist's side.
+    """
+    # npx, not binary — `needs_node` is what routes through `ensure_node`/
+    # `npx_argv`, exactly where `NpxNotFoundError` comes from for real.
+    entry = AgentEntry(
+        id="agent-a", name="Agent A", version="1.0.0",
+        npx=NpxDistribution(package="@test/agent", args=[]),
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("no npm found next to /fake/node")
+
+    monkeypatch.setattr("houdini_agent_panel.runtime.install_agent", _boom)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_layout.itemAt(0).widget()
+    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Install")
+
+    failures = []
+    view.install_failed.connect(lambda agent_id, message: failures.append((agent_id, message)))
+    install_button.click()
+
+    _wait_until(lambda: not view._threads)
+
+    assert failures == [("agent-a", "no npm found next to /fake/node")]
+    assert "agent-a" not in view._installing, "the agent stayed locked as 'installing' forever"
+    row = view._rows_layout.itemAt(0).widget()
+    assert row._state_label.text() == "error: no npm found next to /fake/node"
+
+    # And the lock being cleared means a retry is actually possible, not
+    # silently ignored a second time — the earlier bug's real consequence.
+    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Install")
+    install_button.click()
+    assert "agent-a" in view._installing, "clicking again did not even start a new attempt"
 
 
 def test_installed_agent_has_no_use_button(qapp, monkeypatch):
