@@ -684,3 +684,100 @@ Why unit tests didn't catch this: outside Houdini the policy is the stock
 one, and both calls work. A test that catches the regression has to install
 a policy that mimics `haio` — one that fails on `run_forever()` off the
 main thread and raises `NotImplementedError` from `get_child_watcher()`.
+
+---
+
+## 10. A top-level Qt widget inside Houdini never gets a native window freed on its own
+
+Measured, not read: 20 unparented `QWidget`s created and left alone —
+0 new native (OS-level) windows. Calling `winId()` on each (the same thing
+`show()` triggers internally) — +20 native windows. Deleting the widgets
+correctly afterwards (`setParent(None)` then `deleteLater()`, event loop
+pumped) — 0 of those 20 native windows freed. Checked externally, from
+outside the process, with `CGWindowListCopyWindowInfo` filtered by this
+Houdini process's pid — not by asking Qt about its own widget count, which
+would not have caught this.
+
+Consequence: a popup that gets recreated on every use (a fresh `QWidget`
+each time instead of the same instance shown/hidden/reused) leaks one
+native window per use, for the life of the Houdini process — there is no
+point later at which it gets reclaimed. The fix is structural, not a
+cleanup call: build the popup once, keep it, and only ever call
+`show()`/`hide()` on the same instance. Measured effect of applying this to
+the panel's own popups: opening the panel went from +28 native windows to
++6.
+
+---
+
+## 11. `hou.qt` does not exist inside `hython`
+
+Confirmed in both Houdini 20.5.445 and 22.0.368: `import hou; hou.qt` raises
+`AttributeError` in `hython`. Not "empty" or "a stub" — the attribute is
+absent.
+
+Consequence: any code path that reads a color via `hou.qt.getColor(...)` (or
+anything else under `hou.qt`) cannot be exercised or verified headless —
+`hython` has no such thing to call. It can only be checked live, inside
+Houdini's actual GUI process. This is the concrete reason `theme.py` treats
+`QApplication.palette()` as the primary source for the panel's colors and
+`hou.qt`-based lookups (where they exist at all, GUI-only) as at most a
+narrow, secondary fallback — the primary source has to be something
+`hython` can actually reach, since that's what the test suite and any
+headless verification run on.
+
+---
+
+## 12. Houdini 22's colorscheme presets — `Themes/default.theme.json`
+
+Lives at `$HFS/houdini/config/Themes/default.theme.json` in a Houdini 22
+install (`$HFS` is Houdini's own install-root environment variable). 52
+presets in that file, each one three HSV triples: `base`, `primary`,
+`highlight`. Example: the "Plumtree" preset's `highlight` is `[356, 30, 50]`
+in HSV, which converts to `#7f595b`.
+
+In Houdini 20.5 and 21, this file does not exist at all — there is no
+`Themes/` directory to check against.
+
+**Not established**: whether `hou.qt.getColor()` (or any other live
+in-app color lookup) actually follows a preset selected this way — i.e.,
+whether picking "Plumtree" in Houdini 22's theme editor changes what
+`hou.qt.getColor()` returns at runtime. This file only proves the preset
+data exists and what it contains; it says nothing about which live API
+reads it. Checking that requires a live GUI session (see fact 11 — it
+cannot be checked in `hython` at all), and it hasn't been done within this
+project's scope.
+
+---
+
+## 13. `QCoreApplication.processEvents()` does not run Qt's deferred deletes
+
+`widget.deleteLater()` schedules a `QEvent.DeferredDelete`, and
+`processEvents()` alone does not drain that queue — a widget-lifetime
+measurement that calls only `processEvents()` between "delete" and
+"count what's left" will report a leak in a place where the object is
+actually gone, just not yet swept. The queue needs
+`QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)` (or an
+equivalent explicit flush) run as well.
+
+Cost of not knowing this, paid in full during this project: about an hour
+spent chasing a "leak" that was this artifact, not a real one, before
+sendPostedEvents was added and the reading came back clean.
+
+---
+
+## 14. A `QThread` still running at process exit is fatal, not a warning
+
+From a real crash report, not a lab reproduction: Qt does not print a
+warning and move on if a `QThread` is destroyed while its `run()` is still
+executing — it calls `qFatal()`, which raises `SIGABRT` and takes the whole
+process down. In this project this showed up as Houdini itself crashing on
+close, not as a log line.
+
+Consequence: any background `QThread` a panel starts must be positively
+stopped before the process can go down — relying on a single shutdown path
+(e.g. only the widget's own `shutdown()`/`onDestroyInterface()`) is not
+enough, because Houdini does not guarantee that path runs on every kind of
+exit. The thread needs to be stopped from more than one place: on the
+panel's own teardown AND on `QCoreApplication.aboutToQuit`, AND as a last
+resort in an `atexit` handler — whichever of those actually fires first for
+a given exit path is what saves the process.
