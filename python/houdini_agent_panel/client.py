@@ -851,6 +851,14 @@ class AcpWorker(QtCore.QThread):
                     break
                 text = line.decode(errors="replace").rstrip("\n")
                 self._stderr_tail.append(text)
+                # No `self._closing` guard here, deliberately, and unlike
+                # `_watch_process_exit`'s `disconnected`. That one is
+                # guarded because a stop we asked for is not a disconnection
+                # worth reporting. A log line is the opposite case: what the
+                # agent says while going down is often the only explanation
+                # of WHY, and dropping it would blind the log exactly where
+                # it is most needed. `stop()` flushes the delivery queue
+                # instead, which keeps the words without stranding them.
                 self.log_line.emit(text)
         except asyncio.CancelledError:
             pass
