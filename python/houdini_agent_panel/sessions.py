@@ -52,6 +52,10 @@ class SessionState:
     entries: list[Entry] = field(default_factory=list)  # the feed, see §8
     usage: Usage | None = None
     busy: bool = False
+    #: Something arrived while this conversation wasn't the one on screen.
+    #: Cleared the moment it becomes current again (`AgentPanel._show_session`)
+    #: — "read" means "the artist had it open," nothing more elaborate.
+    unread: bool = False
 
 
 class SessionPool(QtCore.QObject):

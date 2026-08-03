@@ -431,6 +431,7 @@ class SessionState:
     entries: list[Entry] = ...      # the feed, see §8
     usage: Usage | None = None
     busy: bool = False
+    unread: bool = False    # something arrived while this wasn't the visible session
 
 class SessionPool(QtCore.QObject):
     added = Signal(str)

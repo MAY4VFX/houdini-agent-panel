@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import time
 import weakref
+from dataclasses import replace
 from typing import Any
 
 from .. import client as acp_client
@@ -595,8 +596,19 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_config_options(list(options))
 
     def _on_config_option_selected(self, config_id: str, value: str) -> None:
+        """Record the pick right away — same reasoning as `_on_mode_selected`.
+
+        `state.config_options` otherwise only moves when the agent sends its
+        own `config_option_update`, which coming back to this session later
+        would overwrite with whatever the value was before the pick.
+        """
         current = self._pool.current()
         if current is not None:
+            current.config_options = [
+                replace(option, current_value=value) if option.id == config_id else option
+                for option in current.config_options
+            ]
+            self._pool.mark_changed(current.session_id)
             shared_client().set_config_option(current.session_id, config_id, value)
 
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
@@ -710,6 +722,10 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_commands(list(state.available_commands))
             self._composer.set_modes(state.available_modes, state.current_mode_id)
             self._composer.set_config_options(list(state.config_options))
+            # Being open IS being read — the sidebar's unread dot (design.md,
+            # "the sidebar") only ever means "something arrived while this
+            # wasn't the visible conversation."
+            state.unread = False
         self._sync_permission_popover()
         self._refresh_sessions()
 
@@ -759,7 +775,10 @@ class AgentPanel(QtWidgets.QWidget):
         if popover is None:
             return
         anchor = self._composer.popover_anchor_rect(self)
-        width = min(400, max(280, anchor.width() - 96))
+        # Widened together with `PermissionRow`'s own bounds (320–480): four
+        # real options ("Allow once/always", "Reject once/always") need more
+        # than the original 280–400 gave them.
+        width = min(480, max(320, anchor.width() - 64))
         popover.setFixedWidth(width)
         popover.adjustSize()
         x = anchor.center().x() - width // 2
@@ -869,10 +888,19 @@ class AgentPanel(QtWidgets.QWidget):
         """Redraw a single entry — only if the human is looking at this session.
 
         Otherwise streaming into a background session would make Qt reflow a
-        feed nobody is watching.
+        feed nobody is watching. What DOES happen for a background session is
+        the sidebar's unread dot (design.md, "the sidebar"): flipped once, on
+        the first touch after it goes quiet, not on every following chunk —
+        one `changed` signal per conversation going stale beats rebuilding
+        the drawer for every streamed token.
         """
         if self._is_current(session_id):
             self._transcript.refresh(entry_id)
+            return
+        state = self._pool.get(session_id)
+        if state is not None and not state.unread:
+            state.unread = True
+            self._pool.mark_changed(session_id)
 
     # ------------------------------------------------------------- input
 
@@ -945,8 +973,21 @@ class AgentPanel(QtWidgets.QWidget):
         self._touch(session_id, entry.id)
 
     def _on_mode_selected(self, mode_id: str) -> None:
+        """Record the pick right away, not only once the agent echoes it back.
+
+        `session/set_mode` is a one-way call — `SessionState.current_mode_id`
+        used to update ONLY from the agent's own `current_mode_update`
+        (`_on_modes_changed`). An agent slow to send that update, or an
+        artist switching to another conversation before it arrives, left the
+        stored id stale; coming back to this session then had `_show_session`
+        push the STALE value back into the mode chip, quietly overwriting
+        "Plan" with whatever it was when the session was created. Setting it
+        here as well means the pick survives even if the echo never comes.
+        """
         current = self._pool.current()
         if current is not None:
+            current.current_mode_id = mode_id
+            self._pool.mark_changed(current.session_id)
             shared_client().set_mode(current.session_id, mode_id)
 
     def _on_buddy_selected(self, buddy: str) -> None:

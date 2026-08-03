@@ -550,6 +550,103 @@ def test_agent_offering_no_config_options_gets_no_chips(qapp):
     widget.shutdown()
 
 
+def test_mode_selection_survives_switching_away_and_back(qapp, monkeypatch):
+    """Picking "Plan" must not revert to the default mode after visiting
+    another conversation — the agent's own `current_mode_update` echo is not
+    guaranteed to arrive before the artist switches away."""
+    from houdini_agent_panel.sessions import SessionMode
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+    monkeypatch.setattr(client, "set_mode", lambda _sid, _mode_id: None)
+
+    first = _session("s1")
+    client.session_started.emit(first.session_id, first)
+    qapp.processEvents()
+    modes = [SessionMode(id="manual", name="Manual"), SessionMode(id="plan", name="Plan")]
+    client.modes_changed.emit(
+        first.session_id, SimpleNamespace(current_mode_id="manual", available_modes=modes)
+    )
+    qapp.processEvents()
+
+    widget._on_mode_selected("plan")
+    assert widget._pool.get("s1").current_mode_id == "plan"
+
+    second = _session("s2")
+    client.session_started.emit(second.session_id, second)
+    qapp.processEvents()
+    assert widget._pool.current().session_id == "s2"
+
+    widget._pool.set_current("s1")
+    qapp.processEvents()
+
+    assert widget._pool.get("s1").current_mode_id == "plan"
+    assert widget._composer.mode_chip._combo.currentData() == "plan"
+    widget.shutdown()
+
+
+def test_config_option_selection_survives_switching_away_and_back(qapp, monkeypatch):
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+    monkeypatch.setattr(client, "set_config_option", lambda _sid, _cid, _value: None)
+
+    first = _session("s1")
+    client.session_started.emit(first.session_id, first)
+    qapp.processEvents()
+    option = ConfigOption(
+        id="model",
+        name="Model",
+        current_value="sonnet",
+        choices=(
+            ConfigChoice(value="sonnet", name="Claude Sonnet"),
+            ConfigChoice(value="opus", name="Claude Opus"),
+        ),
+    )
+    client.config_options_changed.emit(first.session_id, [option])
+    qapp.processEvents()
+
+    widget._on_config_option_selected("model", "opus")
+    assert widget._pool.get("s1").config_options[0].current_value == "opus"
+
+    second = _session("s2")
+    client.session_started.emit(second.session_id, second)
+    qapp.processEvents()
+
+    widget._pool.set_current("s1")
+    qapp.processEvents()
+
+    assert widget._pool.get("s1").config_options[0].current_value == "opus"
+    assert widget._composer._config_chips[0].currentData() == "opus"
+    widget.shutdown()
+
+
+def test_background_session_gets_unread_dot_current_session_does_not(qapp):
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+
+    first = _session("s1")
+    client.session_started.emit(first.session_id, first)
+    qapp.processEvents()
+    second = _session("s2")
+    client.session_started.emit(second.session_id, second)
+    qapp.processEvents()
+    assert widget._pool.current().session_id == "s2"
+
+    client.message_chunk.emit("s1", "m1", "an answer arrived while s1 was in the background")
+    qapp.processEvents()
+
+    assert widget._pool.get("s1").unread is True
+    assert widget._pool.get("s2").unread is False
+
+    widget._pool.set_current("s1")
+    qapp.processEvents()
+
+    assert widget._pool.get("s1").unread is False
+    widget.shutdown()
+
+
 def test_text_typed_before_any_session_is_not_thrown_away(qapp, monkeypatch):
     """The composer clears itself on submit, so the panel has to keep what it
     was handed — otherwise the first message after opening the panel vanished

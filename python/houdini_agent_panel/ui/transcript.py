@@ -80,6 +80,20 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._model: TranscriptModel | None = None
         self._rows: dict[str, QtWidgets.QWidget] = {}
 
+        # A per-instance, self-owned timer for the deferred autoscroll below
+        # — NOT the static `QTimer.singleShot(0, self._scroll_to_bottom)`,
+        # which schedules its callback on the application's event loop with
+        # no owner of its own. If this view is destroyed before a 0ms shot
+        # fires (a background session's view torn down between two panel
+        # switches, or simply a test's widget going out of scope), that
+        # dangling call into an already-deleted `QScrollArea` crashed the
+        # whole process instead of raising a catchable error. Parenting the
+        # timer to `self` makes Qt's own ownership take care of it: the timer
+        # dies together with the view, so a pending shot simply never fires.
+        self._scroll_timer = QtCore.QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._scroll_to_bottom)
+
     # --- public API ----------------------------------------------------
 
     def set_model(self, model: TranscriptModel) -> None:
@@ -101,23 +115,57 @@ class TranscriptView(QtWidgets.QScrollArea):
         else:
             self._refresh_one(entry_id)
         if was_at_bottom:
-            self._scroll_to_bottom()
+            # Deferred, not immediate: growing content (a streamed chunk
+            # resizing its `QTextBrowser`) only widens the scrollbar's range
+            # on a LATER layout pass — scrolling to `maximum()` right now
+            # would still snap to the range from before this update, one
+            # chunk behind. `start(0)` queues the actual scroll for the next
+            # event-loop turn, after that layout has caught up.
+            self._scroll_timer.start(0)
 
     # --- rebuilding -------------------------------------------------------
 
     def _rebuild_all(self) -> None:
-        for row in list(self._rows.values()):
+        seen_widgets: set[int] = set()
+        for row in self._rows.values():
+            # A run of tool calls shares ONE `_ToolGroupRow` across several
+            # entry ids — remove/delete it once, not once per id.
+            if id(row) in seen_widgets:
+                continue
+            seen_widgets.add(id(row))
             self._layout.removeWidget(row)
             row.setParent(None)
             row.deleteLater()
         self._rows.clear()
 
-        for entry in self._model.entries():
-            if entry.kind == "permission":
-                continue
-            row = self._make_row(entry)
-            self._rows[entry.id] = row
-            self._layout.insertWidget(len(self._rows) - 1, row)
+        entries = [e for e in self._model.entries() if e.kind != "permission"]
+        position = 0
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if entry.kind == "tool":
+                group = [entry]
+                index += 1
+                while index < len(entries) and entries[index].kind == "tool":
+                    group.append(entries[index])
+                    index += 1
+                row = self._build_tool_widget(group)
+                for grouped in group:
+                    self._rows[grouped.id] = row
+            else:
+                row = self._make_row(entry)
+                self._rows[entry.id] = row
+                index += 1
+            self._layout.insertWidget(position, row)
+            position += 1
+
+    def _build_tool_widget(self, group: list[Entry]) -> QtWidgets.QWidget:
+        """One tool call stays a bare `_ToolCallRow` — identical to a lone
+        call today. Only a run of two or more gets the group's extra chrome
+        (a summary line plus a click to reveal the list)."""
+        if len(group) == 1:
+            return _ToolCallRow(group[0])
+        return _ToolGroupRow([_ToolCallRow(entry) for entry in group])
 
     def _refresh_one(self, entry_id: str) -> None:
         entries = self._model.entries()
@@ -146,32 +194,63 @@ class TranscriptView(QtWidgets.QScrollArea):
             self._update_row(row, entry)
             return
 
-        # A new entry goes at its own position among the drawn ones.
-        # TranscriptModel always appends and never reorders, so the position
-        # among already-drawn rows matches the entry's index in the model's
-        # full list.
-        index = sum(
-            1
-            for candidate in entries[: entries.index(entry)]
-            if candidate.kind != "permission"
-        )
-        row = self._make_row(entry)
-        self._rows[entry.id] = row
-        self._layout.insertWidget(index, row)
+        visible = [e for e in entries if e.kind != "permission"]
+        position = visible.index(entry)
+
+        if entry.kind == "tool":
+            # Consecutive tool calls collapse into one block (design.md, "the
+            # middle"): if the entry immediately before this one in the model
+            # is also a tool call — and nothing else came in between — this
+            # new call joins its row instead of getting one of its own.
+            previous = visible[position - 1] if position > 0 else None
+            previous_row = self._rows.get(previous.id) if previous is not None else None
+            if previous is not None and previous.kind == "tool" and previous_row is not None:
+                if isinstance(previous_row, _ToolGroupRow):
+                    previous_row.add_tool(entry)
+                    self._rows[entry_id] = previous_row
+                    return
+                # `previous_row` is still a bare `_ToolCallRow` — this is the
+                # SECOND call in the run, so it graduates into a group
+                # covering both. The existing widget is reused rather than
+                # rebuilt, so an already-expanded first call stays expanded.
+                widget_position = self._layout.indexOf(previous_row)
+                self._layout.removeWidget(previous_row)
+                group = _ToolGroupRow([previous_row, _ToolCallRow(entry)])
+                self._rows[previous.id] = group
+                self._rows[entry_id] = group
+                self._layout.insertWidget(widget_position, group)
+                return
+            row = _ToolCallRow(entry)
+        else:
+            row = self._make_row(entry)
+
+        # A new row goes at the position among already-drawn WIDGETS (not
+        # model entries — several entries can share one `_ToolGroupRow`).
+        widget_position = 0
+        seen_widgets: set[int] = set()
+        for candidate in visible[:position]:
+            candidate_row = self._rows.get(candidate.id)
+            if candidate_row is None or id(candidate_row) in seen_widgets:
+                continue
+            seen_widgets.add(id(candidate_row))
+            widget_position += 1
+        self._rows[entry_id] = row
+        self._layout.insertWidget(widget_position, row)
 
     # --- building rows by kind ---------------------------------------------
 
     def _make_row(self, entry: Entry) -> QtWidgets.QWidget:
         if entry.kind == "activity":
             return _ActivityRow(entry)
-        if entry.kind == "tool":
-            return _ToolCallRow(entry)
         if entry.kind == "plan":
             return _PlanRow(entry)
         return _MessageRow(entry)
 
     def _update_row(self, row: QtWidgets.QWidget, entry: Entry) -> None:
-        row.update_from(entry)
+        if isinstance(row, _ToolGroupRow):
+            row.update_tool(entry)
+        else:
+            row.update_from(entry)
 
     # --- auto-scroll -------------------------------------------------------
 
@@ -526,6 +605,100 @@ def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
         parts.append(f"[files: {paths}]")
 
     return "\n\n".join(parts) if parts else "(no content)"
+
+
+class _ToolGroupRow(QtWidgets.QWidget):
+    """A run of consecutive tool calls, collapsed into one block.
+
+    "Все тулы сыплются в чат бесконечно" was the complaint: an agent that
+    reads five files in a row used to draw five separate `_ToolCallRow`
+    widgets, one under another, forever growing the feed. Modeled on how
+    Claude Code shows this — collapsed by default to a single summary line
+    (whichever step is still running, or a one-line result once the whole
+    run is done), with a click revealing the full list.
+
+    Deliberately a VIEW-only grouping: `TranscriptModel` still emits one
+    `Entry` per tool call (docs/architecture.md §8) — nothing about the feed
+    model changes, only how `TranscriptView` arranges rows on screen. Every
+    entry id in the run maps to this SAME widget in `TranscriptView._rows`,
+    which is how a `tool_call_update` for any of them finds its way back
+    here (`update_tool`).
+    """
+
+    def __init__(self, rows: list["_ToolCallRow"], parent=None) -> None:
+        super().__init__(parent)
+        self.setMaximumWidth(560)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACING_TIGHT)
+
+        self._summary = _ToolTrigger(self)
+        self._summary.clicked.connect(self._on_toggled)
+        layout.addWidget(self._summary)
+
+        # The full list of steps — hidden until the summary is clicked. Each
+        # step is a full `_ToolCallRow`, unmodified (and, for a call that was
+        # already on screen before the run grew past one, the SAME instance —
+        # see `TranscriptView._refresh_one` — so an already-expanded first
+        # call doesn't collapse just because a second one arrived): expanding
+        # a step inside the group still shows its diff/content exactly like a
+        # standalone tool call always has.
+        self._steps = QtWidgets.QWidget(self)
+        self._steps_layout = QtWidgets.QVBoxLayout(self._steps)
+        self._steps_layout.setContentsMargins(16, 4, 0, 0)
+        self._steps_layout.setSpacing(theme.SPACING_TIGHT)
+        self._steps.setVisible(False)
+        layout.addWidget(self._steps)
+
+        self._step_rows: dict[str, _ToolCallRow] = {}
+        self._order: list[str] = []
+        self._expanded = False
+
+        for row in rows:
+            self._adopt(row)
+        self._sync_summary()
+
+    def _adopt(self, row: "_ToolCallRow") -> None:
+        row.setParent(self._steps)
+        self._steps_layout.addWidget(row)
+        self._step_rows[row._entry_id] = row
+        self._order.append(row._entry_id)
+
+    def add_tool(self, entry: Entry) -> None:
+        self._adopt(_ToolCallRow(entry))
+        self._sync_summary()
+
+    def update_tool(self, entry: Entry) -> None:
+        row = self._step_rows.get(entry.id)
+        if row is not None:
+            row.update_from(entry)
+        self._sync_summary()
+
+    def _on_toggled(self, checked: bool) -> None:
+        self._expanded = checked
+        self._steps.setVisible(checked)
+
+    def _sync_summary(self) -> None:
+        views = [self._step_rows[entry_id]._tool for entry_id in self._order]
+        running = next(
+            (view for view in reversed(views) if view.status in ("pending", "in_progress")),
+            None,
+        )
+        if running is not None:
+            title = running.title if len(views) == 1 else f"{running.title} ({len(views)} steps)"
+            self._summary.set_view(kind=running.kind, title=title, status=running.status)
+            return
+
+        # The whole run has finished. A single call keeps looking exactly
+        # like a standalone tool call always has; several collapse into one
+        # summary line instead of leaving every finished step on screen.
+        last = views[-1]
+        if len(views) == 1:
+            self._summary.set_view(kind=last.kind, title=last.title, status=last.status)
+            return
+        status = "failed" if any(view.status == "failed" for view in views) else "completed"
+        self._summary.set_view(kind="other", title=f"Ran {len(views)} tools", status=status)
 
 
 class _PlanRow(QtWidgets.QWidget):

@@ -21,6 +21,43 @@ def test_drawer_lists_newest_conversation_first_and_marks_current(qapp):
     assert host._buttons["old"].property("currentConversation") is False
 
 
+# --- busy / unread markers -------------------------------------------------
+
+
+def test_busy_session_shows_the_busy_dot(qapp):
+    host = ConversationDrawer()
+    busy = _state("s1", "Chat", 1.0)
+    busy.busy = True
+    idle = _state("s2", "Other chat", 2.0)
+    host.set_sessions([busy, idle], "s2")
+
+    assert host._busy_dots["s1"].isHidden() is False
+    assert host._busy_dots["s2"].isHidden() is True
+
+
+def test_unread_session_shows_the_unread_dot(qapp):
+    host = ConversationDrawer()
+    unread = _state("s1", "Chat", 1.0)
+    unread.unread = True
+    read = _state("s2", "Other chat", 2.0)
+    host.set_sessions([unread, read], "s2")
+
+    assert host._unread_dots["s1"].isHidden() is False
+    assert host._unread_dots["s2"].isHidden() is True
+
+
+def test_busy_and_unread_markers_are_independent(qapp):
+    """A session can be both, or either, or neither — they track different things."""
+    host = ConversationDrawer()
+    both = _state("s1", "Chat", 1.0)
+    both.busy = True
+    both.unread = True
+    host.set_sessions([both], "s1")
+
+    assert host._busy_dots["s1"].isHidden() is False
+    assert host._unread_dots["s1"].isHidden() is False
+
+
 def test_selecting_conversation_emits_id_and_closes_drawer(qapp):
     from PySide6 import QtWidgets
 

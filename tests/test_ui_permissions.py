@@ -24,8 +24,8 @@ def _view(**overrides) -> PermissionView:
 def test_buttons_built_in_order_from_options(qapp):
     row = PermissionRow(_view())
     assert list(row._buttons.keys()) == ["allow_once", "allow_always", "reject_once"]
-    assert row.maximumWidth() == 400
-    assert row.minimumWidth() == 280
+    assert row.maximumWidth() == 480
+    assert row.minimumWidth() == 320
 
 
 def test_button_labels_match_option_names_exactly(qapp):
@@ -38,6 +38,32 @@ def test_button_labels_match_option_names_exactly(qapp):
 def test_no_extra_buttons_added(qapp):
     row = PermissionRow(_view())
     assert len(row._buttons) == 3
+
+
+def test_four_options_fit_in_a_two_column_grid(qapp):
+    """The full ACP set — allow/reject × once/always — must never clip."""
+    view = _view(
+        options=[
+            ("allow_once", "Allow once", "allow_once"),
+            ("allow_always", "Allow always", "allow_always"),
+            ("reject_once", "Reject once", "reject_once"),
+            ("reject_always", "Reject always", "reject_always"),
+        ]
+    )
+    row = PermissionRow(view)
+
+    assert len(row._buttons) == 4
+    grid = row.layout().itemAt(1).layout()
+    positions = {
+        option_id: grid.getItemPosition(grid.indexOf(button))
+        for option_id, button in row._buttons.items()
+    }
+    rows_used = {pos[0] for pos in positions.values()}
+    cols_used = {pos[1] for pos in positions.values()}
+    # Two rows of two columns — never a single row of four that would need
+    # to squeeze into (or clip past) the popover's width.
+    assert rows_used == {0, 1}
+    assert cols_used == {0, 1}
 
 
 def test_clicking_button_emits_answered_with_matching_option_id(qapp):

@@ -268,6 +268,116 @@ def test_tool_call_row_keeps_expanded_state_across_status_update(qapp):
     assert row._details.isHidden() is False  # the expansion survived the status update
 
 
+# --- tool call grouping -------------------------------------------------------
+
+
+def test_single_tool_call_stays_a_bare_row(qapp):
+    """One call alone gets no extra chrome — identical to today's row."""
+    from houdini_agent_panel.ui.transcript import _ToolCallRow, _ToolGroupRow
+
+    view, model = _view_and_model()
+    entry = model.apply_tool_call(_tool_call())
+    view.refresh(entry.id)
+
+    row = view._rows[entry.id]
+    assert isinstance(row, _ToolCallRow)
+    assert not isinstance(row, _ToolGroupRow)
+
+
+def test_consecutive_tool_calls_collapse_into_one_block(qapp):
+    """A run of tool calls with nothing in between draws ONE widget."""
+    from houdini_agent_panel.ui.transcript import _ToolGroupRow
+
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", title="Read a.py"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", title="Read b.py"))
+    view.refresh(e2.id)
+    e3 = model.apply_tool_call(_tool_call(tool_call_id="tc3", title="Read c.py"))
+    view.refresh(e3.id)
+
+    row1 = view._rows[e1.id]
+    assert isinstance(row1, _ToolGroupRow)
+    assert view._rows[e2.id] is row1
+    assert view._rows[e3.id] is row1
+    # Only one widget is actually in the layout for all three calls.
+    assert view._layout.count() == 2  # the group row + the trailing stretch
+
+
+def test_a_message_between_tool_calls_breaks_the_group(qapp):
+    from houdini_agent_panel.ui.transcript import _ToolGroupRow
+
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1"))
+    view.refresh(e1.id)
+    msg = model.apply_chunk("m1", "an update from the agent")
+    view.refresh(msg.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2"))
+    view.refresh(e2.id)
+
+    assert view._rows[e1.id] is not view._rows[e2.id]
+    assert not isinstance(view._rows[e1.id], _ToolGroupRow)
+    assert not isinstance(view._rows[e2.id], _ToolGroupRow)
+
+
+def test_group_summary_shows_the_still_running_step_by_default(qapp):
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", title="Read a.py", status="completed"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", title="Read b.py", status="in_progress"))
+    view.refresh(e2.id)
+
+    row = view._rows[e1.id]
+    assert row._steps.isHidden() is True
+    assert "Read b.py" in row._summary.text()
+
+
+def test_group_summary_reports_a_result_once_the_run_finishes(qapp):
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", status="completed"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", status="pending"))
+    view.refresh(e2.id)
+    model.apply_tool_update(_tool_update(tool_call_id="tc2", status="completed"))
+    view.refresh(e2.id)
+
+    row = view._rows[e1.id]
+    assert "2" in row._summary.text()
+
+
+def test_expanding_the_group_reveals_every_step(qapp):
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", title="Read a.py"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", title="Read b.py"))
+    view.refresh(e2.id)
+
+    row = view._rows[e1.id]
+    assert row._steps.isHidden() is True
+
+    row._summary.click()
+
+    assert row._steps.isHidden() is False
+    assert set(row._step_rows) == {e1.id, e2.id}
+    assert "Read a.py" in row._step_rows[e1.id]._toggle.text()
+    assert "Read b.py" in row._step_rows[e2.id]._toggle.text()
+
+
+def test_a_step_expanded_before_the_group_grows_stays_expanded(qapp):
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1"))
+    view.refresh(e1.id)
+    row1 = view._rows[e1.id]
+    row1._toggle.click()  # expand the lone call before a second one arrives
+
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2"))
+    view.refresh(e2.id)
+
+    group = view._rows[e1.id]
+    assert group._step_rows[e1.id] is row1  # same widget, not rebuilt
+    assert row1._details.isHidden() is False
+
+
 # --- plan --------------------------------------------------------------------
 
 

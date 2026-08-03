@@ -14,6 +14,28 @@ _AMBER = "#dfa047"
 #: overflow buttons straight out of the (non-scrolling) drawer, off screen.
 _TITLE_MAX_WIDTH = 190
 
+#: Diameter of the busy/unread markers on a conversation row.
+_DOT_SIZE = 8
+
+
+def _dot_pixmap(color: QtGui.QColor, size: int = 8) -> QtGui.QPixmap:
+    """A small filled circle — the sidebar's busy/unread markers.
+
+    Both share this one shape and the same accent colour; what tells them
+    apart is where they sit on the row (see `_build_row`), not a second
+    colour — one accent already means "look here" everywhere else in the
+    panel (the mode chip, the pin icon).
+    """
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    painter.setBrush(color)
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.drawEllipse(0, 0, size, size)
+    painter.end()
+    return pixmap
+
 
 def sidebar_icon() -> QtGui.QIcon:
     """Small split-panel glyph matching modern conversation sidebars."""
@@ -132,6 +154,8 @@ class ConversationDrawer(QtWidgets.QFrame):
 
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
         self._pin_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self._busy_dots: dict[str, QtWidgets.QLabel] = {}
+        self._unread_dots: dict[str, QtWidgets.QLabel] = {}
         self._states: dict[str, SessionState] = {}
         self._pinned: set[str] = set()
         self._current_id: str | None = None
@@ -196,6 +220,8 @@ class ConversationDrawer(QtWidgets.QFrame):
                 widget.deleteLater()
         self._buttons.clear()
         self._pin_buttons.clear()
+        self._busy_dots.clear()
+        self._unread_dots.clear()
         ordered = sorted(
             states, key=lambda s: (s.session_id not in self._pinned, -s.created_at)
         )
@@ -210,6 +236,18 @@ class ConversationDrawer(QtWidgets.QFrame):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(2)
 
+        # Busy — the agent is working on THIS conversation right now, even
+        # though it isn't the one on screen. Ahead of the title: it's the
+        # first thing that should catch the eye scanning down the list.
+        busy_dot = QtWidgets.QLabel(row)
+        busy_dot.setObjectName("rowBusyDot")
+        busy_dot.setFixedSize(_DOT_SIZE + 4, _DOT_SIZE + 4)
+        busy_dot.setAlignment(QtCore.Qt.AlignCenter)
+        busy_dot.setPixmap(_dot_pixmap(QtGui.QColor(_AMBER)))
+        busy_dot.setToolTip("The agent is working on this conversation")
+        busy_dot.setVisible(state.busy)
+        row_layout.addWidget(busy_dot)
+
         button = QtWidgets.QPushButton(row)
         button.setProperty("conversation", True)
         button.setProperty("currentConversation", state.session_id == self._current_id)
@@ -220,6 +258,19 @@ class ConversationDrawer(QtWidgets.QFrame):
             lambda _checked=False, sid=state.session_id: self._select_session(sid)
         )
         row_layout.addWidget(button, 1)
+
+        # Unread — a reply landed while this conversation wasn't open.
+        # Separate from "busy": a session can finish a turn and sit unread
+        # long after the agent stopped working on it. Cleared the moment the
+        # artist opens it (`AgentPanel._show_session`), never here.
+        unread_dot = QtWidgets.QLabel(row)
+        unread_dot.setObjectName("rowUnreadDot")
+        unread_dot.setFixedSize(_DOT_SIZE + 4, _DOT_SIZE + 4)
+        unread_dot.setAlignment(QtCore.Qt.AlignCenter)
+        unread_dot.setPixmap(_dot_pixmap(QtGui.QColor(_AMBER)))
+        unread_dot.setToolTip("Unread reply")
+        unread_dot.setVisible(state.unread)
+        row_layout.addWidget(unread_dot)
 
         pinned = state.session_id in self._pinned
         pin_button = QtWidgets.QToolButton(row)
@@ -243,6 +294,8 @@ class ConversationDrawer(QtWidgets.QFrame):
 
         self._buttons[state.session_id] = button
         self._pin_buttons[state.session_id] = pin_button
+        self._busy_dots[state.session_id] = busy_dot
+        self._unread_dots[state.session_id] = unread_dot
         return row
 
     def set_top_inset(self, top: int) -> None:

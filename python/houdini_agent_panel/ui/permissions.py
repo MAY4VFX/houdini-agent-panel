@@ -24,8 +24,11 @@ class PermissionRow(QtWidgets.QWidget):
         super().__init__(parent)
         self.setObjectName("permissionPopover")
         self.setAttribute(theme.QtCore.Qt.WA_StyledBackground, True)
-        self.setMinimumWidth(280)
-        self.setMaximumWidth(400)
+        # Widened from the original 280–400: a real four-option agent
+        # ("Allow once" / "Allow always" / "Reject once" / "Reject always")
+        # didn't fit in 400px, and the popover clipped instead of wrapping.
+        self.setMinimumWidth(320)
+        self.setMaximumWidth(480)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self._view = view
         self._answered: str | None = view.answered
@@ -40,13 +43,20 @@ class PermissionRow(QtWidgets.QWidget):
         self._title_label.setTextInteractionFlags(theme.QtCore.Qt.TextSelectableByMouse)
         layout.addWidget(self._title_label)
 
-        buttons_row = QtWidgets.QHBoxLayout()
-        buttons_row.setSpacing(theme.SPACING_TIGHT)
-        buttons_row.addStretch(1)
-        for option_id, name, kind in view.options:
+        # A grid, not a single row: the title and the buttons are already
+        # stacked vertically (a long title just wraps, it never squeezes the
+        # buttons), but a single `QHBoxLayout` row of options has no fallback
+        # once four real options don't fit — each button just gets squeezed
+        # instead of wrapping. Two columns always fit, at any popover width.
+        buttons_grid = QtWidgets.QGridLayout()
+        buttons_grid.setHorizontalSpacing(theme.SPACING_TIGHT)
+        buttons_grid.setVerticalSpacing(theme.SPACING_TIGHT)
+        columns = 2 if len(view.options) > 2 else max(len(view.options), 1)
+        for index, (option_id, name, kind) in enumerate(view.options):
             button = QtWidgets.QPushButton(name, self)  # text is exactly what the agent sent
             button.setFlat(True)
             button.setMinimumHeight(26)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             font = button.font()
             if kind.endswith("_always"):
                 font.setBold(True)
@@ -58,8 +68,9 @@ class PermissionRow(QtWidgets.QWidget):
             button.setProperty("permissionPrimary", kind == "allow_once")
             button.clicked.connect(lambda _checked=False, oid=option_id: self._on_clicked(oid))
             self._buttons[option_id] = button
-            buttons_row.addWidget(button)
-        layout.addLayout(buttons_row)
+            row, col = divmod(index, columns)
+            buttons_grid.addWidget(button, row, col)
+        layout.addLayout(buttons_grid)
 
         # Only visible after an answer — the record of what the human chose.
         self._status_label = QtWidgets.QLabel(self)
