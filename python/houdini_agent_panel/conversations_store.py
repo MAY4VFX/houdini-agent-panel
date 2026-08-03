@@ -56,13 +56,26 @@ class StoredConversation:
     #: Which agent it was last spoken to. Shown to the artist, never used to
     #: resume: a session id from a dead process is not a resource.
     agent_id: str = ""
+    #: The scene directory this conversation belongs to (`$HIP`). Talking to
+    #: an agent about one shot has nothing to do with the next shot, so the
+    #: drawer shows only the conversations of the scene that is open — the
+    #: same scoping a terminal agent gets for free by being started in a
+    #: directory. Empty means it predates this field; see `load`.
+    cwd: str = ""
     entries: list[dict] = field(default_factory=list)
 
     @staticmethod
-    def new(title: str = "New conversation", agent_id: str = "") -> "StoredConversation":
+    def new(
+        title: str = "New conversation", agent_id: str = "", cwd: str = ""
+    ) -> "StoredConversation":
         now = time.time()
         return StoredConversation(
-            id=uuid.uuid4().hex, title=title, created_at=now, updated_at=now, agent_id=agent_id
+            id=uuid.uuid4().hex,
+            title=title,
+            created_at=now,
+            updated_at=now,
+            agent_id=agent_id,
+            cwd=cwd,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +86,7 @@ class StoredConversation:
             "updated_at": self.updated_at,
             "pinned": self.pinned,
             "agent_id": self.agent_id,
+            "cwd": self.cwd,
             "entries": self.entries[-MAX_ENTRIES:],
         }
 
@@ -91,6 +105,7 @@ class StoredConversation:
             updated_at=float(payload.get("updated_at") or 0.0),
             pinned=bool(payload.get("pinned")),
             agent_id=str(payload.get("agent_id") or ""),
+            cwd=str(payload.get("cwd") or ""),
             entries=[e for e in (entries or []) if isinstance(e, dict)][-MAX_ENTRIES:],
         )
 
@@ -99,11 +114,22 @@ def store_path() -> Path:
     return paths.data_dir() / STORE_FILE_NAME
 
 
-def load() -> list[StoredConversation]:
+def load(cwd: str | None = None) -> list[StoredConversation]:
     """Read the conversations. A broken file costs history, never the panel.
 
     Same discipline as `settings.load`: the file moves aside and the artist
     gets an empty list instead of a stack trace on open.
+
+    `cwd` narrows the result to one scene directory. Everything is kept in
+    one file — the scoping is a filter, not a separate store — so `save`
+    can still write the whole set back without needing to know about the
+    conversations belonging to scenes that aren't open.
+
+    Conversations written before `cwd` existed have none, and are left out
+    of every scoped result rather than shown in all of them: showing them
+    everywhere is exactly the behaviour being fixed. They stay in the file,
+    and `unscoped_count` says how many, so the panel can tell an artist
+    where their old history went instead of appearing to have eaten it.
     """
     payload = _read_payload()
     if payload is None:
@@ -112,7 +138,14 @@ def load() -> list[StoredConversation]:
     if not isinstance(raw, list):
         return []
     result = [c for c in (StoredConversation.from_dict(item) for item in raw) if c is not None]
+    if cwd is not None:
+        result = [c for c in result if c.cwd == cwd]
     return _ordered(result)
+
+
+def unscoped_count() -> int:
+    """How many stored conversations predate scene scoping (no `cwd`)."""
+    return sum(1 for c in load() if not c.cwd)
 
 
 def load_active_id() -> str | None:

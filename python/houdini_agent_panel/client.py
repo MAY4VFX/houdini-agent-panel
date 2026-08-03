@@ -1072,14 +1072,34 @@ class AcpClient(QtCore.QObject):
         worker.request_loop_stop()
         worker.wait(5000)
 
+        # The worker THREAD is done, but Qt's cross-thread signal delivery is
+        # not: a forwarded signal (`log_line` from `_pump_stderr` is the one
+        # actually observed doing this — nothing there guards its `emit`
+        # against `self._closing` the way `_watch_process_exit` guards
+        # `disconnected`) can already have been queued for the main thread
+        # before the thread quit, and simply hasn't been DELIVERED yet —
+        # `worker.wait()` joins the thread, it doesn't drain the receiving
+        # thread's event queue. Flushing that queue HERE, while this facade
+        # and its connections are still fully alive, delivers any such
+        # leftover normally instead of leaving it stranded for whatever
+        # `processEvents()` call happens to run next — which, by then, can
+        # be after `self` itself has been garbage-collected (nothing else
+        # references a facade whose caller does `client.stop(); client =
+        # None` right after, e.g. `reset_shared_state_for_tests`), and
+        # THAT'S what actually printed "RuntimeError: The SignalInstance
+        # object was already deleted": confirmed by bracketing every
+        # disconnect call in this method with its own log line — the error
+        # never appeared between any of them, only after this method had
+        # already returned.
+        QtCore.QCoreApplication.processEvents()
+
         # Cut the worker loose from this facade BEFORE letting go of it. A
         # worker that outlives its `wait()` (below, `_retired`) is still a
         # live thread with live signals; if the facade is collected first,
-        # its next emit lands on a deleted C++ object — "RuntimeError: The
-        # SignalInstance object was already deleted", once per teardown.
-        # Nothing downstream wants to hear from a worker we have stopped
-        # caring about, so the wiring goes rather than the emit being
-        # guarded at every one of the twenty call sites.
+        # its next emit lands on a deleted C++ object — the same error,
+        # from a different cause. Nothing downstream wants to hear from a
+        # worker we have stopped caring about, so the wiring goes rather
+        # than the emit being guarded at every one of the twenty call sites.
         for name in _FORWARDED_SIGNALS:
             with contextlib.suppress(RuntimeError, TypeError):
                 getattr(worker, name).disconnect(getattr(self, name).emit)

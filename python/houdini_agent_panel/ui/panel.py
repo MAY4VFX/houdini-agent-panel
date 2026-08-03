@@ -739,10 +739,25 @@ class AgentPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------ sessions
 
     def _wire_pool(self) -> None:
-        self._pool.added.connect(lambda _sid: self._refresh_sessions())
-        self._pool.removed.connect(lambda _sid: self._refresh_sessions())
-        self._pool.changed.connect(lambda _sid: self._refresh_sessions())
-        self._pool.current_changed.connect(self._show_session)
+        """Subscribe to the session pool, and REMEMBER the subscriptions.
+
+        The pool is a process-wide singleton, so a connection into it
+        outlives the tab that made it. These were fire-and-forget, and a
+        lambda holding `self` kept every panel ever opened alive with its
+        whole widget tree — closing a tab freed nothing. On a desktop where
+        panels get opened and closed through the day that shows up as
+        hundreds of stray empty windows, which is exactly how it was
+        reported.
+        """
+        refresh = lambda _sid: self._refresh_sessions()  # noqa: E731 - one slot, three signals
+        self._pool_wiring = (
+            (self._pool.added, refresh),
+            (self._pool.removed, refresh),
+            (self._pool.changed, refresh),
+            (self._pool.current_changed, self._show_session),
+        )
+        for signal, slot in self._pool_wiring:
+            signal.connect(slot)
 
     def _refresh_sessions(self) -> None:
         current = self._pool.current()
@@ -1263,6 +1278,11 @@ class AgentPanel(QtWidgets.QWidget):
                 state = self._pool.get(session_id)
                 if state is not None:
                     conversation.title = state.title
+                    # The scene this conversation belongs to. Taken from the
+                    # session rather than from `$HIP` right now, so saving
+                    # after the artist opens a different scene doesn't drag
+                    # the previous scene's conversations along with it.
+                    conversation.cwd = state.cwd or scene.hip_dir()
                 conversation.agent_id = self._settings.default_agent or ""
                 conversation.entries = records
                 conversation.updated_at = time.time()
@@ -1284,8 +1304,19 @@ class AgentPanel(QtWidgets.QWidget):
         try:
             from .. import conversations_store as store
 
-            stored = store.load()
+            here = scene.hip_dir()
+            stored = store.load(here)
             active_id = store.load_active_id()
+            # Anything written before conversations were tied to a scene has
+            # no scene to belong to, so it is not shown here. Saying so once
+            # is the difference between "scoped" and "the panel ate my
+            # history" — the file is untouched and still holds all of it.
+            older = store.unscoped_count()
+            if older:
+                self._note(
+                    f"{older} conversation(s) from before this version aren't tied to a "
+                    f"scene and are hidden here. They are still in {store.store_path()}."
+                )
         except Exception:  # noqa: BLE001
             return
         if not stored:
@@ -1309,7 +1340,8 @@ class AgentPanel(QtWidgets.QWidget):
             self._conversation_ids[key] = conversation.id
             self._model(key).load_records(conversation.entries)
 
-        wanted = _RESTORED_PREFIX + (active_id or stored[0].id)
+        ids = {c.id for c in stored}
+        wanted = _RESTORED_PREFIX + (active_id if active_id in ids else stored[0].id)
         if self._pool.get(wanted) is not None:
             self._pool.set_current(wanted)
         self._restored = stored
@@ -1369,12 +1401,16 @@ class AgentPanel(QtWidgets.QWidget):
             launch.wait(3000)
             self._launch_worker = None
 
-        for signal, slot in getattr(self, "_client_wiring", ()):
+        for signal, slot in (
+            *getattr(self, "_client_wiring", ()),
+            *getattr(self, "_pool_wiring", ()),
+        ):
             try:
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
         self._client_wiring = ()
+        self._pool_wiring = ()
 
         if not _live_panels:
             global _shared_client

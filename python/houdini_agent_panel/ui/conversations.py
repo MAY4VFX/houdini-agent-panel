@@ -193,6 +193,8 @@ class ConversationDrawer(QtWidgets.QFrame):
             "QLabel#drawerHeading { color: palette(disabled, text); padding: 12px 8px 4px 8px; }"
             "QScrollArea#drawerScroll { background: transparent; border: none; }"
             "QScrollArea#drawerScroll > QWidget > QWidget { background: transparent; }"
+            + theme.scrollbar_stylesheet("QScrollArea#drawerScroll ")
+            + (
             "QPushButton[conversation=\"true\"] {"
             " min-height: 34px; border: none; border-radius: 8px; padding: 0 9px;"
             " text-align: left; color: palette(disabled, text); background: transparent;"
@@ -212,6 +214,7 @@ class ConversationDrawer(QtWidgets.QFrame):
             " color: palette(text); background: palette(alternate-base);"
             "}"
             f"QToolButton#rowPin[pinned=\"true\"] {{ color: {accent}; }}"
+            )
         )
         if self._states:
             self.set_sessions(list(self._states.values()), self._current_id)

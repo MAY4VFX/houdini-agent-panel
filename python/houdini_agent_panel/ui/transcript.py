@@ -76,6 +76,10 @@ class TranscriptView(QtWidgets.QScrollArea):
         # Activity rows stay in the chronology: user -> Worked for… -> answer.
         self._layout.addStretch(1)
         self.setWidget(self._content)
+        # Same scrollbar as the drawer and the popups: no stepper arrows, a
+        # handle with enough contrast to find. Reapplied on `showEvent` so a
+        # tab reopened under a different Houdini theme picks up its tones.
+        self.setStyleSheet(theme.scrollbar_stylesheet())
 
         self._model: TranscriptModel | None = None
         self._rows: dict[str, QtWidgets.QWidget] = {}

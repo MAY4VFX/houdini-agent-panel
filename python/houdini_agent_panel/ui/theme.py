@@ -247,6 +247,22 @@ def to_hex(color_value: QtGui.QColor) -> str:
     return color_value.name(QtGui.QColor.HexRgb)
 
 
+def scrollbar_handle_color() -> QtGui.QColor:
+    """The scrollbar handle — the window colour pulled a third of the way
+    toward the text colour.
+
+    Not a palette role. `Mid` and `Dark` were the obvious candidates and
+    both fail the same way: each one reads as "a shade apart" on only one
+    of the two theme families and collapses toward the background on the
+    other, which is how the drawer ended up with a scrollbar an artist had
+    to hunt for. Moving toward `Text` is contrasting by construction —
+    whatever the theme, the text is legible against the window, so a third
+    of that distance is visible against it too.
+    """
+    return _blend(palette().color(QtGui.QPalette.Window),
+                  palette().color(QtGui.QPalette.Text), 0.34)
+
+
 def _blend(base: QtGui.QColor, other: QtGui.QColor, amount: float) -> QtGui.QColor:
     """`base` shifted toward `other` by `amount` (0..1) — for tones that need
     to sit a little apart from a palette role (a popup's hover row, the
@@ -312,6 +328,43 @@ def popup_selected_background() -> QtGui.QColor:
     return _blend(popup_background(), accent_color(), 0.22)
 
 
+def scrollbar_stylesheet(scope: str = "") -> str:
+    """Shared QSS for every scrollbar in the panel.
+
+    Two things, both asked for from a real panel. The stepper arrows go:
+    they sat at the ends of the bar looking like controls belonging to the
+    list next to them, and nobody uses them — the wheel and the handle do
+    the work. And the handle gets `scrollbar_handle_color()` so it is
+    actually findable instead of dissolving into the track.
+
+    `scope` prefixes the selectors (e.g. `"QScrollArea#drawerScroll "`) so
+    one surface can be styled without reaching into another's popups; empty
+    means every scrollbar under the widget this is set on.
+
+    Built fresh from the live theme on each call, like `popup_stylesheet` —
+    never a module-level constant, or the colours freeze at import time.
+    """
+    handle = to_hex(scrollbar_handle_color())
+    accent = to_hex(accent_color())
+    return (
+        f"{scope}QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}"
+        f"{scope}QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}"
+        f"{scope}QScrollBar::handle:vertical {{"
+        f" background: {handle}; min-height: 32px; border-radius: 5px; margin: 2px;"
+        f"}}"
+        f"{scope}QScrollBar::handle:horizontal {{"
+        f" background: {handle}; min-width: 32px; border-radius: 5px; margin: 2px;"
+        f"}}"
+        f"{scope}QScrollBar::handle:vertical:hover,"
+        f"{scope}QScrollBar::handle:horizontal:hover {{ background: {accent}; }}"
+        # The arrows. Qt draws them unless every dimension is zeroed.
+        f"{scope}QScrollBar::sub-line, {scope}QScrollBar::add-line {{"
+        f" height: 0; width: 0; border: none; background: none;"
+        f"}}"
+        f"{scope}QScrollBar::sub-page, {scope}QScrollBar::add-page {{ background: none; }}"
+    )
+
+
 def popup_stylesheet(frame_object_name: str) -> str:
     """Shared QSS for every free-floating popup surface in the panel.
 
@@ -350,6 +403,9 @@ def popup_stylesheet(frame_object_name: str) -> str:
         "}"
         f"QPushButton:hover, QPushButton:focus {{ background: {hover_bg}; color: {hover_text}; }}"
         f'QPushButton[checkedChoice="true"] {{ color: {accent}; background: {selected_bg}; }}'
+        # A popup that overflows gets the same scrollbar as everything else:
+        # no stepper arrows, a handle you can actually see.
+        + scrollbar_stylesheet()
     )
 
 

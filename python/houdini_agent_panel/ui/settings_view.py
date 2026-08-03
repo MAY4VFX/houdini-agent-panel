@@ -25,6 +25,7 @@ from .. import paths
 from .. import settings as settings_module
 from .agents import AgentsView
 from .chips import ChoiceButton
+from . import theme
 from .qt import QtCore, QtWidgets, Signal
 
 if TYPE_CHECKING:
@@ -211,6 +212,7 @@ class SettingsView(QtWidgets.QWidget):
         content_layout.addWidget(rail, 0, QtCore.Qt.AlignHCenter)
 
         self._scroll = QtWidgets.QScrollArea()
+        self._scroll.setStyleSheet(theme.scrollbar_stylesheet())
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._scroll.setWidget(content)

@@ -29,8 +29,13 @@ def isolated(qapp, monkeypatch):
     panel_mod.reset_shared_state_for_tests()
 
 
-def _stored(title: str, text: str, *, updated: float = 1.0) -> store.StoredConversation:
-    conversation = store.StoredConversation.new(title=title)
+def _stored(
+    title: str, text: str, *, updated: float = 1.0, cwd: str = "/tmp"
+) -> store.StoredConversation:
+    """`cwd` defaults to what the fixture reports as `$HIP`, because a
+    conversation belongs to a scene now — one written for another scene is
+    not supposed to show up here."""
+    conversation = store.StoredConversation.new(title=title, cwd=cwd)
     conversation.updated_at = updated
     conversation.entries = [{"kind": "user", "id": "e1", "text": text}]
     return conversation
@@ -147,4 +152,43 @@ def test_connecting_gives_the_restored_conversation_a_live_session(qapp, monkeyp
     assert widget._adopting_restored == panel_mod._RESTORED_PREFIX + conversation.id
     # Nothing was typed, so nothing may be queued to send.
     assert not widget._pending_prompt
+    widget.shutdown()
+
+
+def test_only_this_scenes_conversations_come_back(qapp):
+    """Talking to an agent about one shot has nothing to do with the next.
+
+    Everything lived in one undifferentiated list, so opening any scene
+    showed every conversation ever had in every scene — which is how an
+    artist ends up scrolling past someone else's shot to find their own.
+    """
+    here = _stored("This scene", "about this shot", cwd="/tmp")
+    store.save([here, _stored("Another scene", "about that shot", cwd="/elsewhere")])
+
+    widget = panel_mod.AgentPanel()
+    widget._restore_conversations()
+    qapp.processEvents()
+
+    titles = [s.title for s in widget._pool.all()]
+    assert titles == ["This scene"], f"the other scene's conversation leaked in: {titles}"
+    widget.shutdown()
+
+
+def test_the_scene_a_conversation_belongs_to_is_written_down(qapp, monkeypatch):
+    """Saving stamps the session's own directory, not wherever the panel
+    happens to be looking when the save runs."""
+    widget = panel_mod.AgentPanel()
+    state = sessions.SessionState(
+        session_id="live-9", title="Rotor pyro", cwd="/shots/rotor", created_at=0.0
+    )
+    widget._pool.add(state)
+    widget._conversation_ids["live-9"] = "conv-9"
+    widget._model("live-9").append_user("make dust")
+
+    widget._persist_conversations()
+
+    written = {c.id: c for c in store.load()}
+    assert written["conv-9"].cwd == "/shots/rotor"
+    assert not store.load("/tmp"), "it must not show up under a different scene"
+    assert [c.title for c in store.load("/shots/rotor")] == ["Rotor pyro"]
     widget.shutdown()
