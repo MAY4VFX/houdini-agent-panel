@@ -24,7 +24,7 @@ hits the network and the disk, and the GUI thread must not wait on either.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .. import registry, runtime
 from .. import settings as settings_module
@@ -214,15 +214,46 @@ class AgentsView(QtWidgets.QWidget):
     """Registry list plus "custom agent" — embedded in the settings screen."""
 
     installed_changed = Signal()
+    #: An install/update actually finished — `agent_id`. `installed_changed`
+    #: already covers "the list needs a redraw"; this is for a caller that
+    #: needs to react to ONE SPECIFIC agent's install (the panel: hide an
+    #: "update available" banner for that agent, restart it if updating it
+    #: meant stopping it first).
+    install_succeeded = Signal(str)
+    #: `agent_id, message` — a background install/update failed. The row
+    #: already shows this inline, but a caller with a feed of its own (the
+    #: panel) needs the fact too: a silent failure here is exactly what a
+    #: broken button looks like from the artist's side.
+    install_failed = Signal(str, str)
 
-    def __init__(self, parent=None, *, fetch: "Fetcher | None" = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        fetch: "Fetcher | None" = None,
+        before_install: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._fetch = fetch
+        # Called with the agent_id right before its files are touched —
+        # this view doesn't know about the running agent process at all
+        # (design.md's four layers: it knows registry/runtime/settings,
+        # nothing about the agent connection), so "is this the one
+        # currently running, and should it be stopped first" is entirely
+        # the caller's call, made here rather than skipped.
+        self._before_install = before_install
         self._entries: list["AgentEntry"] = []
         self._updates_by_target: dict[str, "Update"] = {}
         # Keep references to live threads here — otherwise Python's garbage
         # collector could claim the QThread before it has actually finished.
         self._threads: list[_InstallWorker] = []
+        # One row per registry agent id — the notice banner's "Update"
+        # triggers the SAME row's own install, rather than duplicating the
+        # install machinery for a second entry point.
+        self._rows_by_id: dict[str, "_AgentRow"] = {}
+        # Guards a rapid double-click (row AND banner both reachable for the
+        # same agent) from starting two installs onto the same files at once.
+        self._installing: set[str] = set()
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
@@ -289,6 +320,7 @@ class AgentsView(QtWidgets.QWidget):
         never remembers".
         """
         _clear_layout(self._rows_layout)
+        self._rows_by_id = {}
         current_settings = settings_module.load()
         for entry in self._entries:
             reason = entry.unavailable_reason()
@@ -307,13 +339,36 @@ class AgentsView(QtWidgets.QWidget):
             row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
             self._rows_layout.addWidget(row)
+            self._rows_by_id[entry.id] = row
+
+    def trigger_update(self, agent_id: str) -> bool:
+        """Start updating `agent_id` as if its own row's button were clicked.
+
+        The notice banner's "Update" is a quick-access path onto this SAME
+        row and this SAME install machinery — not a second implementation of
+        "download, verify, extract" with its own bugs to find. `False` means
+        there is no row for this id right now (the registry hasn't loaded,
+        or the update no longer applies) — callers have to say something
+        about that, not act as if it worked.
+        """
+        row = self._rows_by_id.get(agent_id)
+        entry = next((e for e in self._entries if e.id == agent_id), None)
+        if row is None or entry is None:
+            return False
+        self._install(entry, row)
+        return True
 
     def _install(self, entry: "AgentEntry", row: "_AgentRow") -> None:
+        if entry.id in self._installing:
+            return  # already installing/updating this one — a double-click
+        self._installing.add(entry.id)
+        if self._before_install is not None:
+            self._before_install(entry.id)
         worker = _InstallWorker(entry, fetch=self._fetch, parent=self)
         self._threads.append(worker)
         worker.progressed.connect(row.set_progress)
         worker.succeeded.connect(lambda _spec, e=entry, r=row: self._on_installed(e, r))
-        worker.failed.connect(lambda message, r=row: self._on_install_failed(r, message))
+        worker.failed.connect(lambda message, e=entry, r=row: self._on_install_failed(r, message, e.id))
         worker.finished.connect(lambda w=worker: self._forget_thread(w))
         worker.start()
 
@@ -326,11 +381,14 @@ class AgentsView(QtWidgets.QWidget):
         if worker in self._threads:
             self._threads.remove(worker)
 
-    def _on_install_failed(self, row: "_AgentRow", message: str) -> None:
+    def _on_install_failed(self, row: "_AgentRow", message: str, agent_id: str) -> None:
+        self._installing.discard(agent_id)
         row.clear_progress()
         row.set_state_text(f"error: {message}")
+        self.install_failed.emit(agent_id, message)
 
     def _on_installed(self, entry: "AgentEntry", row: "_AgentRow") -> None:
+        self._installing.discard(entry.id)
         row.clear_progress()
         current = settings_module.load()
         kind = "npx" if entry.needs_node else "binary"
@@ -343,6 +401,7 @@ class AgentsView(QtWidgets.QWidget):
         settings_module.save(current)
         self._rebuild_registry_rows()
         self.installed_changed.emit()
+        self.install_succeeded.emit(entry.id)
 
     def _uninstall(self, agent_id: str) -> None:
         runtime.uninstall_agent(agent_id)

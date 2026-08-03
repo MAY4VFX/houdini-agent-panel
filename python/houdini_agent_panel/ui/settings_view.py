@@ -19,7 +19,7 @@ to know about `settings.py`, not the other way round.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .. import paths
 from .. import settings as settings_module
@@ -97,8 +97,19 @@ class _Section(QtWidgets.QWidget):
 class SettingsView(QtWidgets.QWidget):
     changed = Signal()
     closed = Signal()
+    #: Forwarded straight from `AgentsView` — see its docstring. The panel
+    #: needs these to react to ONE specific agent's install, which the
+    #: generic `changed` (settings reload) doesn't carry enough to do.
+    install_succeeded = Signal(str)
+    install_failed = Signal(str, str)
 
-    def __init__(self, parent=None, *, fetch: "Fetcher | None" = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        fetch: "Fetcher | None" = None,
+        before_install: "Callable[[str], None] | None" = None,
+    ) -> None:
         super().__init__(parent)
         self._loading = False
 
@@ -124,12 +135,14 @@ class SettingsView(QtWidgets.QWidget):
         header.setAlignment(QtCore.Qt.AlignHCenter)
         header.addWidget(self._header_rail)
 
-        self._agents_view = AgentsView(self, fetch=fetch)
+        self._agents_view = AgentsView(self, fetch=fetch, before_install=before_install)
         # An installed/custom agent list change is exactly the kind of
         # settings change that should make the default-agent combo and the
         # header chip's menu refresh, so it rides the same `changed` signal
         # rather than getting a parallel one panel.py has to wire up too.
         self._agents_view.installed_changed.connect(self._on_agents_changed)
+        self._agents_view.install_succeeded.connect(self.install_succeeded.emit)
+        self._agents_view.install_failed.connect(self.install_failed.emit)
 
         self._default_agent_combo = ChoiceButton(self)
         self._default_agent_combo.currentIndexChanged.connect(self._on_field_changed)
@@ -256,6 +269,10 @@ class SettingsView(QtWidgets.QWidget):
     def focus_agents(self) -> None:
         """Scroll to the agents section. It's first, so this is just "top"."""
         self._scroll.verticalScrollBar().setValue(0)
+
+    def trigger_agent_update(self, agent_id: str) -> bool:
+        """Forwarded to the embedded `AgentsView` — see its `trigger_update`."""
+        return self._agents_view.trigger_update(agent_id)
 
     def reload(self) -> None:
         """Re-read `settings.json` from disk and refresh the controls without

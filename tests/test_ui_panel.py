@@ -8,11 +8,14 @@ a test is more honest than substituting a stand-in with a similar name.
 
 from __future__ import annotations
 
+import hashlib
+import io
+import zipfile
 from types import SimpleNamespace
 
 import pytest
 
-from houdini_agent_panel import sessions
+from houdini_agent_panel import sessions, settings as settings_mod
 from houdini_agent_panel.ui import panel as panel_mod
 
 
@@ -700,5 +703,219 @@ def test_permission_popover_does_not_float_over_the_settings_screen(qapp):
     # Still pending — it comes back with the conversation.
     widget._show_page(widget.PAGE_TRANSCRIPT)
     assert widget._permission_popover is not None
+
+    widget.shutdown()
+
+
+# --- the notice strip's "Update" button (issue #20) ------------------------
+
+
+def _zip_bytes(cmd_name: str = "myagent", content: bytes = b"echo hi\n") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(cmd_name, content)
+    return buf.getvalue()
+
+
+def _wait_until(qapp, condition, *, timeout_ms: int = 5000) -> None:
+    from PySide6 import QtTest
+
+    elapsed = 0
+    step = 20
+    while not condition() and elapsed < timeout_ms:
+        qapp.processEvents()
+        QtTest.QTest.qWait(step)
+        elapsed += step
+    assert condition(), "condition did not become true in time"
+
+
+def _agent_update_setup(
+    widget, qapp, monkeypatch, fetcher, *, agent_id="claude-acp", bad_checksum=False
+):
+    """An agent already installed at 1.0.0, a registry entry at 2.0.0, and
+    the update banner showing it — the state every test below starts from.
+
+    `agent_id` defaults to one of the actual `FEATURED_AGENT_IDS`
+    (`registry.featured`) — the settings screen only ever draws rows for
+    those, same as production, so an arbitrary id here would silently have
+    no row for `trigger_agent_update` to find.
+    """
+    from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
+    from houdini_agent_panel.updates import Update
+
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+
+    payload = _zip_bytes()
+    digest = "0" * 64 if bad_checksum else hashlib.sha256(payload).hexdigest()
+    fetcher.add_bytes("https://x/a.zip", payload)
+
+    entry = AgentEntry(
+        id=agent_id,
+        name="Agent A",
+        version="2.0.0",
+        binaries={
+            "fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./myagent", sha256=digest)
+        },
+    )
+    current = settings_mod.load()
+    current.installed_agents[agent_id] = settings_mod.InstalledAgent(
+        agent_id=agent_id, version="1.0.0", kind="binary", installed_at="now"
+    )
+    settings_mod.save(current)
+    from houdini_agent_panel import paths
+    import json as _json
+
+    (paths.agent_dir(agent_id) / "manifest.json").write_text(
+        _json.dumps({"agent_id": agent_id, "version": "1.0.0", "kind": "binary"}), "utf-8"
+    )
+
+    # Inject the fake fetcher the same way `test_ui_agents.py` does — there is
+    # no production path that hands the panel's own `AgentsView` a fetcher,
+    # so this is the one place a test can reach in and avoid a real request.
+    widget._settings_view._agents_view._fetch = fetcher
+
+    update = Update(kind="agent", target=agent_id, label="Agent A 2.0.0", current="1.0.0", latest="2.0.0")
+
+    class _Result:
+        announcements: list = []
+        updates = [update]
+
+    widget._on_refresh_done(_Result(), [entry])
+    qapp.processEvents()
+    return update
+
+
+def test_clicking_update_on_the_banner_installs_it_in_the_background(qapp, monkeypatch, fetcher):
+    """The bug as reported: the banner shows, the button does nothing."""
+    widget = _make_panel(qapp)
+    update = _agent_update_setup(widget, qapp, monkeypatch, fetcher)
+
+    assert widget._notice.isHidden() is False
+    assert widget._active_update is update
+
+    # Exactly what clicking the strip's own button does.
+    widget._notice.action_clicked.emit(update.target, "")
+
+    # The install runs on a QThread — the main thread must stay responsive
+    # (`qapp.processEvents()` inside `_wait_until` is what a frozen main
+    # thread would fail to pump) while it finishes.
+    _wait_until(qapp, lambda: not widget._settings_view._agents_view._threads)
+
+    current = settings_mod.load()
+    assert current.installed_agents[update.target].version == "2.0.0"
+    # The banner is gone — it isn't offering an update that already happened.
+    assert widget._notice.isHidden() is True
+    assert widget._active_update is None
+
+    widget.shutdown()
+
+
+def test_update_stops_the_running_agent_first_and_restarts_it_after(qapp, monkeypatch, fetcher):
+    """Swapping files under a live agent process is not something this panel
+    does silently — it stops it, says so, and brings it back up once the
+    update is actually on disk."""
+    widget = _make_panel(qapp)
+    update = _agent_update_setup(widget, qapp, monkeypatch, fetcher)
+    widget._settings.default_agent = update.target
+    settings_mod.save(widget._settings)
+
+    client = panel_mod.shared_client()
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    stopped = []
+    monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
+    started_agents = []
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started_agents.append(agent_id))
+
+    widget._notice.action_clicked.emit(update.target, "")
+
+    assert stopped == [True]  # stopped BEFORE the install even started, not silently
+    assert widget._restart_after_update == update.target
+
+    _wait_until(qapp, lambda: not widget._settings_view._agents_view._threads)
+
+    assert started_agents == [update.target]
+    assert widget._restart_after_update is None
+
+    widget.shutdown()
+
+
+def test_update_failure_is_reported_in_the_feed_not_silently(qapp, monkeypatch, fetcher):
+    """A failed update must not look the same as a button that does nothing."""
+    widget = _make_panel(qapp)
+    # A wrong checksum in the registry entry — `download_and_verify` rejects
+    # it, deterministically, off the main thread, the same way a bad
+    # download or a tampered registry would in the field.
+    update = _agent_update_setup(widget, qapp, monkeypatch, fetcher, bad_checksum=True)
+
+    widget._notice.action_clicked.emit(update.target, "")
+
+    _wait_until(qapp, lambda: not widget._settings_view._agents_view._threads)
+
+    current_session = widget._pool.current()
+    session_id = current_session.session_id if current_session else "__idle__"
+    feed_text = " ".join(e.text for e in widget._model(session_id).entries())
+    assert "Could not update" in feed_text
+    assert widget._restart_after_update is None
+
+    widget.shutdown()
+
+
+def test_panel_or_fx_update_gets_instructions_not_a_silent_attempt(qapp, monkeypatch):
+    """The panel can't safely replace the pip package it's currently running
+    from — telling the artist how beats pretending an in-place update
+    happened."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel 1.2.0",
+        current="1.1.0", latest="1.2.0",
+    )
+
+    class _Result:
+        announcements: list = []
+        updates = [update]
+
+    widget._on_refresh_done(_Result(), [])
+    qapp.processEvents()
+
+    widget._notice.action_clicked.emit(update.target, "")
+
+    current_session = widget._pool.current()
+    session_id = current_session.session_id if current_session else "__idle__"
+    feed_text = " ".join(e.text for e in widget._model(session_id).entries())
+    assert "pip install --upgrade houdini-agent-panel" in feed_text
+    # And the banner is untouched — there is nothing here to make it go away.
+    assert widget._notice.isHidden() is False
+
+    widget.shutdown()
+
+
+def test_announcement_button_still_opens_its_link_not_an_update_path(qapp):
+    """`_on_notice_action` now branches on whether an update is active — a
+    plain announcement's own button must keep working exactly as before."""
+    from houdini_agent_panel.announcements import Announcement, Button
+
+    widget = _make_panel(qapp)
+    ann = Announcement(
+        id="a1", severity="info", title="Heads up", buttons=(Button(label="Learn more", url="https://x/"),)
+    )
+
+    class _Result:
+        announcements = [ann]
+        updates: list = []
+
+    widget._on_refresh_done(_Result())
+    qapp.processEvents()
+    assert widget._active_update is None
+
+    opened = []
+    widget._open_url = lambda url: opened.append(url)
+
+    widget._notice.action_clicked.emit("a1", "https://x/")
+
+    assert opened == ["https://x/"]
+    assert "a1" in widget._settings.seen_announcements
 
     widget.shutdown()

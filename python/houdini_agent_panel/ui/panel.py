@@ -228,6 +228,16 @@ class AgentPanel(QtWidgets.QWidget):
         self._restored: list = []
         self._adopting_restored: str | None = None
         self._last_auth_method: str = ""
+        #: The `Update` currently shown by the notice strip, if any — set
+        #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
+        #: for BOTH an announcement's button and this one's "Update" button
+        #: (same signal, same slot); this is how `_on_notice_action` tells
+        #: them apart.
+        self._active_update: Any = None
+        #: Set right before stopping the currently-running agent to update
+        #: it out from under itself — the agent_id to bring back up once
+        #: that update actually finishes (`_on_agent_install_succeeded`).
+        self._restart_after_update: str | None = None
         self._closed = False
 
         self._build()
@@ -313,10 +323,12 @@ class AgentPanel(QtWidgets.QWidget):
     def _make_settings_view(self) -> QtWidgets.QWidget:
         from .settings_view import SettingsView
 
-        view = SettingsView(self)
+        view = SettingsView(self, before_install=self._before_agent_install)
         self._settings_view = view
         view.changed.connect(self._on_settings_changed)
         view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
+        view.install_succeeded.connect(self._on_agent_install_succeeded)
+        view.install_failed.connect(self._on_agent_install_failed)
         return view
 
     def _make_auth_view(self) -> QtWidgets.QWidget:
@@ -1098,21 +1110,88 @@ class AgentPanel(QtWidgets.QWidget):
 
         for announcement in getattr(result, "announcements", []):
             if announcement.severity == "blocking":
+                self._active_update = None
                 self._blocking.show_notice(announcement)
                 self._composer.block_input(announcement.title)
                 return
+            self._active_update = None
             self._notice.show_notice(announcement)
             return
         for update in getattr(result, "updates", []):
+            self._active_update = update
             self._notice.show_update(update)
             return
 
-    def _on_notice_action(self, announcement_id: str, url: str) -> None:
+    def _on_notice_action(self, identifier: str, url: str) -> None:
+        # The strip's "Update" button fires this SAME signal (see
+        # `NoticeStrip`'s own docstring) — `identifier` is `Update.target`
+        # then, not an announcement id, and there's no `url` to open.
+        update = self._active_update
+        if update is not None and update.target == identifier:
+            self._start_update(update)
+            return
         self._open_url(url)
-        self._remember_seen(announcement_id)
+        self._remember_seen(identifier)
 
-    def _on_notice_dismissed(self, announcement_id: str) -> None:
-        self._remember_seen(announcement_id)
+    def _on_notice_dismissed(self, identifier: str) -> None:
+        if self._active_update is not None and self._active_update.target == identifier:
+            self._active_update = None
+            return  # an update dismissal isn't an announcement id — nothing to remember
+        self._remember_seen(identifier)
+
+    def _start_update(self, update: Any) -> None:
+        """The notice strip's "Update" button, actually doing something.
+
+        Only agents update through this panel: `update.kind` "panel"/"fx"
+        names a package on PyPI, and this process can't safely replace the
+        package it is currently running FROM out from under itself — that
+        needs the artist to run pip and restart Houdini, the same as the
+        first install (docs/design.md, "Installation"). Pretending to do it
+        in place would be the more dangerous silence, not the honest one.
+        """
+        if update.kind != "agent":
+            self._note(
+                f"Update {update.target} yourself: pip install --upgrade {update.target}, "
+                "then restart Houdini."
+            )
+            return
+        self._show_page(self.PAGE_SETTINGS)
+        self._settings_view.focus_agents()
+        if not self._settings_view.trigger_agent_update(update.target):
+            self._note(f"Could not find {update.label} to update — try Settings → Agents.")
+
+    def _before_agent_install(self, agent_id: str) -> None:
+        """About to overwrite `agent_id`'s files on disk (install OR update,
+        from the settings row or from the notice banner — this fires either
+        way, see `AgentsView.__init__`). If it's the agent currently
+        running, its files are what the live process is reading from RIGHT
+        NOW — swapping them under it is not something this panel does
+        silently. Stopping it here, not just asking the artist to: they
+        already said "update" once, and a second manual step for something
+        the panel can safely do itself is the friction this project's UI
+        rule exists to cut. `_on_agent_install_succeeded` brings it back up.
+        """
+        client = shared_client()
+        if client.is_running() and self._settings.default_agent == agent_id:
+            self._restart_after_update = agent_id
+            self._note(
+                f"Stopping {self._display_label(agent_id)} to update it — "
+                "it restarts automatically once the update finishes."
+            )
+            client.stop()
+
+    def _on_agent_install_succeeded(self, agent_id: str) -> None:
+        if self._active_update is not None and self._active_update.target == agent_id:
+            self._active_update = None
+            self._notice.hide_notice()
+        if self._restart_after_update == agent_id:
+            self._restart_after_update = None
+            self._note(f"{self._display_label(agent_id)} updated — restarting it…")
+            self._start_agent(agent_id)
+
+    def _on_agent_install_failed(self, agent_id: str, message: str) -> None:
+        self._restart_after_update = None
+        self._note(f"Could not update {self._display_label(agent_id)}: {message}")
 
     def _on_blocking_action(self, announcement_id: str, url: str) -> None:
         self._open_url(url)

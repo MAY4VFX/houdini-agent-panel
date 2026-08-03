@@ -101,6 +101,14 @@ class NoticeStrip(QtWidgets.QWidget):
         self.setVisible(False)
         self.dismissed.emit(ann_id)
 
+    def hide_notice(self) -> None:
+        """Take the strip down from outside — e.g. once an update it was
+        showing has actually finished installing. Not in the
+        architecture.md contract, same reasoning as `BlockingNotice`'s own
+        `hide_notice`: the caller needs a way to close this that isn't the
+        artist clicking ✕."""
+        self.setVisible(False)
+
 
 class BlockingNotice(QtWidgets.QWidget):
     """A popup above the input field — drawn strictly from the buttons it was sent.
