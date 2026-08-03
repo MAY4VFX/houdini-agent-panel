@@ -280,6 +280,7 @@ class AgentPanel(QtWidgets.QWidget):
         self.setFocusProxy(self._composer)
 
         self._header.manage_agents_clicked.connect(self._open_agent_management)
+        self._header.sign_in_clicked.connect(self._offer_sign_in)
         self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.conversations_clicked.connect(self._toggle_conversations)
         self._header.new_session_clicked.connect(self._start_new_session)
@@ -469,6 +470,7 @@ class AgentPanel(QtWidgets.QWidget):
             (client.disconnected, self._on_disconnected),
             (client.failed, self._on_failed),
             (client.auth_required, self._on_auth_required),
+            (client.log_line, self._on_log_line),
             (client.authenticated, self._on_authenticated),
             (client.session_started, self._on_session_started),
             (client.modes_changed, self._on_modes_changed),
@@ -492,6 +494,7 @@ class AgentPanel(QtWidgets.QWidget):
         # The chip shows the name the artist picked, not the npm package
         # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
+        self._header.set_can_sign_in(bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
         if self._pool.current() is None:
@@ -995,6 +998,45 @@ class AgentPanel(QtWidgets.QWidget):
         if announcement_id not in self._settings.seen_announcements:
             self._settings.seen_announcements.append(announcement_id)
             settings_mod.save(self._settings)
+
+    #: Agent stderr lines that the artist has to see. Agents are not obliged
+    #: to report everything through the protocol — Grok, for one, creates a
+    #: session happily and only writes "AuthorizationRequired" to stderr, so
+    #: a panel that watched the protocol alone showed a working conversation
+    #: that answered nothing.
+    _FATAL_STDERR_MARKERS = ("authorizationrequired", "fatal", "error")
+
+    def _on_log_line(self, line: str) -> None:
+        lowered = line.lower()
+        if not any(marker in lowered for marker in self._FATAL_STDERR_MARKERS):
+            return
+        if "authorizationrequired" in lowered.replace(" ", ""):
+            self._note(
+                "The agent says it is not signed in. Open the ⋯ menu and pick Sign in."
+            )
+            self._offer_sign_in()
+            return
+        # Trimmed: agents put timestamps and ANSI colour in stderr, and the
+        # useful part is the tail.
+        self._note(f"Agent: {line.strip()[-200:]}")
+
+    def _offer_sign_in(self) -> None:
+        """Show the sign-in screen using the methods `initialize` gave us.
+
+        Needed because `auth_required` is not guaranteed: an agent may accept
+        a session and fail authorization later, out of band. The methods are
+        known from `initialize` either way, so signing in never has to depend
+        on the agent asking first.
+        """
+        info = shared_client().agent_info()
+        if info is None or not info.auth_methods:
+            return
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            return
+        self._auth_view.set_methods(
+            list(info.auth_methods), can_logout=bool(info.supports_logout)
+        )
+        self._show_page(self.PAGE_AUTH)
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._note(f"Signing in with {method_id}… finish it in the browser if it opens.")
