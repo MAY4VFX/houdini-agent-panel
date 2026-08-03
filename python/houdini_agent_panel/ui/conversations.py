@@ -119,6 +119,11 @@ class ConversationDrawer(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setFixedWidth(_DRAWER_WIDTH)
         self._top = 0
+        #: The one row menu, built on first use and reused forever after —
+        #: see `_open_row_menu` for why it is never rebuilt.
+        self._row_menu: QtWidgets.QFrame | None = None
+        self._row_menu_rename: QtWidgets.QPushButton | None = None
+        self._row_menu_delete: QtWidgets.QPushButton | None = None
         self.hide()
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -404,20 +409,35 @@ class ConversationDrawer(QtWidgets.QFrame):
     def _open_row_menu(self, anchor: QtWidgets.QToolButton, session_id: str) -> None:
         state = self._states.get(session_id)
         title = state.title if state is not None else ""
-        menu = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
-        menu.setObjectName("rowMenu")
-        menu.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        # ONE menu, reused for every row, never rebuilt. It used to be
+        # created fresh per click with `WA_DeleteOnClose`, which reads as
+        # tidy and is the opposite: measured in a live Houdini, showing a
+        # top-level window costs one native window and destroying the widget
+        # releases none of them. That made this a leak of exactly one window
+        # per click on "…", for the lifetime of the process.
+        menu = self._row_menu
+        if menu is None:
+            menu = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+            menu.setObjectName("rowMenu")
+            menu_layout = QtWidgets.QVBoxLayout(menu)
+            menu_layout.setContentsMargins(5, 5, 5, 5)
+            menu_layout.setSpacing(2)
+            self._row_menu_rename = QtWidgets.QPushButton("Rename…", menu)
+            self._row_menu_delete = QtWidgets.QPushButton("Delete", menu)
+            self._row_menu_delete.setObjectName("rowMenuDelete")
+            menu_layout.addWidget(self._row_menu_rename)
+            menu_layout.addWidget(self._row_menu_delete)
+            self._row_menu = menu
+        # Restyled on every open so a theme change is picked up, and
+        # rewired because the same two buttons now act on a different row.
         menu.setStyleSheet(_row_menu_stylesheet())
-        menu_layout = QtWidgets.QVBoxLayout(menu)
-        menu_layout.setContentsMargins(5, 5, 5, 5)
-        menu_layout.setSpacing(2)
-
-        rename_button = QtWidgets.QPushButton("Rename…", menu)
-        delete_button = QtWidgets.QPushButton("Delete", menu)
-        delete_button.setObjectName("rowMenuDelete")
-        menu_layout.addWidget(rename_button)
-        menu_layout.addWidget(delete_button)
-
+        rename_button = self._row_menu_rename
+        delete_button = self._row_menu_delete
+        for button in (rename_button, delete_button):
+            try:
+                button.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
         rename_button.clicked.connect(lambda: (menu.close(), self._start_rename(session_id, title)))
         delete_button.clicked.connect(lambda: (menu.close(), self._confirm_delete(session_id, title)))
 
@@ -426,9 +446,6 @@ class ConversationDrawer(QtWidgets.QFrame):
         menu.adjustSize()
         point = anchor.mapToGlobal(QtCore.QPoint(0, anchor.height() + 4))
         menu.move(point)
-        # Kept alive by this reference until it closes (WA_DeleteOnClose then
-        # frees the underlying widget) — an unparented Qt.Popup with no
-        # Python reference can be garbage-collected mid-click.
         self._active_row_menu = menu
         menu.show()
 

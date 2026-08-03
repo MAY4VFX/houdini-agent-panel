@@ -169,7 +169,9 @@ class TranscriptView(QtWidgets.QScrollArea):
         (a summary line plus a click to reveal the list)."""
         if len(group) == 1:
             return _ToolCallRow(group[0])
-        return _ToolGroupRow([_ToolCallRow(entry) for entry in group])
+        return _ToolGroupRow(
+            [_ToolCallRow(entry, self._content) for entry in group], self._content
+        )
 
     def _refresh_one(self, entry_id: str) -> None:
         entries = self._model.entries()
@@ -219,12 +221,14 @@ class TranscriptView(QtWidgets.QScrollArea):
                 # rebuilt, so an already-expanded first call stays expanded.
                 widget_position = self._layout.indexOf(previous_row)
                 self._layout.removeWidget(previous_row)
-                group = _ToolGroupRow([previous_row, _ToolCallRow(entry)])
+                group = _ToolGroupRow(
+                    [previous_row, _ToolCallRow(entry, self._content)], self._content
+                )
                 self._rows[previous.id] = group
                 self._rows[entry_id] = group
                 self._layout.insertWidget(widget_position, group)
                 return
-            row = _ToolCallRow(entry)
+            row = _ToolCallRow(entry, self._content)
         else:
             row = self._make_row(entry)
 
@@ -244,11 +248,18 @@ class TranscriptView(QtWidgets.QScrollArea):
     # --- building rows by kind ---------------------------------------------
 
     def _make_row(self, entry: Entry) -> QtWidgets.QWidget:
+        # Every row is built WITH its parent, never adopted afterwards. A
+        # parentless QWidget is a top-level window, and macOS hands Qt a real
+        # native window for it the moment it exists — reparenting it into a
+        # layout a line later does not always give that window back. One per
+        # feed row, on a panel that draws a row per message and per tool
+        # call, is how a Houdini that had been open for an afternoon came to
+        # own three hundred stray windows.
         if entry.kind == "activity":
-            return _ActivityRow(entry)
+            return _ActivityRow(entry, self._content)
         if entry.kind == "plan":
-            return _PlanRow(entry)
-        return _MessageRow(entry)
+            return _PlanRow(entry, self._content)
+        return _MessageRow(entry, self._content)
 
     def _update_row(self, row: QtWidgets.QWidget, entry: Entry) -> None:
         if isinstance(row, _ToolGroupRow):

@@ -159,3 +159,47 @@ def test_the_suite_never_opens_a_real_window():
         f"Qt came up on {app.platformName() if app else 'no app'!r} — conftest sets the "
         "platform before Qt is imported; something imported Qt earlier."
     )
+
+
+def test_config_chips_are_reused_not_rebuilt(qapp):
+    """A top-level window, once realised, is never given back.
+
+    Measured inside a live Houdini: twenty widgets realised cost twenty
+    native windows, and deleting the widgets released none of them. Every
+    `ChoiceButton` owns a popup and a popup is a top-level window, so
+    rebuilding the config bar on each `config_option_update` — a model
+    change, an effort change — leaked one window per chip, permanently.
+    """
+    from houdini_agent_panel.ui.composer import Composer
+
+    class _Choice:
+        def __init__(self, value, name):
+            self.value, self.name = value, name
+
+    class _Option:
+        def __init__(self, oid, name, choices, current):
+            self.id, self.name, self.current_value = oid, name, current
+            self.choices = [_Choice(v, n) for v, n in choices]
+            self.description = ""
+
+    composer = Composer()
+    options = [
+        _Option("model", "Model", [("a", "Sonnet"), ("b", "Opus")], "a"),
+        _Option("effort", "Effort", [("lo", "Low"), ("hi", "High")], "lo"),
+    ]
+    composer.set_config_options(options)
+    first = list(composer._config_chips)
+    assert len(first) == 2
+
+    # The same options again, and then with a different current value —
+    # exactly what an agent sends when the artist picks a model.
+    composer.set_config_options(options)
+    options[0].current_value = "b"
+    composer.set_config_options(options)
+
+    assert composer._config_chips == first, (
+        "the chips were rebuilt; each rebuild strands a native window that "
+        "the platform never releases"
+    )
+    assert composer._config_chips[0].currentData() == "b", "the new value must still land"
+    composer.deleteLater()

@@ -124,14 +124,14 @@ class SettingsView(QtWidgets.QWidget):
         header.setAlignment(QtCore.Qt.AlignHCenter)
         header.addWidget(self._header_rail)
 
-        self._agents_view = AgentsView(fetch=fetch)
+        self._agents_view = AgentsView(self, fetch=fetch)
         # An installed/custom agent list change is exactly the kind of
         # settings change that should make the default-agent combo and the
         # header chip's menu refresh, so it rides the same `changed` signal
         # rather than getting a parallel one panel.py has to wire up too.
         self._agents_view.installed_changed.connect(self._on_agents_changed)
 
-        self._default_agent_combo = ChoiceButton()
+        self._default_agent_combo = ChoiceButton(self)
         self._default_agent_combo.currentIndexChanged.connect(self._on_field_changed)
 
         self._autostart_checkbox = QtWidgets.QCheckBox("Autostart agent when the panel opens")
@@ -164,24 +164,24 @@ class SettingsView(QtWidgets.QWidget):
         copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics")
         copy_diagnostics_button.clicked.connect(self._on_copy_diagnostics)
 
-        agents_section = _Section("Agents", expanded=True)
+        agents_section = _Section("Agents", self, expanded=True)
         agents_section.add_widget(self._agents_view)
 
-        behaviour_section = _Section("Behaviour", expanded=True)
+        behaviour_section = _Section("Behaviour", self, expanded=True)
         behaviour_section.add_row("Default agent", self._default_agent_combo)
         behaviour_section.add_row(self._autostart_checkbox)
 
-        updates_section = _Section("Updates & notices", expanded=True)
+        updates_section = _Section("Updates & notices", self, expanded=True)
         updates_section.add_row(self._check_updates_checkbox)
         updates_section.add_row(self._show_announcements_checkbox)
 
-        voice_section = _Section("Voice", expanded=True)
+        voice_section = _Section("Voice", self, expanded=True)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
 
-        privacy_section = _Section("Privacy", expanded=False)
+        privacy_section = _Section("Privacy", self, expanded=False)
         privacy_section.add_row(self._telemetry_checkbox)
 
-        data_section = _Section("Data", expanded=False)
+        data_section = _Section("Data", self, expanded=False)
         data_section.add_row("Data folder", data_dir_row)
         data_section.add_row(copy_diagnostics_button)
 

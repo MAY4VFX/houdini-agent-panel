@@ -531,24 +531,36 @@ class Composer(QtWidgets.QWidget):
         just not competing for the same space. Nothing is dropped: an option
         the agent sent is always reachable.
         """
-        while self._config_layout.count():
-            item = self._config_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-        self._config_chips = []
+        # Chips are REUSED, never torn down and rebuilt. Measured inside a
+        # live Houdini: realising a top-level window costs one native window
+        # and destroying the widget gives back exactly none of them —
+        # twenty widgets realised, twenty windows, still twenty after the
+        # widgets were deleted. Every ChoiceButton owns a popup, and a popup
+        # is a top-level window, so rebuilding this bar on every
+        # `config_option_update` (a model change, an effort change) leaked
+        # one window per chip, permanently, for as long as Houdini ran.
+        wanted = [
+            o for o in options
+            if _is_bar_option(o) and len(getattr(o, "choices", ()) or ()) >= 2
+        ]
+        while len(self._config_chips) > len(wanted):
+            # Only when the agent genuinely offers FEWER options than before,
+            # which is rare — not on every update.
+            chip = self._config_chips.pop()
+            self._config_layout.removeWidget(chip)
+            chip.setParent(None)
+            chip.deleteLater()
+        while len(self._config_chips) < len(wanted):
+            chip = ChoiceButton(self._config_bar)
+            self._config_layout.addWidget(chip)
+            self._config_chips.append(chip)
 
         self._overflow_options = [
             o for o in options if not _is_bar_option(o) and len(getattr(o, "choices", ()) or ()) >= 2
         ]
-        for option in [o for o in options if _is_bar_option(o)]:
+        for chip, option in zip(self._config_chips, wanted):
             choices = list(getattr(option, "choices", ()) or ())
-            if len(choices) < 2:
-                # Nothing to pick between — a one-entry dropdown is a label
-                # pretending to be a control.
-                continue
-            chip = ChoiceButton(self._config_bar)
+            chip.clear()
             chip.setToolTip(
                 getattr(option, "description", "") or getattr(option, "name", "") or ""
             )
@@ -565,11 +577,15 @@ class Composer(QtWidgets.QWidget):
             finally:
                 chip.blockSignals(False)
             option_id = str(getattr(option, "id", "") or "")
+            # Reconnected each time: a reused chip may now stand for a
+            # different option than it did last round.
+            try:
+                chip.activated.disconnect()
+            except (RuntimeError, TypeError):
+                pass
             chip.activated.connect(
                 lambda index, c=chip, oid=option_id: self._on_config_activated(c, oid, index)
             )
-            self._config_layout.addWidget(chip)
-            self._config_chips.append(chip)
 
         self._config_bar.setVisible(bool(self._config_chips))
 
