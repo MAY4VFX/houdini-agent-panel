@@ -120,6 +120,10 @@ class _RefreshWorker(QtCore.QThread):
 #: How long to wait for the agent to acknowledge a stop before releasing the
 #: input ourselves. `session/cancel` is a notification — an agent is free to
 #: never answer it, and the panel must not stay locked because of that.
+#: Marks a pool entry restored from disk: a conversation the artist can
+#: read, with no agent session behind it yet.
+_RESTORED_PREFIX = "restored:"
+
 _CANCEL_GRACE_MS = 4000
 
 #: How long `session/new` may take before the panel says something. An agent
@@ -221,6 +225,7 @@ class AgentPanel(QtWidgets.QWidget):
         #: dies with its process; this one is what survives.
         self._conversation_ids: dict[str, str] = {}
         self._restored: list = []
+        self._adopting_restored: str | None = None
         self._last_auth_method: str = ""
         self._closed = False
 
@@ -352,6 +357,7 @@ class AgentPanel(QtWidgets.QWidget):
     # --------------------------------------------------------------- boot
 
     def _boot(self) -> None:
+        self._restore_conversations()
         self._header.set_cwd(scene.hip_dir())
         self._refresh_agent_chip_menu()
         self._refresh_worker = _RefreshWorker(self._settings, self)
@@ -542,6 +548,21 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_AUTH)
 
     def _on_session_started(self, session_id: str, state: Any) -> None:
+        adopted = self._adopting_restored
+        self._adopting_restored = None
+        if adopted is not None:
+            # Move the restored conversation onto the session the agent just
+            # opened: same words, same id on disk, a live transport at last.
+            old_model = self._models.pop(adopted, None)
+            if old_model is not None:
+                self._models[session_id] = old_model
+            conversation_id = self._conversation_ids.pop(adopted, None)
+            if conversation_id is not None:
+                self._conversation_ids[session_id] = conversation_id
+            restored_state = self._pool.get(adopted)
+            if restored_state is not None:
+                state.title = restored_state.title
+                self._pool.remove(adopted)
         import uuid as _uuid
 
         self._conversation_ids.setdefault(session_id, _uuid.uuid4().hex)
@@ -906,6 +927,16 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_submitted(self, blocks: list) -> None:
         current = self._pool.current()
+        if current is not None and current.session_id.startswith(_RESTORED_PREFIX):
+            # A conversation read back from disk has no agent behind it. Keep
+            # the words, open a real session, and let `_on_session_started`
+            # carry the transcript over — throwing the message away because
+            # the transport is not up yet would be the artist's loss, not
+            # ours.
+            self._adopting_restored = current.session_id
+            self._pending_prompt = list(blocks)
+            self._start_new_session()
+            return
         if current is None:
             # The composer has already cleared itself by now, so dropping the
             # blocks here would silently eat what the artist just typed — the
@@ -1219,7 +1250,11 @@ class AgentPanel(QtWidgets.QWidget):
                 conversation.entries = records
                 conversation.updated_at = time.time()
                 existing[conversation_id] = conversation
-            store.save(list(existing.values()))
+            current = self._pool.current()
+            active_id = (
+                self._conversation_ids.get(current.session_id) if current is not None else None
+            )
+            store.save(list(existing.values()), active_id=active_id)
         except Exception:  # noqa: BLE001 - history is never worth a crash
             pass
 
@@ -1233,10 +1268,33 @@ class AgentPanel(QtWidgets.QWidget):
             from .. import conversations_store as store
 
             stored = store.load()
+            active_id = store.load_active_id()
         except Exception:  # noqa: BLE001
             return
         if not stored:
             return
+
+        # Restored conversations enter the pool so the drawer can list them
+        # and the artist can read them. They carry no live agent session —
+        # the id below is ours, not any agent's — and the first message sent
+        # into one opens a real session and takes the transcript with it.
+        for conversation in stored:
+            key = _RESTORED_PREFIX + conversation.id
+            if self._pool.get(key) is not None:
+                continue
+            state = sessions.SessionState(
+                session_id=key,
+                title=conversation.title,
+                cwd=scene.hip_dir(),
+                created_at=conversation.created_at,
+            )
+            self._pool.add(state)
+            self._conversation_ids[key] = conversation.id
+            self._model(key).load_records(conversation.entries)
+
+        wanted = _RESTORED_PREFIX + (active_id or stored[0].id)
+        if self._pool.get(wanted) is not None:
+            self._pool.set_current(wanted)
         self._restored = stored
         self._conversations.set_restored(stored) if hasattr(
             self._conversations, "set_restored"
