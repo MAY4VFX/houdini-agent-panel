@@ -220,6 +220,7 @@ class AgentPanel(QtWidgets.QWidget):
         #: dies with its process; this one is what survives.
         self._conversation_ids: dict[str, str] = {}
         self._restored: list = []
+        self._last_auth_method: str = ""
         self._closed = False
 
         self._build()
@@ -630,6 +631,13 @@ class AgentPanel(QtWidgets.QWidget):
             self._touch(session_id, entry.id)
 
     def _on_error(self, session_id: str, message: str) -> None:
+        # A failure while the artist is on the sign-in screen has to appear
+        # THERE. Reporting it into a feed they cannot see is the same as not
+        # reporting it: the screen just sits, which is indistinguishable from
+        # a login that quietly did nothing.
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.show_error(message, self._last_auth_method)
+            return
         target = session_id or (self._pool.current().session_id if self._pool.current() else "")
         if not target:
             self._note(message)
@@ -1039,6 +1047,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_AUTH)
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
+        self._last_auth_method = method_id
         self._note(f"Signing in with {method_id}… finish it in the browser if it opens.")
         shared_client().authenticate(method_id)
 

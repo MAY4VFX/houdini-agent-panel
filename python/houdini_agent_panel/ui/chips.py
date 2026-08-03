@@ -20,6 +20,14 @@ _MIN_RAIL_WIDTH = 180
 _AMBER = "#dfa047"
 
 
+#: How wide a chip label may get before it is elided. Model names run
+#: long enough to push the whole row past the panel edge.
+_MAX_CHOICE_LABEL_PX = 210
+_MIN_POPUP_WIDTH = 220
+#: Beyond this the choice list scrolls rather than running off screen.
+_MAX_POPUP_HEIGHT = 360
+
+
 class ChoiceButton(QtWidgets.QWidget):
     """Small custom dropdown with a styled, non-native popup."""
 
@@ -47,6 +55,7 @@ class ChoiceButton(QtWidgets.QWidget):
         # during activation/re-layout.  It must not exist until the click.
         self._popup: QtWidgets.QFrame | None = None
         self._popup_layout: QtWidgets.QVBoxLayout | None = None
+        self._popup_scroll: QtWidgets.QScrollArea | None = None
 
         self.setStyleSheet(
             "QToolButton#choiceTrigger, QToolButton#choiceTriggerAccent {"
@@ -88,10 +97,25 @@ class ChoiceButton(QtWidgets.QWidget):
         popup.setObjectName("choicePopup")
         popup.setStyleSheet(self._popup_stylesheet)
         popup.installEventFilter(self)
-        layout = QtWidgets.QVBoxLayout(popup)
+        # A scroll area, because an agent can offer more choices than fit on
+        # screen: OpenCode lists every model of every configured provider,
+        # and without this the list simply runs off the bottom with no way
+        # to reach the rest.
+        outer = QtWidgets.QVBoxLayout(popup)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea(popup)
+        scroll.setObjectName("choiceScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(2)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         self._popup = popup
+        self._popup_scroll = scroll
         self._popup_layout = layout
         return popup
 
@@ -143,13 +167,22 @@ class ChoiceButton(QtWidgets.QWidget):
         self.currentIndexChanged.emit(index)
 
     def _sync_text(self) -> None:
+        """Set the trigger's text, elided to fit.
+
+        Model names are not short — "Unchained API/Huihui Qwen3 Coder 30B
+        Abliterated" is a real one — and a chip that grows to fit pushed the
+        whole row past the panel edge, where there is nothing to scroll it
+        back with. The full name stays in the tooltip and in the popup.
+        """
         label = self._items[self._current_index][0] if self._current_index >= 0 else ""
         if not label:
             self._button.setText("")
-        elif self._show_caret:
-            self._button.setText(f"{label}  ⌄")
-        else:
-            self._button.setText(label)
+            self._button.setToolTip("")
+            return
+        metrics = QtGui.QFontMetrics(self._button.font())
+        shown = metrics.elidedText(label, QtCore.Qt.ElideMiddle, _MAX_CHOICE_LABEL_PX)
+        self._button.setText(f"{shown}  ⌄" if self._show_caret else shown)
+        self._button.setToolTip(label if shown != label else "")
 
     def _toggle_popup(self) -> None:
         popup = self._ensure_popup()
@@ -157,9 +190,12 @@ class ChoiceButton(QtWidgets.QWidget):
             popup.hide()
             return
         self._rebuild_popup()
-        width = max(self._button.width(), 180)
+        width = max(self._button.width(), _MIN_POPUP_WIDTH)
         popup.setFixedWidth(width)
         popup.adjustSize()
+        # Cap the height so a long list scrolls instead of leaving the screen.
+        content_height = self._popup_layout.sizeHint().height() + 10
+        popup.setFixedHeight(min(content_height, _MAX_POPUP_HEIGHT))
         point = self._button.mapToGlobal(QtCore.QPoint(0, self._button.height() + 5))
         screen = QtWidgets.QApplication.screenAt(point)
         below_screen = (
