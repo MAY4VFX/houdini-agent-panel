@@ -273,7 +273,8 @@ class AcpWorker(QtCore.QThread):
     connected = Signal(object)  # AgentInfo
     disconnected = Signal(str)  # reason, "" on a normal stop
     failed = Signal(str)  # human-readable text
-    auth_required = Signal(list)  # list[AuthMethod]
+    auth_required = Signal(list)
+    authenticated = Signal(str)  # method_id
     log_line = Signal(str)  # agent stderr
 
     # --- sessions -----------------------------------------------------------
@@ -558,12 +559,29 @@ class AcpWorker(QtCore.QThread):
         self._agent_info = None
 
     async def do_authenticate(self, method_id: str) -> None:
+        """Sign in, and say so when it worked.
+
+        Succeeding in silence was the whole bug: the artist picked a method,
+        the browser opened, they approved it — and the panel sat on the
+        sign-in screen forever, because nothing here told it the agent had
+        let them in. `authenticate` returning without raising IS the success
+        signal; there is no notification to wait for.
+        """
         if self._conn is None:
             return
+        _log.info("authenticate: method=%s", method_id)
         try:
             await self._conn.authenticate(method_id=method_id)
         except acp.RequestError as exc:
+            _log.error("authenticate failed: %s", exc)
             self.error.emit("", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - anything else must reach the artist too
+            _log.error("authenticate failed: %r", exc)
+            self.error.emit("", str(exc))
+            return
+        _log.info("authenticate: ok")
+        self.authenticated.emit(method_id)
 
     async def do_logout(self) -> None:
         """`ClientSideConnection` in agent-client-protocol 0.12.0 doesn't wrap
@@ -793,6 +811,7 @@ _FORWARDED_SIGNALS = (
     "disconnected",
     "failed",
     "auth_required",
+    "authenticated",
     "log_line",
     "session_started",
     "modes_changed",
@@ -823,6 +842,7 @@ class AcpClient(QtCore.QObject):
     disconnected = Signal(str)
     failed = Signal(str)
     auth_required = Signal(list)
+    authenticated = Signal(str)
     log_line = Signal(str)
 
     session_started = Signal(str, object)

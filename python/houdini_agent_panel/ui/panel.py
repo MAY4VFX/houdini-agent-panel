@@ -469,6 +469,7 @@ class AgentPanel(QtWidgets.QWidget):
             (client.disconnected, self._on_disconnected),
             (client.failed, self._on_failed),
             (client.auth_required, self._on_auth_required),
+            (client.authenticated, self._on_authenticated),
             (client.session_started, self._on_session_started),
             (client.modes_changed, self._on_modes_changed),
             (client.commands_changed, self._on_commands_changed),
@@ -996,7 +997,20 @@ class AgentPanel(QtWidgets.QWidget):
             settings_mod.save(self._settings)
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
+        self._note(f"Signing in with {method_id}… finish it in the browser if it opens.")
         shared_client().authenticate(method_id)
+
+    def _on_authenticated(self, method_id: str) -> None:
+        """Sign-in worked — get out of the way and open a conversation.
+
+        Leaving the artist on the sign-in screen after a successful sign-in
+        was the bug: they approved it in the browser and the panel gave no
+        sign it had noticed, so it looked like the login had failed.
+        """
+        self._note("Signed in.")
+        self._show_page(self.PAGE_TRANSCRIPT)
+        if self._pool.current() is None:
+            self._start_new_session()
 
     def _on_logout_requested(self) -> None:
         """Logging out sends the panel back where sign-in came from.
