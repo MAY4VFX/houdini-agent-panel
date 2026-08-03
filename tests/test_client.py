@@ -22,9 +22,28 @@ from houdini_agent_panel.ui.qt import QtCore
 
 FAKE_AGENT = Path(__file__).parent / "fake_agent.py"
 
-#: Timeout for waiting on signals in individual checks. Subprocess + JSON-RPC
-#: round trip isn't free, but 5s gives plenty of headroom on any CI machine.
-_TIMEOUT = 5.0
+#: Two different waits, two different ceilings — this file used to have one
+#: `_TIMEOUT` for both, which is what made it flaky under load (issue #28).
+#:
+#: `_CONNECT_TIMEOUT` covers `client.start()`: spawning a whole subprocess,
+#: a cold Python interpreter importing `houdini_agent_panel`/`acp`, and a
+#: JSON-RPC `initialize` round trip. Measured directly (`_pump_until` printed
+#: its own elapsed time for a few runs under 12 CPU-bound processes pinning
+#: every core): this step normally lands under 1.3s, but the tail is heavy —
+#: several runs cleared 2s, one hit 4.66s, a hair under the old 5s ceiling
+#: for EVERY wait in the file. Process creation is exactly what OS scheduling
+#: contention hits hardest, so it gets the generous budget.
+#:
+#: `_RESPONSE_TIMEOUT` covers everything else: a session, a prompt's reply, a
+#: mode change, a permission decision, a cancel — all requests to an agent
+#: process that is ALREADY UP AND RUNNING. The same measurement never saw one
+#: of these clear 0.34s, load or no load — an in-memory event loop tick isn't
+#: exposed to the process-creation cost that makes `_CONNECT_TIMEOUT` need
+#: headroom, so this one keeps the original 5s: not raising it is deliberate
+#: — inflating it "to be safe" would hide a real protocol regression behind
+#: a much longer wait before the test ever reports it.
+_CONNECT_TIMEOUT = 20.0
+_RESPONSE_TIMEOUT = 5.0
 
 
 @dataclass
@@ -49,13 +68,17 @@ def _spec(scenario: str) -> _Spec:
     )
 
 
-def _pump_until(qapp, predicate, *, timeout: float = _TIMEOUT) -> None:
+def _pump_until(qapp, predicate, what: str, *, timeout: float = _RESPONSE_TIMEOUT) -> None:
+    """Pump the Qt loop until `predicate` holds, or fail saying what we were
+    waiting for — "condition did not become true" alone doesn't tell you
+    whether the agent never started or started and then never answered,
+    and those are two different bugs."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         qapp.processEvents(QtCore.QEventLoop.AllEvents, 50)
-    raise AssertionError(f"condition did not become true within {timeout}s")
+    raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
 
 
 def _pump_for(qapp, duration: float) -> None:
@@ -102,7 +125,12 @@ def _connect(qapp, client: AcpClient, scenario: str, tmp_path) -> _Recorder:
     connected = _Recorder(client.connected)
     failed = _Recorder(client.failed)
     client.start(_spec(scenario), cwd=str(tmp_path))
-    _pump_until(qapp, lambda: connected.calls or failed.calls)
+    _pump_until(
+        qapp,
+        lambda: connected.calls or failed.calls,
+        f"the {scenario!r} agent process to start (spawn + initialize)",
+        timeout=_CONNECT_TIMEOUT,
+    )
     assert not failed.calls, f"agent failed to come up: {failed.calls}"
     return connected
 
@@ -110,7 +138,7 @@ def _connect(qapp, client: AcpClient, scenario: str, tmp_path) -> _Recorder:
 def _new_session(qapp, client: AcpClient, tmp_path) -> str:
     started = _Recorder(client.session_started)
     client.new_session(cwd=str(tmp_path), mcp_servers=[])
-    _pump_until(qapp, lambda: started.calls)
+    _pump_until(qapp, lambda: started.calls, "a running agent to answer session/new")
     session_id, state = started.calls[0]
     assert state.session_id == session_id
     return session_id
@@ -185,7 +213,11 @@ def test_prompt_streams_thought_then_message_and_finishes(qapp, make_client, tmp
     # last chunk of the reply: this is a confirmed race in the SDK itself,
     # not a client bug. `docs/facts/acp-sdk.md` doesn't document this — we
     # wait for the final text, not for its order relative to `turn_finished`.
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi")
+    _pump_until(
+        qapp,
+        lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi",
+        "the turn to finish with the full 'echo: hi' reply",
+    )
 
     assert thoughts.calls, "the agent should have sent an agent_thought_chunk"
     assert "".join(c[2] for c in thoughts.calls) == "thinking..."
@@ -208,7 +240,9 @@ def test_prompt_before_auth_emits_auth_required_then_succeeds_after(qapp, make_c
     finished = _Recorder(client.turn_finished)
 
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: auth_required.calls)
+    _pump_until(
+        qapp, lambda: auth_required.calls, "an auth_required signal for the unauthenticated prompt"
+    )
 
     methods = auth_required.calls[0][0]
     assert [m.id for m in methods] == ["apikey"]
@@ -219,7 +253,7 @@ def test_prompt_before_auth_emits_auth_required_then_succeeds_after(qapp, make_c
     client.authenticate("apikey")
     finished.calls.clear()
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: finished.calls)
+    _pump_until(qapp, lambda: finished.calls, "the turn to finish after authenticating")
 
     assert finished.calls[0] == (session_id, "end_turn")
 
@@ -241,21 +275,21 @@ def test_logout_cycle_requires_auth_again(qapp, make_client, tmp_path):
 
     # 1. Login required.
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: auth_required.calls)
+    _pump_until(qapp, lambda: auth_required.calls, "the first auth_required signal")
     methods_before = [m.id for m in auth_required.calls[0][0]]
     assert methods_before == ["apikey"]
 
     # 2. Logged in.
     client.authenticate("apikey")
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: finished.calls)
+    _pump_until(qapp, lambda: finished.calls, "the turn to finish after logging in")
     assert finished.calls[0] == (session_id, "end_turn")
 
     # 3. Logged out — reuse auth_required as the "agent logged out" signal:
     # the login screen should appear again with the same authMethods.
     auth_required.calls.clear()
     client.logout()
-    _pump_until(qapp, lambda: auth_required.calls)
+    _pump_until(qapp, lambda: auth_required.calls, "an auth_required signal after logout")
     assert [m.id for m in auth_required.calls[0][0]] == methods_before
 
     # the connection must not have dropped because of the logout
@@ -264,7 +298,9 @@ def test_logout_cycle_requires_auth_again(qapp, make_client, tmp_path):
     # 4. Login required again.
     finished.calls.clear()
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: len(auth_required.calls) >= 2)
+    _pump_until(
+        qapp, lambda: len(auth_required.calls) >= 2, "a second auth_required after logging out"
+    )
     assert not finished.calls, "prompt must not go through without logging in again"
 
 
@@ -281,7 +317,7 @@ def test_permission_request_waits_for_ui_answer(qapp, make_client, tmp_path):
     messages = _Recorder(client.message_chunk)
 
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: requested.calls)
+    _pump_until(qapp, lambda: requested.calls, "a permission_requested signal")
 
     request_key, req_session_id, tool_call, options = requested.calls[0]
     assert req_session_id == session_id
@@ -296,7 +332,11 @@ def test_permission_request_waits_for_ui_answer(qapp, make_client, tmp_path):
     # last chunk aren't serialized with each other in the SDK, wait for both
     # conditions.
     expected = "permission: allow_once"
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected)
+    _pump_until(
+        qapp,
+        lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected,
+        "the turn to finish after allowing the permission",
+    )
 
 
 def test_permission_cancelled_when_answered_with_none(qapp, make_client, tmp_path):
@@ -309,12 +349,16 @@ def test_permission_cancelled_when_answered_with_none(qapp, make_client, tmp_pat
     messages = _Recorder(client.message_chunk)
 
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: requested.calls)
+    _pump_until(qapp, lambda: requested.calls, "a permission_requested signal")
 
     request_key = requested.calls[0][0]
     client.answer_permission(request_key, None)
     expected = "permission: cancelled"
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected)
+    _pump_until(
+        qapp,
+        lambda: finished.calls and "".join(c[2] for c in messages.calls) == expected,
+        "the turn to finish after cancelling the permission",
+    )
 
 
 # --- modes --------------------------------------------------------------------
@@ -326,7 +370,7 @@ def test_modes_from_new_session_and_set_mode_update(qapp, make_client, tmp_path)
 
     started = _Recorder(client.session_started)
     client.new_session(cwd=str(tmp_path), mcp_servers=[])
-    _pump_until(qapp, lambda: started.calls)
+    _pump_until(qapp, lambda: started.calls, "a running agent to answer session/new")
     session_id, state = started.calls[0]
 
     assert state.current_mode_id == "ask"
@@ -334,7 +378,7 @@ def test_modes_from_new_session_and_set_mode_update(qapp, make_client, tmp_path)
 
     modes_changed = _Recorder(client.modes_changed)
     client.set_mode(session_id, "code")
-    _pump_until(qapp, lambda: modes_changed.calls)
+    _pump_until(qapp, lambda: modes_changed.calls, "a modes_changed signal after set_mode")
 
     changed_session_id, mode_state = modes_changed.calls[0]
     assert changed_session_id == session_id
@@ -364,7 +408,9 @@ def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
             finished.calls and plan_changed.calls and tool_call.calls and tool_call_update.calls
         )
 
-    _pump_until(qapp, _all_arrived)
+    _pump_until(
+        qapp, _all_arrived, "turn_finished plus plan_changed, tool_call and tool_call_update"
+    )
 
     plan_session_id, entries = plan_changed.calls[0]
     assert plan_session_id == session_id
@@ -392,7 +438,7 @@ def test_cancel_stops_slow_prompt(qapp, make_client, tmp_path):
     _pump_for(qapp, 0.2)
     client.cancel(session_id)
 
-    _pump_until(qapp, lambda: finished.calls, timeout=_TIMEOUT)
+    _pump_until(qapp, lambda: finished.calls, "the turn to finish as cancelled")
     assert finished.calls[0] == (session_id, "cancelled")
 
 
@@ -471,6 +517,10 @@ def test_client_works_under_a_haio_like_event_loop_policy(
     finished = _Recorder(client.turn_finished)
     messages = _Recorder(client.message_chunk)
     client.prompt(session_id, [{"type": "text", "text": "hi"}])
-    _pump_until(qapp, lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi")
+    _pump_until(
+        qapp,
+        lambda: finished.calls and "".join(c[2] for c in messages.calls) == "echo: hi",
+        "the turn to finish with the full 'echo: hi' reply",
+    )
 
     assert finished.calls[0] == (session_id, "end_turn")
