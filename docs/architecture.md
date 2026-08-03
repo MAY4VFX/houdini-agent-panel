@@ -437,20 +437,22 @@ class SessionPool(QtCore.QObject):
     added = Signal(str)
     removed = Signal(str)
     changed = Signal(str)
-    current_changed = Signal(str)
 
     def add(self, state: SessionState) -> None
     def get(self, session_id: str) -> SessionState | None
     def all(self) -> list[SessionState]
-    def current(self) -> SessionState | None
-    def set_current(self, session_id: str) -> None
     def remove(self, session_id: str) -> None
 ```
 
 One `SessionPool` per Houdini process (the module-level singleton
 `pool()`), because a second panel tab must see the same session list and
 the same live agent process. Two tabs — one `AcpClient`, one process,
-different `current`.
+different `current`: the pool has no notion of "current" at all — that's a
+fact about a tab, not about the shared list, and lives on `AgentPanel`
+itself (`_current_session_id`/`_set_current_session`/`_current_session()`).
+It used to live here as one shared field, which meant picking a different
+conversation in one tab silently moved every other open tab too (issue
+#21) — exactly the opposite of "different current" above.
 
 ---
 

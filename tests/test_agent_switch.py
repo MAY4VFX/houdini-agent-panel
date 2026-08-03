@@ -43,7 +43,6 @@ def test_pool_clear_drops_everything_and_announces_it():
     pool.clear()
 
     assert pool.all() == []
-    assert pool.current() is None
     assert sorted(removed) == ["a", "b"]
 
 
@@ -54,12 +53,12 @@ def test_switching_agents_does_not_carry_the_old_session(qapp, monkeypatch):
     client = panel_mod.shared_client()
     client.session_started.emit("claude-session", _state("claude-session"))
     qapp.processEvents()
-    assert widget._pool.current() is not None
+    assert widget._current_session() is not None
 
     monkeypatch.setattr(widget, "_start_agent", lambda agent_id: None)
     widget._on_agent_chosen("codex-acp")
 
-    assert widget._pool.current() is None, (
+    assert widget._current_session() is None, (
         "a session issued by the previous agent must not survive the switch"
     )
     assert widget._pool.all() == []

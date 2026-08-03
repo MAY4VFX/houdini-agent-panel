@@ -63,14 +63,26 @@ class SessionPool(QtCore.QObject):
 
     Knows nothing about ACP by itself — `AcpClient` fills it in via signals
     (`session_started`, `message_chunk`, ...), the panel reads through
-    `get`/`all`/`current`. The split is the same as `transcript_model.py`:
-    only state lives here, rendering lives in `ui/`.
+    `get`/`all`. The split is the same as `transcript_model.py`: only state
+    lives here, rendering lives in `ui/`.
+
+    Deliberately has no notion of "current" session. That used to live here
+    as one shared `_current_id`/`set_current()`/`current_changed` — which
+    is exactly backwards from what this module's own docstring promises
+    ("two tabs... different current"): a pool-wide field can only ever hold
+    ONE current session, so picking a different conversation in one tab's
+    drawer silently dragged every other open tab onto that same
+    conversation too (issue #21). Which session is on screen is a fact
+    about a *tab*, not about the pool — it lives on `AgentPanel` now
+    (`_current_session_id`/`_set_current_session`), one per instance. The
+    pool stays exactly what its docstring already said it should be: the
+    session list and data every tab shares, nothing about which one any of
+    them happens to be looking at.
     """
 
     added = Signal(str)
     removed = Signal(str)
     changed = Signal(str)
-    current_changed = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -80,15 +92,12 @@ class SessionPool(QtCore.QObject):
         # to rely on that implicitly, so we duplicate it with an explicit
         # id list.
         self._order: list[str] = []
-        self._current_id: str | None = None
 
     def add(self, state: SessionState) -> None:
         is_new = state.session_id not in self._states
         self._states[state.session_id] = state
         if is_new:
             self._order.append(state.session_id)
-        if self._current_id is None:
-            self._current_id = state.session_id
         if is_new:
             self.added.emit(state.session_id)
         else:
@@ -99,17 +108,6 @@ class SessionPool(QtCore.QObject):
 
     def all(self) -> list[SessionState]:
         return [self._states[sid] for sid in self._order]
-
-    def current(self) -> SessionState | None:
-        if self._current_id is None:
-            return None
-        return self._states.get(self._current_id)
-
-    def set_current(self, session_id: str) -> None:
-        if session_id not in self._states or session_id == self._current_id:
-            return
-        self._current_id = session_id
-        self.current_changed.emit(session_id)
 
     def clear(self) -> None:
         """Drop every session. Called when the agent process goes away.
@@ -123,7 +121,6 @@ class SessionPool(QtCore.QObject):
         removed = list(self._order)
         self._states.clear()
         self._order.clear()
-        self._current_id = None
         for session_id in removed:
             self.removed.emit(session_id)
 
@@ -132,11 +129,7 @@ class SessionPool(QtCore.QObject):
             return
         del self._states[session_id]
         self._order.remove(session_id)
-        if self._current_id == session_id:
-            self._current_id = self._order[-1] if self._order else None
         self.removed.emit(session_id)
-        if self._current_id is not None:
-            self.current_changed.emit(self._current_id)
 
     def mark_changed(self, session_id: str) -> None:
         """The session's state was changed externally (same reference) — just notify."""

@@ -231,6 +231,12 @@ class AgentPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self._settings = settings_mod.load()
         self._pool = sessions.pool()
+        #: Which session THIS tab has on screen — the pool is shared
+        #: (same session list, same agent process, per its own docstring),
+        #: but this is not: two tabs must be able to look at two different
+        #: conversations at once (issue #21). See `_current_session`/
+        #: `_set_current_session`.
+        self._current_session_id: str | None = None
         self._models: dict[str, TranscriptModel] = {}
         self._pending_permissions: dict[str, str] = {}
         self._permission_views: dict[str, PermissionView] = {}
@@ -322,7 +328,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.new_session_clicked.connect(self._start_new_session)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
         self._conversations.new_session_clicked.connect(self._start_new_session)
-        self._conversations.session_selected.connect(self._pool.set_current)
+        self._conversations.session_selected.connect(self._set_current_session)
         self._conversations.session_renamed.connect(self._on_session_renamed)
         self._conversations.session_removed.connect(self._on_session_removed)
 
@@ -428,7 +434,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
-        current = self._pool.current()
+        current = self._current_session()
         if current is None:
             self._start_new_session()
         elif current.session_id.startswith(_RESTORED_PREFIX):
@@ -570,7 +576,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
-        current = self._pool.current()
+        current = self._current_session()
         if current is None:
             self._start_new_session()
         elif current.session_id.startswith(_RESTORED_PREFIX):
@@ -596,7 +602,7 @@ class AgentPanel(QtWidgets.QWidget):
         for state in self._pool.all():
             state.busy = False
         self._composer.set_busy(False)
-        current = self._pool.current()
+        current = self._current_session()
         if current is not None:
             self._finish_activity(current.session_id)
         self._composer.set_capabilities(None, self._settings.whisper_endpoint)
@@ -640,7 +646,7 @@ class AgentPanel(QtWidgets.QWidget):
         state.busy = False
         self._models.setdefault(session_id, TranscriptModel())
         self._pool.add(state)
-        self._pool.set_current(session_id)
+        self._set_current_session(session_id)
         self._show_session(session_id)
         self._show_page(self.PAGE_TRANSCRIPT)
         pending, self._pending_prompt = self._pending_prompt, None
@@ -692,7 +698,7 @@ class AgentPanel(QtWidgets.QWidget):
         own `config_option_update`, which coming back to this session later
         would overwrite with whatever the value was before the pick.
         """
-        current = self._pool.current()
+        current = self._current_session()
         if current is not None:
             current.config_options = [
                 replace(option, current_value=value) if option.id == config_id else option
@@ -750,7 +756,7 @@ class AgentPanel(QtWidgets.QWidget):
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.show_error(message, self._last_auth_method)
             return
-        target = session_id or (self._pool.current().session_id if self._pool.current() else "")
+        target = session_id or (self._current_session().session_id if self._current_session() else "")
         if not target:
             self._note(message)
             return
@@ -806,13 +812,56 @@ class AgentPanel(QtWidgets.QWidget):
             (self._pool.added, refresh),
             (self._pool.removed, refresh),
             (self._pool.changed, refresh),
-            (self._pool.current_changed, self._show_session),
+            (self._pool.removed, self._on_pool_session_removed),
         )
         for signal, slot in self._pool_wiring:
             signal.connect(slot)
 
+    def _current_session(self) -> sessions.SessionState | None:
+        """Whichever session THIS tab has open — see `_current_session_id`."""
+        if self._current_session_id is None:
+            return None
+        return self._pool.get(self._current_session_id)
+
+    def _set_current_session(self, session_id: str) -> None:
+        """Make `session_id` the one on screen in THIS tab, and only this one.
+
+        Replaces `SessionPool.set_current` (see its removal note): a click
+        in one tab's drawer, or restoring history on boot, must never move
+        a sibling tab's own conversation.
+        """
+        if session_id not in [s.session_id for s in self._pool.all()]:
+            return
+        if session_id == self._current_session_id:
+            return
+        self._current_session_id = session_id
+        self._show_session(session_id)
+
+    def _on_pool_session_removed(self, session_id: str) -> None:
+        """A session left the shared pool — react only if THIS tab had it open.
+
+        A sibling tab deleting some OTHER conversation must not move this
+        one (issue #21). Mirrors what `SessionPool.remove` used to do to its
+        own single shared `_current_id` — falls back to whatever's left, or
+        to no current session at all. Does NOT start a new session on its
+        own: this fires for every removal, including the internal "swap the
+        restored placeholder for the real session id" in
+        `_on_session_started`, where a replacement is already on its way a
+        few lines later — starting one here too raced a second, spurious
+        `session/new`. Only the artist's own "delete this conversation"
+        (`_on_session_removed`) decides to open a fresh one when nothing is
+        left.
+        """
+        if session_id != self._current_session_id:
+            return
+        remaining = self._pool.all()
+        if remaining:
+            self._set_current_session(remaining[-1].session_id)
+        else:
+            self._current_session_id = None
+
     def _refresh_sessions(self) -> None:
-        current = self._pool.current()
+        current = self._current_session()
         self._conversations.set_sessions(
             self._pool.all(), current.session_id if current else None
         )
@@ -841,7 +890,7 @@ class AgentPanel(QtWidgets.QWidget):
             # the artist returns to the conversation.
             self._hide_permission_popover()
             return
-        current = self._pool.current()
+        current = self._current_session()
         session_id = current.session_id if current is not None else ""
         view = next(
             (
@@ -982,10 +1031,14 @@ class AgentPanel(QtWidgets.QWidget):
         # conversations the artist had already thrown away.
         self._release_session(session_id)
         self._pool.remove(session_id)
-        if self._pool.current() is None:
-            # Deleted the last conversation — an artist who just cleared the
-            # drawer should land somewhere usable, not on an empty feed with
-            # no session to prompt.
+        # `_on_pool_session_removed` (wired to the pool's shared `removed`
+        # signal, fired synchronously by the line above) already picked a
+        # fallback conversation for THIS tab if the deleted one was the one
+        # on screen here — but it deliberately never starts a new session on
+        # its own (see its docstring), so that is still this method's job:
+        # an artist who just cleared their own drawer should land somewhere
+        # usable, not on an empty feed with no session to prompt.
+        if self._current_session() is None:
             self._start_new_session()
 
     def _release_session(self, session_id: str) -> None:
@@ -1003,7 +1056,7 @@ class AgentPanel(QtWidgets.QWidget):
         return self._models.setdefault(session_id, TranscriptModel())
 
     def _is_current(self, session_id: str) -> bool:
-        current = self._pool.current()
+        current = self._current_session()
         return current is not None and current.session_id == session_id
 
     def _touch(self, session_id: str, entry_id: str) -> None:
@@ -1027,7 +1080,7 @@ class AgentPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------- input
 
     def _on_submitted(self, blocks: list) -> None:
-        current = self._pool.current()
+        current = self._current_session()
         if current is not None and current.session_id.startswith(_RESTORED_PREFIX):
             # A conversation read back from disk has no agent behind it. Keep
             # the words, open a real session, and let `_on_session_started`
@@ -1081,7 +1134,7 @@ class AgentPanel(QtWidgets.QWidget):
         is how the panel ends up with a stop button that does nothing, so
         after a short grace period we release the input ourselves and say so.
         """
-        current = self._pool.current()
+        current = self._current_session()
         if current is None:
             self._composer.set_busy(False)
             return
@@ -1116,7 +1169,7 @@ class AgentPanel(QtWidgets.QWidget):
         "Plan" with whatever it was when the session was created. Setting it
         here as well means the pick survives even if the echo never comes.
         """
-        current = self._pool.current()
+        current = self._current_session()
         if current is not None:
             current.current_mode_id = mode_id
             self._pool.mark_changed(current.session_id)
@@ -1310,7 +1363,7 @@ class AgentPanel(QtWidgets.QWidget):
         """
         self._note("Signed in.")
         self._show_page(self.PAGE_TRANSCRIPT)
-        if self._pool.current() is None:
+        if self._current_session() is None:
             self._start_new_session()
 
     def _on_logout_requested(self) -> None:
@@ -1425,7 +1478,7 @@ class AgentPanel(QtWidgets.QWidget):
                 conversation.entries = records
                 conversation.updated_at = time.time()
                 existing[conversation_id] = conversation
-            current = self._pool.current()
+            current = self._current_session()
             active_id = (
                 self._conversation_ids.get(current.session_id) if current is not None else None
             )
@@ -1481,14 +1534,14 @@ class AgentPanel(QtWidgets.QWidget):
         ids = {c.id for c in stored}
         wanted = _RESTORED_PREFIX + (active_id if active_id in ids else stored[0].id)
         if self._pool.get(wanted) is not None:
-            self._pool.set_current(wanted)
+            self._set_current_session(wanted)
         self._restored = stored
         self._conversations.set_restored(stored) if hasattr(
             self._conversations, "set_restored"
         ) else None
 
     def _note(self, text: str) -> None:
-        current = self._pool.current()
+        current = self._current_session()
         session_id = current.session_id if current else "__idle__"
         entry = self._model(session_id).append_error(text)
         if current is None:

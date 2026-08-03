@@ -10,10 +10,9 @@ def _state(session_id: str, *, cwd: str = "/tmp/shot") -> SessionState:
     return SessionState(session_id=session_id, title="New conversation", cwd=cwd, created_at=0.0)
 
 
-def test_add_makes_session_current_by_default(qapp):
+def test_add_puts_the_session_in_the_pool(qapp):
     pool = SessionPool()
     pool.add(_state("s1"))
-    assert pool.current().session_id == "s1"
     assert pool.get("s1") is not None
 
 
@@ -40,67 +39,30 @@ def test_all_preserves_insertion_order(qapp):
     assert [s.session_id for s in pool.all()] == ["s1", "s2", "s3"]
 
 
-def test_set_current_emits_signal_and_updates_current(qapp):
-    pool = SessionPool()
-    pool.add(_state("s1"))
-    pool.add(_state("s2"))
-
-    seen = []
-    pool.current_changed.connect(seen.append)
-    pool.set_current("s2")
-
-    assert pool.current().session_id == "s2"
-    assert seen == ["s2"]
-
-
-def test_set_current_to_same_session_is_a_noop(qapp):
-    pool = SessionPool()
-    pool.add(_state("s1"))
-
-    seen = []
-    pool.current_changed.connect(seen.append)
-    pool.set_current("s1")
-
-    assert seen == []
-
-
-def test_set_current_unknown_id_is_ignored(qapp):
-    pool = SessionPool()
-    pool.add(_state("s1"))
-
-    pool.set_current("ghost")
-
-    assert pool.current().session_id == "s1"
-
-
-def test_remove_current_falls_back_to_last_remaining(qapp):
+def test_remove_drops_the_session_and_emits_once(qapp):
+    """The pool has no notion of "current" any more (see its docstring) —
+    that's a per-tab fact now (`AgentPanel._current_session_id`), covered at
+    the panel level in test_ui_panel.py, not here."""
     pool = SessionPool()
     pool.add(_state("s1"))
     pool.add(_state("s2"))
     pool.add(_state("s3"))
-    pool.set_current("s2")
 
     removed = []
-    current_changed = []
     pool.removed.connect(removed.append)
-    pool.current_changed.connect(current_changed.append)
 
     pool.remove("s2")
 
     assert removed == ["s2"]
     assert pool.get("s2") is None
     assert [s.session_id for s in pool.all()] == ["s1", "s3"]
-    # the last remaining session becomes the current one
-    assert pool.current().session_id == "s3"
-    assert current_changed == ["s3"]
 
 
-def test_remove_last_session_leaves_no_current(qapp):
+def test_remove_last_session_leaves_the_pool_empty(qapp):
     pool = SessionPool()
     pool.add(_state("s1"))
     pool.remove("s1")
 
-    assert pool.current() is None
     assert pool.all() == []
 
 

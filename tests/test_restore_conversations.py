@@ -67,7 +67,7 @@ def test_the_conversation_that_was_open_comes_back_on_top(qapp):
     widget._restore_conversations()
     qapp.processEvents()
 
-    current = widget._pool.current()
+    current = widget._current_session()
     assert current is not None and current.title == "Was open"
     widget.shutdown()
 

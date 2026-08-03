@@ -111,6 +111,71 @@ def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
     second.shutdown()
 
 
+def test_switching_conversation_in_one_tab_does_not_move_the_other(qapp):
+    """Issue #21: two tabs share one `SessionPool` — same session list, same
+    live agent process, per `sessions.py`'s own docstring — but "which
+    conversation is on screen" used to be a single shared field on the pool
+    too (`_current_id`/`set_current`/`current_changed`). Picking a different
+    conversation in one tab's drawer silently dragged every other open tab
+    onto that same conversation. `_current_session_id` now lives on
+    `AgentPanel` itself, one per tab.
+    """
+    first = _make_panel(qapp)
+    second = _make_panel(qapp)
+
+    client = panel_mod.shared_client()
+    state_a = _session("a")
+    state_b = _session("b")
+    client.session_started.emit(state_a.session_id, state_a)
+    qapp.processEvents()
+    client.session_started.emit(state_b.session_id, state_b)
+    qapp.processEvents()
+
+    # Each tab independently ended up on whichever session IT last opened
+    # (both saw both `session_started` emissions, since the pool is shared)
+    # — pin down the starting point explicitly rather than assume it.
+    first._set_current_session("a")
+    second._set_current_session("a")
+    assert first._current_session().session_id == "a"
+    assert second._current_session().session_id == "a"
+
+    first._set_current_session("b")
+
+    assert first._current_session().session_id == "b"
+    assert second._current_session().session_id == "a", (
+        "a different tab's conversation switch must not move this one"
+    )
+
+    first.shutdown()
+    second.shutdown()
+
+
+def test_deleting_a_conversation_from_one_tab_only_falls_back_in_that_tab(qapp):
+    """The other half of #21: removal must be scoped to the tab that had the
+    deleted conversation open, not broadcast through the shared pool."""
+    first = _make_panel(qapp)
+    second = _make_panel(qapp)
+
+    client = panel_mod.shared_client()
+    for sid in ("a", "b", "c"):
+        client.session_started.emit(sid, _session(sid))
+        qapp.processEvents()
+
+    first._set_current_session("b")
+    second._set_current_session("c")
+
+    first._on_session_removed("b")
+
+    assert second._current_session().session_id == "c", (
+        "a sibling tab's own conversation must survive someone else's delete"
+    )
+    assert first._current_session() is not None
+    assert first._current_session().session_id != "b"
+
+    first.shutdown()
+    second.shutdown()
+
+
 def test_last_tab_closing_stops_the_agent(qapp):
     """While one tab is alive the conversation goes on; once the last one is
     closed there is nothing left to keep the agent process for."""
@@ -226,7 +291,7 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
     client.session_started.emit(visible.session_id, visible)
     client.session_started.emit(background.session_id, background)
     qapp.processEvents()
-    widget._pool.set_current(visible.session_id)
+    widget._set_current_session(visible.session_id)
 
     refreshed: list = []
     widget._transcript.refresh = lambda entry_id=None: refreshed.append(entry_id)
@@ -608,9 +673,9 @@ def test_mode_selection_survives_switching_away_and_back(qapp, monkeypatch):
     second = _session("s2")
     client.session_started.emit(second.session_id, second)
     qapp.processEvents()
-    assert widget._pool.current().session_id == "s2"
+    assert widget._current_session().session_id == "s2"
 
-    widget._pool.set_current("s1")
+    widget._set_current_session("s1")
     qapp.processEvents()
 
     assert widget._pool.get("s1").current_mode_id == "plan"
@@ -647,7 +712,7 @@ def test_config_option_selection_survives_switching_away_and_back(qapp, monkeypa
     client.session_started.emit(second.session_id, second)
     qapp.processEvents()
 
-    widget._pool.set_current("s1")
+    widget._set_current_session("s1")
     qapp.processEvents()
 
     assert widget._pool.get("s1").config_options[0].current_value == "opus"
@@ -665,7 +730,7 @@ def test_background_session_gets_unread_dot_current_session_does_not(qapp):
     second = _session("s2")
     client.session_started.emit(second.session_id, second)
     qapp.processEvents()
-    assert widget._pool.current().session_id == "s2"
+    assert widget._current_session().session_id == "s2"
 
     client.message_chunk.emit("s1", "m1", "an answer arrived while s1 was in the background")
     qapp.processEvents()
@@ -673,7 +738,7 @@ def test_background_session_gets_unread_dot_current_session_does_not(qapp):
     assert widget._pool.get("s1").unread is True
     assert widget._pool.get("s2").unread is False
 
-    widget._pool.set_current("s1")
+    widget._set_current_session("s1")
     qapp.processEvents()
 
     assert widget._pool.get("s1").unread is False
@@ -882,7 +947,7 @@ def test_update_failure_is_reported_in_the_feed_not_silently(qapp, monkeypatch, 
 
     _wait_until(qapp, lambda: not widget._settings_view._agents_view._threads)
 
-    current_session = widget._pool.current()
+    current_session = widget._current_session()
     session_id = current_session.session_id if current_session else "__idle__"
     feed_text = " ".join(e.text for e in widget._model(session_id).entries())
     assert "Could not update" in feed_text
@@ -912,7 +977,7 @@ def test_panel_or_fx_update_gets_instructions_not_a_silent_attempt(qapp, monkeyp
 
     widget._notice.action_clicked.emit(update.target, "")
 
-    current_session = widget._pool.current()
+    current_session = widget._current_session()
     session_id = current_session.session_id if current_session else "__idle__"
     feed_text = " ".join(e.text for e in widget._model(session_id).entries())
     assert "pip install --upgrade houdini-agent-panel" in feed_text
