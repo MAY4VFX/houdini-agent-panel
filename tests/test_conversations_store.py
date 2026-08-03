@@ -82,3 +82,33 @@ def test_write_is_atomic_leaving_no_temp_file(data_dir):
 
     leftovers = list(data_dir.glob("conversations.json.tmp"))
     assert leftovers == []
+
+
+# --- active_id: which conversation to reselect on restore -------------------
+
+
+def test_active_id_roundtrips(data_dir):
+    old = _made("old", updated=1.0)
+    current = _made("current", updated=1.0)  # same updated_at — recency alone can't tell them apart
+
+    store.save([old, current], active_id=current.id)
+
+    assert store.load_active_id() == current.id
+
+
+def test_active_id_defaults_to_none_when_not_passed(data_dir):
+    """Existing callers that don't track a current conversation yet must
+    keep working exactly as before."""
+    store.save([_made("solo")])
+
+    assert store.load_active_id() is None
+
+
+def test_active_id_none_when_nothing_ever_saved(data_dir):
+    assert store.load_active_id() is None
+
+
+def test_active_id_none_on_broken_file(data_dir):
+    store.store_path().write_text("{ not json", "utf-8")
+
+    assert store.load_active_id() is None

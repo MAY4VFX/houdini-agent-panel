@@ -68,6 +68,20 @@ def _manifest_path_readonly(agent_id: str) -> Path:
     return paths.agents_dir() / agent_id / _MANIFEST_NAME
 
 
+#: In-process cache of `agent_id -> installed version (or None)`.
+#: `is_installed`/`installed_version` are called for EVERY agent in the
+#: registry on EVERY repaint of the "Agents" screen — without this, that's
+#: one disk read + JSON parse per agent per repaint, for state that only
+#: ever changes from inside this same module (`_write_manifest`,
+#: `uninstall_agent`), so those two are the only places that need to keep
+#: the cache honest.
+_manifest_cache: dict[str, str | None] = {}
+
+
+def reset_manifest_cache_for_tests() -> None:
+    _manifest_cache.clear()
+
+
 def _write_manifest(entry: AgentEntry, *, kind: str) -> None:
     payload = {
         "agent_id": entry.id,
@@ -77,20 +91,25 @@ def _write_manifest(entry: AgentEntry, *, kind: str) -> None:
     }
     manifest = paths.agent_dir(entry.id) / _MANIFEST_NAME  # mkdir is warranted here — we're writing
     manifest.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+    _manifest_cache[entry.id] = entry.version
 
 
 def installed_version(agent_id: str) -> str | None:
+    if agent_id in _manifest_cache:
+        return _manifest_cache[agent_id]
+
     manifest = _manifest_path_readonly(agent_id)
-    if not manifest.exists():
-        return None
-    try:
-        data = json.loads(manifest.read_text("utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    version = data.get("version")
-    return str(version) if version else None
+    version: str | None = None
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text("utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            raw_version = data.get("version")
+            version = str(raw_version) if raw_version else None
+    _manifest_cache[agent_id] = version
+    return version
 
 
 def is_installed(entry: AgentEntry) -> bool:
@@ -375,6 +394,7 @@ def uninstall_agent(agent_id: str) -> None:
     directory = paths.agents_dir() / agent_id
     if directory.exists():
         shutil.rmtree(directory)
+    _manifest_cache.pop(agent_id, None)
 
 
 def launch_spec(entry: AgentEntry) -> LaunchSpec:

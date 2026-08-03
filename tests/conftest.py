@@ -70,15 +70,53 @@ def fetcher() -> FakeFetcher:
 def fresh_fx_port_cache():
     """`scene` remembers the HTTP port scan for the life of the process.
 
-    That's deliberate in production (the scan costs 16 seconds on the main
-    thread), but process-wide state leaks between tests, so it's cleared
-    around every one of them.
+    That's deliberate in production (the scan costs up to a second on the
+    main thread, even parallelized), but process-wide state leaks between
+    tests, so it's cleared around every one of them.
     """
     from houdini_agent_panel import scene
 
     scene.reset_port_cache_for_tests()
     yield
     scene.reset_port_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def fresh_registry_memory_cache():
+    """`registry.fetch_registry` keeps a parsed copy in memory for the life
+    of the process, on top of the on-disk cache, to avoid re-reading/parsing
+    the registry file on every call within one panel session. Cleared around
+    every test, same reasoning as `fresh_fx_port_cache`: production wants the
+    memory to persist, tests must not leak it across `HAP_DATA_DIR`s."""
+    from houdini_agent_panel import registry
+
+    registry.reset_memory_cache_for_tests()
+    yield
+    registry.reset_memory_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def fresh_manifest_cache():
+    """`runtime` caches each agent's installed version in memory — it's
+    read once per agent on every repaint of the "Agents" screen otherwise.
+    Cleared around every test for the same reason as the fixtures above."""
+    from houdini_agent_panel import runtime
+
+    runtime.reset_manifest_cache_for_tests()
+    yield
+    runtime.reset_manifest_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def fresh_system_node_cache():
+    """`node.find_system_node` caches its subprocess lookup in memory for
+    the life of the process. Cleared around every test for the same reason
+    as the fixtures above."""
+    from houdini_agent_panel import node
+
+    node.reset_system_node_cache_for_tests()
+    yield
+    node.reset_system_node_cache_for_tests()
 
 
 @pytest.fixture(autouse=True)

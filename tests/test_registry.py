@@ -201,6 +201,12 @@ def test_fetch_registry_offline_with_any_age_cache_returns_stale(fetcher):
     wrapper = json.loads(cache_path.read_text("utf-8"))
     wrapper["fetched_at"] -= 10 * 86400.0
     cache_path.write_text(json.dumps(wrapper), "utf-8")
+    # This is standing in for a fresh process picking up an old disk cache
+    # (e.g. Houdini restarted 10 days later): the in-process memory cache
+    # populated by the first `fetch_registry()` call above is still fresh
+    # from its own point of view and would otherwise mask the on-disk aging
+    # we just did by hand.
+    registry.reset_memory_cache_for_tests()
 
     from houdini_agent_panel.network import NetworkError
 

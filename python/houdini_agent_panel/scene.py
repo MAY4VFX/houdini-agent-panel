@@ -14,6 +14,7 @@ module must be importable in tests outside Houdini.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -162,6 +163,16 @@ def _scan_for_any_fx_port() -> int | None:
 
     Logged as a degradation — by construction, this path can't tell "our"
     Houdini apart from a neighboring one running on the same machine.
+
+    Probed concurrently, not one port after another: a closed port still
+    costs the full `_PORT_SCAN_TIMEOUT` before it fails, and this call
+    happens on the main thread (`logbook._log_environment` at panel
+    startup, before the result is cached by `_cached_scan_for_any_fx_port`).
+    Sequentially that's up to `_PORT_SCAN_COUNT * _PORT_SCAN_TIMEOUT` = 16
+    seconds of a frozen Houdini; concurrently it's bounded by one timeout,
+    ~1 second, regardless of how many ports are dead. Ties (more than one
+    port answering) resolve to the lowest port, matching the old
+    lowest-first sequential scan.
     """
     _log.warning(
         "fxhoudinimcp_server is unreachable from inside the process (the "
@@ -170,10 +181,10 @@ def _scan_for_any_fx_port() -> int | None:
         _PORT_SCAN_BASE,
         _PORT_SCAN_BASE + _PORT_SCAN_COUNT - 1,
     )
-    for port in range(_PORT_SCAN_BASE, _PORT_SCAN_BASE + _PORT_SCAN_COUNT):
-        if _probe_health(port):
-            return port
-    return None
+    ports = range(_PORT_SCAN_BASE, _PORT_SCAN_BASE + _PORT_SCAN_COUNT)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PORT_SCAN_COUNT) as pool:
+        alive = [port for port, ok in zip(ports, pool.map(_probe_health, ports)) if ok]
+    return min(alive) if alive else None
 
 
 def _probe_health(port: int) -> bool:

@@ -268,7 +268,23 @@ def _cache_path() -> Path:
     return paths.cache_dir() / _CACHE_FILE_NAME
 
 
-def _read_cache(path: Path, *, max_age: float | None) -> list[AgentEntry] | None:
+#: In-process cache, so a screen that calls `fetch_registry()` per row (the
+#: "Agents" screen, `_display_label` in the header, the updates checker)
+#: doesn't re-read and re-parse the 48 KB cache file from disk on every
+#: single call within the same panel session. `(fetched_at, entries)`,
+#: `fetched_at` carried over from the on-disk wrapper (or `time.time()` on a
+#: fresh network fetch) so a cold read followed immediately by several
+#: in-process hits still ages out on the same schedule as the disk cache
+#: would have.
+_memory_cache: tuple[float, list[AgentEntry]] | None = None
+
+
+def reset_memory_cache_for_tests() -> None:
+    global _memory_cache
+    _memory_cache = None
+
+
+def _read_cache(path: Path, *, max_age: float | None) -> tuple[float, list[AgentEntry]] | None:
     """`max_age=None` — accept a cache of any age (network unavailable, cache exists)."""
     if not path.exists():
         return None
@@ -281,13 +297,12 @@ def _read_cache(path: Path, *, max_age: float | None) -> list[AgentEntry] | None
     payload = wrapper.get("payload")
     if not isinstance(payload, dict):
         return None
-    if max_age is not None:
-        fetched_at = wrapper.get("fetched_at")
-        if not isinstance(fetched_at, (int, float)):
-            return None
-        if time.time() - fetched_at > max_age:
-            return None
-    return parse_registry(payload)
+    fetched_at = wrapper.get("fetched_at")
+    if not isinstance(fetched_at, (int, float)):
+        return None
+    if max_age is not None and time.time() - fetched_at > max_age:
+        return None
+    return fetched_at, parse_registry(payload)
 
 
 def _write_cache(path: Path, payload: Any) -> None:
@@ -301,7 +316,8 @@ def _write_cache(path: Path, payload: Any) -> None:
 def fetch_registry(
     *, force: bool = False, max_age: float = 86400.0, fetch: Fetcher | None = None
 ) -> list[AgentEntry]:
-    """The agent registry, cached at `<cache>/registry.json`.
+    """The agent registry, cached at `<cache>/registry.json` and, within this
+    process, in memory too.
 
     If the cache is fresher than `max_age` and `force=False`, we return it
     without touching the network. If the network is unavailable (including
@@ -310,22 +326,32 @@ def fetch_registry(
     screen to show stale versions than not show anything at all. Neither
     cache nor network — `RegistryError`.
     """
+    global _memory_cache
+
+    if not force and _memory_cache is not None:
+        fetched_at, entries = _memory_cache
+        if time.time() - fetched_at <= max_age:
+            return entries
+
     cache_file = _cache_path()
     if not force:
         cached = _read_cache(cache_file, max_age=max_age)
         if cached is not None:
-            return cached
+            _memory_cache = cached
+            return cached[1]
 
     try:
         payload = fetch_json(REGISTRY_URL, fetch=fetch)
     except NetworkError:
         stale = _read_cache(cache_file, max_age=None)
         if stale is not None:
-            return stale
+            _memory_cache = stale
+            return stale[1]
         raise RegistryError(
             f"{REGISTRY_URL}: network unavailable, and there's no local cache yet"
         ) from None
 
     entries = parse_registry(payload)
     _write_cache(cache_file, payload)
+    _memory_cache = (time.time(), entries)
     return entries

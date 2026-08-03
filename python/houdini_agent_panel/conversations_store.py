@@ -105,18 +105,9 @@ def load() -> list[StoredConversation]:
     Same discipline as `settings.load`: the file moves aside and the artist
     gets an empty list instead of a stack trace on open.
     """
-    target = store_path()
-    if not target.exists():
+    payload = _read_payload()
+    if payload is None:
         return []
-    try:
-        payload = json.loads(target.read_text("utf-8"))
-    except (OSError, ValueError):
-        try:
-            target.replace(target.with_suffix(target.suffix + ".broken"))
-        except OSError:
-            pass
-        return []
-
     raw = payload.get("conversations") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
         return []
@@ -124,11 +115,52 @@ def load() -> list[StoredConversation]:
     return _ordered(result)
 
 
-def save(conversations: list[StoredConversation]) -> None:
+def load_active_id() -> str | None:
+    """Which conversation was the current one (the open tab) when this was
+    last saved, so the panel can restore the SAME conversation on top,
+    rather than just something-or-other from the ordered list.
+
+    Ordering alone (`load()`) can't stand in for this: `_persist_conversations`
+    in `ui/panel.py` bumps `updated_at` for every live conversation with
+    unsaved changes, not just the one on screen, so more than one entry can
+    tie for "most recent". `None` means either nothing was ever recorded, or
+    the file is unreadable — the caller's fallback is the first entry of
+    `load()`'s already-ordered list, not an error.
+    """
+    payload = _read_payload()
+    if payload is None:
+        return None
+    active_id = payload.get("active_id") if isinstance(payload, dict) else None
+    return active_id if isinstance(active_id, str) and active_id else None
+
+
+def _read_payload() -> dict | None:
+    target = store_path()
+    if not target.exists():
+        return None
+    try:
+        payload = json.loads(target.read_text("utf-8"))
+    except (OSError, ValueError):
+        try:
+            target.replace(target.with_suffix(target.suffix + ".broken"))
+        except OSError:
+            pass
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save(conversations: list[StoredConversation], *, active_id: str | None = None) -> None:
     """Write atomically, keeping the newest `MAX_CONVERSATIONS`.
 
     Pinned ones are never trimmed away: pinning is the artist saying this one
     matters, and silently dropping it would make the pin a lie.
+
+    `active_id` is the conversation currently on screen (the open tab), if
+    any — kept alongside the list so a later `load_active_id()` can restore
+    the SAME conversation rather than guessing from recency. Omitted (the
+    default `None`) simply means "nothing to remember this time", not "there
+    is no active conversation" — callers that don't track a current
+    conversation yet can keep calling `save()` exactly as before.
     """
     ordered = _ordered(list(conversations))
     pinned = [c for c in ordered if c.pinned]
@@ -138,7 +170,11 @@ def save(conversations: list[StoredConversation]) -> None:
     target = store_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".tmp")
-    payload = {"version": STORE_VERSION, "conversations": [c.to_dict() for c in keep]}
+    payload = {
+        "version": STORE_VERSION,
+        "active_id": active_id,
+        "conversations": [c.to_dict() for c in keep],
+    }
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
     os.replace(tmp, target)
 

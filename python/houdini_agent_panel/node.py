@@ -31,6 +31,19 @@ NODE_VERSION = "22.14.0"
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
 
+#: In-process cache keyed by `minimum`: whether a system Node exists (and
+#: is recent enough) isn't going to change between the dozen times
+#: `launch_spec()`/`ensure_node()` ask about it over the life of one Houdini
+#: process, but finding out costs a `subprocess.run` each time. A `dict`
+#: rather than a bare value so a `None` result (no usable system Node) is
+#: distinguishable from "not looked up yet".
+_system_node_cache: dict[tuple[int, int, int], Path | None] = {}
+
+
+def reset_system_node_cache_for_tests() -> None:
+    _system_node_cache.clear()
+
+
 def find_system_node(minimum: tuple[int, int, int] = MIN_NODE) -> Path | None:
     """The system `node`, if it's on PATH and not older than `minimum`.
 
@@ -38,6 +51,14 @@ def find_system_node(minimum: tuple[int, int, int] = MIN_NODE) -> Path | None:
     treated as "no system Node", not a crash: the panel isn't obligated to
     understand exactly what's wrong with someone else's Node on disk.
     """
+    if minimum in _system_node_cache:
+        return _system_node_cache[minimum]
+    result = _find_system_node_uncached(minimum)
+    _system_node_cache[minimum] = result
+    return result
+
+
+def _find_system_node_uncached(minimum: tuple[int, int, int]) -> Path | None:
     found = shutil.which("node")
     if not found:
         return None
