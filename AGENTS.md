@@ -50,3 +50,23 @@ rediscover them.
   input field.
 - Don't duplicate code from `fxhoudinimcp/install.py` — reuse
   `resolve_houdini_dirs`, `desktop_config_path`, `printable_argv`.
+- **Any script that imports `houdini_agent_panel` outside pytest must set
+  `HAP_DATA_DIR` to a throwaway directory before that import — not after.**
+  `tests/conftest.py`'s `data_dir` fixture does this automatically for every
+  test; a hand-written hython/manual verification script gets none of that
+  for free. A real machine's `settings.json` can have `autostart_agent=True`,
+  and `AgentPanel.__init__` schedules `_boot()` on a `QTimer.singleShot(0,
+  ...)` — it can fire on the very first `app.processEvents()` and launch a
+  real agent subprocess against the real API, on the owner's own account,
+  before you've written a single assertion. This happened for real once: a
+  script without this guard left a real agent running for 30+ minutes and
+  overwrote real `installed_agents`/manifest records on the developer's
+  machine (see commit `b5f7932`'s message for the full account). Do it like
+  this, before any `from houdini_agent_panel import ...`:
+  ```python
+  import os, tempfile
+  os.environ["HAP_DATA_DIR"] = tempfile.mkdtemp(prefix="hap-verify-")
+  ```
+  `tests/e2e/run_e2e.py` is the one deliberate exception — it exists to drive
+  the real installed build against real agents, and says so in its own
+  docstring; it is not a template for a quick one-off check.

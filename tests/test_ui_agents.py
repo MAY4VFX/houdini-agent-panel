@@ -148,6 +148,46 @@ def test_installed_agent_has_no_use_button(qapp, monkeypatch):
     assert buttons == {"Remove"}
 
 
+def test_sign_in_shows_only_on_the_currently_connected_agents_own_row(qapp, monkeypatch):
+    """Moved here from the header chip's switcher menu — a real complaint:
+    the button used to show for any agent that had declared auth methods,
+    not for whichever one was actually running, in the menu meant to answer
+    "which agent to talk to", not "manage this one". `set_current_agent_auth`
+    is how the panel says which single row, if any, gets it.
+    """
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry_a = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    entry_b = AgentEntry(
+        id="agent-b",
+        name="Agent B",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/b.zip", cmd="./b", sha256="0" * 64)},
+    )
+    _mark_installed("agent-a", "1.0.0")
+    _mark_installed("agent-b", "1.0.0")
+
+    view = AgentsView()
+    view.set_agents([entry_a, entry_b])
+    view.set_current_agent_auth("agent-a", True)
+
+    row_a = view._rows_by_id["agent-a"]
+    row_b = view._rows_by_id["agent-b"]
+    assert "Sign in…" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
+    assert "Sign in…" not in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
+
+    # Disconnecting (or switching to an agent with no auth methods at all)
+    # must take the button away again — it must not keep pointing at a dead
+    # connection.
+    view.set_current_agent_auth(None, False)
+    row_a = view._rows_by_id["agent-a"]
+    assert "Sign in…" not in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
+
+
 def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):
     from houdini_agent_panel.updates import Update
 

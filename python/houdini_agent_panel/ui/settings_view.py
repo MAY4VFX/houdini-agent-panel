@@ -102,6 +102,10 @@ class SettingsView(QtWidgets.QWidget):
     #: generic `changed` (settings reload) doesn't carry enough to do.
     install_succeeded = Signal(str)
     install_failed = Signal(str, str)
+    #: Forwarded from `AgentsView` — the panel is the one that actually
+    #: knows how to open the sign-in screen (`AgentPanel._offer_sign_in`);
+    #: this view only knows registry/runtime/settings, never the connection.
+    sign_in_requested = Signal()
 
     def __init__(
         self,
@@ -143,6 +147,7 @@ class SettingsView(QtWidgets.QWidget):
         self._agents_view.installed_changed.connect(self._on_agents_changed)
         self._agents_view.install_succeeded.connect(self.install_succeeded.emit)
         self._agents_view.install_failed.connect(self.install_failed.emit)
+        self._agents_view.sign_in_requested.connect(self.sign_in_requested.emit)
 
         self._default_agent_combo = ChoiceButton(self)
         self._default_agent_combo.currentIndexChanged.connect(self._on_field_changed)
@@ -273,6 +278,10 @@ class SettingsView(QtWidgets.QWidget):
     def trigger_agent_update(self, agent_id: str) -> bool:
         """Forwarded to the embedded `AgentsView` — see its `trigger_update`."""
         return self._agents_view.trigger_update(agent_id)
+
+    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None:
+        """Forwarded to the embedded `AgentsView` — see its `set_current_agent_auth`."""
+        self._agents_view.set_current_agent_auth(agent_id, can_sign_in)
 
     def reload(self) -> None:
         """Re-read `settings.json` from disk and refresh the controls without

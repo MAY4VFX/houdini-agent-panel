@@ -262,7 +262,6 @@ class HeaderBar(QtWidgets.QWidget):
     """Top context rail matching ``houdini-agent-precision.html``."""
 
     manage_agents_clicked = Signal()
-    sign_in_clicked = Signal()
     agent_selected = Signal(str)
     conversations_clicked = Signal()
     new_session_clicked = Signal()
@@ -346,7 +345,6 @@ class HeaderBar(QtWidgets.QWidget):
         # Empty until the panel's first boot pass — the chip just opens
         # settings until then, same as the "0 or 1 installed" case below.
         self._agent_items: list[tuple[str, str]] = []
-        self._can_sign_in = False
         self._agent_current_id: str | None = None
 
         self._agent_popup: QtWidgets.QFrame | None = None
@@ -468,14 +466,6 @@ class HeaderBar(QtWidgets.QWidget):
             separator.setProperty("popupSeparator", True)
             separator.setFrameShape(QtWidgets.QFrame.HLine)
             self._agent_popup_layout.addWidget(separator)
-        if self._can_sign_in:
-            # Signing in must not depend on the agent asking first. Grok
-            # accepts a session and only complains to its own stderr when it
-            # turns out it isn't authorized, so waiting for `auth_required`
-            # left no way in at all.
-            sign_in_button = QtWidgets.QPushButton("Sign in…", self._agent_popup)
-            sign_in_button.clicked.connect(self._choose_sign_in)
-            self._agent_popup_layout.addWidget(sign_in_button)
 
         manage_button = QtWidgets.QPushButton("Manage agents…", self._agent_popup)
         manage_button.clicked.connect(self._choose_manage)
@@ -510,14 +500,6 @@ class HeaderBar(QtWidgets.QWidget):
             )
         popup.move(point)
         popup.show()
-
-    def set_can_sign_in(self, can_sign_in: bool) -> None:
-        """Whether this agent declared any way to sign in at all."""
-        self._can_sign_in = bool(can_sign_in)
-
-    def _choose_sign_in(self) -> None:
-        self._agent_popup.hide()
-        self.sign_in_clicked.emit()
 
     def _choose_agent(self, agent_id: str) -> None:
         if self._agent_popup is not None:

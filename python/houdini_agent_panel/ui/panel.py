@@ -317,7 +317,6 @@ class AgentPanel(QtWidgets.QWidget):
         self.setFocusProxy(self._composer)
 
         self._header.manage_agents_clicked.connect(self._open_agent_management)
-        self._header.sign_in_clicked.connect(self._offer_sign_in)
         self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.conversations_clicked.connect(self._toggle_conversations)
         self._header.new_session_clicked.connect(self._start_new_session)
@@ -348,6 +347,7 @@ class AgentPanel(QtWidgets.QWidget):
         view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
         view.install_succeeded.connect(self._on_agent_install_succeeded)
         view.install_failed.connect(self._on_agent_install_failed)
+        view.sign_in_requested.connect(self._offer_sign_in)
         return view
 
     def _make_auth_view(self) -> QtWidgets.QWidget:
@@ -425,7 +425,7 @@ class AgentPanel(QtWidgets.QWidget):
                 or info.name,
                 None,
             )
-            self._header.set_can_sign_in(bool(info.auth_methods))
+            self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
         current = self._pool.current()
@@ -504,8 +504,26 @@ class AgentPanel(QtWidgets.QWidget):
         Order is install order — registry agents in `installed_agents` dict
         order, then custom agents — deterministic, and it matches how the
         agents section lists them.
+
+        `settings.installed_agents` alone used to miss anything installed
+        only through an ordinary launch and never the explicit Install/Update
+        button — an npx agent needs nothing else to run (npx fetches the
+        package itself), so it could work for hours and then vanish from
+        this exact menu the moment the registry refreshed, with no way back
+        to the agent the artist had just been talking to. The manifest
+        (`runtime.installed_version`) is what `_LaunchPrepWorker` actually
+        writes on every launch now, so anything the registry knows about and
+        the manifest says is here gets added too — settings.installed_agents
+        stays the source for order and for whatever the registry hasn't
+        loaded yet (nothing in `_registry_entries` right after boot).
         """
-        ids = list(self._settings.installed_agents) + [c.id for c in self._settings.custom_agents]
+        from .. import runtime
+
+        ids = list(self._settings.installed_agents)
+        for entry in self._registry_entries:
+            if entry.id not in ids and runtime.installed_version(entry.id) is not None:
+                ids.append(entry.id)
+        ids += [c.id for c in self._settings.custom_agents]
         items = [(agent_id, self._display_label(agent_id)) for agent_id in ids]
         self._header.set_agent_menu(items, self._settings.default_agent)
 
@@ -549,7 +567,7 @@ class AgentPanel(QtWidgets.QWidget):
         # The chip shows the name the artist picked, not the npm package
         # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
-        self._header.set_can_sign_in(bool(info.auth_methods))
+        self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._show_page(self.PAGE_TRANSCRIPT)
         current = self._pool.current()
@@ -582,6 +600,9 @@ class AgentPanel(QtWidgets.QWidget):
         if current is not None:
             self._finish_activity(current.session_id)
         self._composer.set_capabilities(None, self._settings.whisper_endpoint)
+        # No connected agent means no row should offer "Sign in…" either —
+        # otherwise it keeps pointing at a process that no longer exists.
+        self._settings_view.set_current_agent_auth(None, False)
         self._note(f"Agent disconnected: {reason}" if reason else "Agent stopped.")
 
     def _on_failed(self, message: str) -> None:

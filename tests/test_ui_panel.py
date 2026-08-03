@@ -295,6 +295,36 @@ def test_installed_agent_reaches_the_header_chip_menu(qapp):
     widget.shutdown()
 
 
+def test_agent_installed_only_via_manifest_still_reaches_the_chip_menu(qapp):
+    """A real bug, reported live: Claude worked fine, then vanished from this
+    exact menu.
+
+    `settings.installed_agents` used to be the chip menu's only source. An
+    npx agent can run for hours on nothing but its own on-demand fetch,
+    never touching the explicit Install/Update button that writes that
+    settings record — only the manifest
+    (`runtime.installed_version`/`_LaunchPrepWorker`, see panel.py) knows it
+    is actually there. Without reading that too, the very next registry
+    refresh dropped it from the menu with no way back to the agent the
+    artist had just been talking to.
+    """
+    from houdini_agent_panel import runtime
+    from houdini_agent_panel.registry import AgentEntry
+
+    widget = _make_panel(qapp)
+    widget._boot()
+
+    entry = AgentEntry(id="claude-acp", name="Claude Agent", version="1.0.0")
+    runtime._write_manifest(entry, kind="npx")
+    assert "claude-acp" not in settings_mod.load().installed_agents  # never went through Install/Update
+
+    widget._on_refresh_done(SimpleNamespace(announcements=[], updates=[]), [entry])
+
+    ids = [agent_id for agent_id, _label in widget._header._agent_items]
+    assert "claude-acp" in ids
+    widget.shutdown()
+
+
 def test_choosing_agent_from_chip_menu_switches_agent(qapp, monkeypatch):
     widget = _make_panel(qapp)
     widget._boot()

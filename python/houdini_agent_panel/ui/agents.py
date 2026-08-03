@@ -103,6 +103,7 @@ class _AgentRow(QtWidgets.QWidget):
     update_requested = Signal()
     uninstall_requested = Signal()
     remove_custom_requested = Signal()
+    sign_in_requested = Signal()
 
     #: Fixed width for the state column and the actions column. Letting them
     #: size to content made every row's buttons land at a different x —
@@ -123,6 +124,7 @@ class _AgentRow(QtWidgets.QWidget):
         is_installed: bool = False,
         has_update: bool = False,
         is_custom: bool = False,
+        can_sign_in: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -170,6 +172,18 @@ class _AgentRow(QtWidgets.QWidget):
             # with — no action button at all (design.md: an unavailable
             # agent is shown, not hidden).
             return
+
+        if can_sign_in:
+            # Only ever true for whichever row is the currently connected
+            # agent (`AgentsView.set_current_agent_auth`, driven by the
+            # panel's own `agent_info()`) — moved here from the header
+            # chip's switcher menu, which used to show "Sign in…" next to
+            # every agent regardless of which one was actually running, or
+            # whether the artist had already signed in. This is a setting
+            # of the agent, not a choice about which agent to talk to.
+            sign_in_btn = QtWidgets.QPushButton("Sign in…", self._actions)
+            sign_in_btn.clicked.connect(self.sign_in_requested.emit)
+            actions_layout.addWidget(sign_in_btn)
 
         if is_custom:
             remove_btn = QtWidgets.QPushButton("Remove", self._actions)
@@ -225,6 +239,11 @@ class AgentsView(QtWidgets.QWidget):
     #: panel) needs the fact too: a silent failure here is exactly what a
     #: broken button looks like from the artist's side.
     install_failed = Signal(str, str)
+    #: The artist clicked "Sign in…" on whichever row is the currently
+    #: connected agent (see `set_current_agent_auth`) — this view knows
+    #: nothing about the agent connection itself (design.md's four layers),
+    #: so opening the actual sign-in screen is entirely the panel's call.
+    sign_in_requested = Signal()
 
     def __init__(
         self,
@@ -254,6 +273,11 @@ class AgentsView(QtWidgets.QWidget):
         # Guards a rapid double-click (row AND banner both reachable for the
         # same agent) from starting two installs onto the same files at once.
         self._installing: set[str] = set()
+        # Which agent id is the one actually connected right now, and
+        # whether ITS `initialize` declared any auth methods — the only row
+        # that ever gets a "Sign in…" button (`set_current_agent_auth`).
+        self._current_agent_id: str | None = None
+        self._current_agent_can_sign_in = False
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
@@ -296,6 +320,21 @@ class AgentsView(QtWidgets.QWidget):
         self._updates_by_target = {u.target: u for u in (updates or []) if u.kind == "agent"}
         self._rebuild_registry_rows()
 
+    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None:
+        """Which agent is actually connected right now, and whether ITS
+        `initialize` declared any auth methods at all.
+
+        Not "needs to sign in" — an agent declares its methods whether or
+        not the artist is already signed in (design.md/architecture.md have
+        no protocol signal for "currently authenticated" to check instead).
+        Only the row for `agent_id` ever gets the button; every other row
+        must not have one, registry or custom.
+        """
+        self._current_agent_id = agent_id
+        self._current_agent_can_sign_in = can_sign_in
+        self._rebuild_registry_rows()
+        self._load_custom_agents()
+
     def refresh_from_registry(self, *, force: bool = False) -> None:
         """Shortcut for the panel: fetch the registry itself, with the same
         `fetch` given to the constructor (tests hand in a `FakeFetcher`,
@@ -333,11 +372,13 @@ class AgentsView(QtWidgets.QWidget):
                 unavailable_reason=reason,
                 is_installed=installed is not None,
                 has_update=update is not None,
+                can_sign_in=(entry.id == self._current_agent_id and self._current_agent_can_sign_in),
                 parent=self,
             )
             row.install_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
+            row.sign_in_requested.connect(self.sign_in_requested.emit)
             self._rows_layout.addWidget(row)
             self._rows_by_id[entry.id] = row
 
@@ -422,9 +463,11 @@ class AgentsView(QtWidgets.QWidget):
                 version=agent.command,
                 state_text="custom agent",
                 is_custom=True,
+                can_sign_in=(agent.id == self._current_agent_id and self._current_agent_can_sign_in),
                 parent=self,
             )
             row.remove_custom_requested.connect(lambda checked=False, a=agent: self._remove_custom(a.id))
+            row.sign_in_requested.connect(self.sign_in_requested.emit)
             self._custom_rows_layout.addWidget(row)
 
     def _on_add_custom(self) -> None:

@@ -53,16 +53,39 @@ def test_authorization_error_on_stderr_opens_the_sign_in_screen(qapp, monkeypatc
     widget.shutdown()
 
 
-def test_sign_in_is_offered_in_the_menu_whenever_the_agent_has_methods(qapp, monkeypatch):
+def test_sign_in_is_reachable_from_the_settings_agents_row(qapp, monkeypatch):
+    """The manual entry point moved from the header chip's switcher menu to
+    the Settings screen's agent row (an artist's complaint: "Claude is
+    already signed in, why offer it there, and why not next to the agent
+    itself" — both fair, see `ui/agents.py::_AgentRow`'s `can_sign_in`).
+    `_offer_sign_in` itself — and the forced `auth_required` screen — are
+    unchanged; only who can reach it moved.
+    """
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     client = panel_mod.shared_client()
     monkeypatch.setattr(client, "agent_info", lambda: _info())
 
-    widget._header.sign_in_clicked.emit()
+    widget._settings_view.sign_in_requested.emit()
     qapp.processEvents()
 
     assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_AUTH
+    widget.shutdown()
+
+
+def test_agent_switcher_menu_no_longer_offers_sign_in(qapp):
+    """A real complaint from the artist: "Claude is already signed in, why
+    is there a Sign in button in the switcher menu" — that control used to
+    show for ANY agent that had declared auth methods, whether or not the
+    artist was already signed in, in the one menu meant to answer "which
+    agent do I want to talk to", not "manage this agent". It's gone from
+    the header entirely now — moved to the agent's own row in Settings.
+    """
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+
+    assert not hasattr(widget._header, "sign_in_clicked")
+    assert not hasattr(widget._header, "set_can_sign_in")
     widget.shutdown()
 
 

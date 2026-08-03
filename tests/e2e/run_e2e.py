@@ -21,6 +21,17 @@ What it cannot cover, and nobody should pretend otherwise: real mouse and
 keyboard inside Houdini's GUI, pane docking, live theme switching, a real
 microphone, and a browser OAuth round trip. Those still need a human. The
 point is that everything else no longer does.
+
+This file is a deliberate exception to a rule every OTHER hython/manual
+verification script must follow: it does NOT set `HAP_DATA_DIR` to a
+throwaway directory, because driving the real installed build against real
+agents is the entire point. Do not copy that part. A one-off script written
+to check some panel logic by hand must set `HAP_DATA_DIR` before importing
+`houdini_agent_panel` at all — see AGENTS.md's Project rules. Without it, a
+real `settings.json` with `autostart_agent=True` gets a real agent launched
+against the real API on the very first `app.processEvents()`, which is
+exactly how this project once ran a real Claude session for 30+ minutes and
+clobbered real install records on a developer's own machine.
 """
 
 from __future__ import annotations
