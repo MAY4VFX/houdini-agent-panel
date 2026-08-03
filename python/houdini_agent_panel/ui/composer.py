@@ -706,6 +706,14 @@ class Composer(QtWidgets.QWidget):
 
     def _submit(self) -> None:
         if self._blocked or self._busy:
+            # Never fail in silence. A stuck busy flag turned the send button
+            # into a stop button that did nothing when pressed, and from the
+            # outside that is indistinguishable from a dead panel.
+            self.attachment_rejected.emit(
+                "Still waiting on the previous turn. Press stop, or start a new conversation."
+                if self._busy
+                else "Input is locked by a notice above."
+            )
             return
         blocks = self._gather_blocks()
         if not blocks:

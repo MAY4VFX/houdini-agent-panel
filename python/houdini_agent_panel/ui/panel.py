@@ -471,6 +471,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_permissions.clear()
         self._permission_views.clear()
         self._hide_permission_popover()
+        # Clear busy on EVERY session, not just the visible one. A turn that
+        # was in flight when the agent went away can never finish, and a
+        # session left marked busy comes back that way on the next switch —
+        # with a send button stuck as a stop button that quietly does
+        # nothing when pressed.
+        for state in self._pool.all():
+            state.busy = False
         self._composer.set_busy(False)
         current = self._pool.current()
         if current is not None:
@@ -490,6 +497,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_AUTH)
 
     def _on_session_started(self, session_id: str, state: Any) -> None:
+        # A brand new session cannot be mid-turn. Saying so explicitly keeps
+        # a stale flag from a previous agent out of a fresh conversation.
+        state.busy = False
         self._models.setdefault(session_id, TranscriptModel())
         self._pool.add(state)
         self._pool.set_current(session_id)

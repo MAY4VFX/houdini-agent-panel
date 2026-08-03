@@ -79,6 +79,7 @@ from acp.schema import (
 )
 
 from . import __version__
+from .logbook import logger as _logbook_logger
 from .sessions import SessionMode as _SessionMode
 from .sessions import SessionState
 from .ui.qt import QtCore, Signal
@@ -104,6 +105,10 @@ _CONNECT_TIMEOUT = 180.0
 _STDERR_TAIL_LINES = 12
 
 _AUTH_REQUIRED_CODE = -32000
+
+#: Prompt lifecycle goes to the on-disk log: the FACT of a prompt and its
+#: block types, never a word of its content.
+_log = _logbook_logger("houdini_agent_panel.client")
 
 _CONTENT_BLOCK_TYPES: dict[str, type] = {
     "text": TextContentBlock,
@@ -630,8 +635,17 @@ class AcpWorker(QtCore.QThread):
         if self._conn is None:
             self.error.emit(session_id, "no connection to the agent")
             return
-        content = [_build_content_block(block) for block in blocks]
         try:
+            # Inside the try on purpose: an unknown block type used to raise
+            # here, outside any handler, and the exception died inside the
+            # asyncio task — no error, no reply, a turn that simply never
+            # ends. Any failure has to reach the artist.
+            content = [_build_content_block(block) for block in blocks]
+            _log.info(
+                "prompt: session=%s blocks=%s",
+                session_id,
+                [b.get("type") for b in blocks],
+            )
             response = await self._conn.prompt(session_id=session_id, prompt=content)
         except acp.RequestError as exc:
             if not self._emit_if_auth_required(exc):
@@ -640,6 +654,7 @@ class AcpWorker(QtCore.QThread):
         except Exception as exc:  # noqa: BLE001
             self.error.emit(session_id, str(exc))
             return
+        _log.info("turn done: session=%s stop=%s", session_id, response.stop_reason)
         self.turn_finished.emit(session_id, response.stop_reason)
 
     async def do_cancel(self, session_id: str) -> None:
