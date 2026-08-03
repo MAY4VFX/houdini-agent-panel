@@ -923,12 +923,29 @@ class AgentPanel(QtWidgets.QWidget):
             self._pool.mark_changed(session_id)
 
     def _on_session_removed(self, session_id: str) -> None:
+        # Deleting a conversation must hand its session back. With Claude a
+        # session is a whole agent-SDK process running the user's entire MCP
+        # fleet; leaving it behind meant a Houdini that had been open for an
+        # afternoon carried a dozen of them, hundreds of megabytes, for
+        # conversations the artist had already thrown away.
+        self._release_session(session_id)
         self._pool.remove(session_id)
         if self._pool.current() is None:
             # Deleted the last conversation — an artist who just cleared the
             # drawer should land somewhere usable, not on an empty feed with
             # no session to prompt.
             self._start_new_session()
+
+    def _release_session(self, session_id: str) -> None:
+        """Give a session back to the agent, if it is a real one.
+
+        Restored conversations carry OUR id, not the agent's — there is
+        nothing on the far side to close, and asking would be a lie about
+        what exists.
+        """
+        if not session_id or session_id.startswith(_RESTORED_PREFIX):
+            return
+        shared_client().close_session(session_id)
 
     def _model(self, session_id: str) -> TranscriptModel:
         return self._models.setdefault(session_id, TranscriptModel())
@@ -1245,6 +1262,8 @@ class AgentPanel(QtWidgets.QWidget):
         # across — no protocol can do that. The transcript stays readable and
         # the new agent starts from what it is told.
         self._persist_conversations()
+        for state in self._pool.all():
+            self._release_session(state.session_id)
         self._pool.clear()
         self._pending_permissions.clear()
         # A message queued for the old agent has nowhere to land yet: the new

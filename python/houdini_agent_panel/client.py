@@ -145,6 +145,17 @@ class AgentInfo:
     supports_load_session: bool
     supports_logout: bool
     auth_methods: tuple[AuthMethod, ...]
+    #: Whether the agent implements `session/close`. It matters more than it
+    #: looks: with Claude, every session brings up its own agent-SDK process
+    #: and that process's whole MCP server fleet. Measured on a real machine
+    #: after three hours — three sessions, three SDKs, twenty-odd node
+    #: processes, ~300 MB, none of it ever released. A conversation the
+    #: artist has moved on from must give that back.
+    #:
+    #: Defaults to False so that a caller building an `AgentInfo` without
+    #: knowing (every test fixture, for one) gets the answer that costs
+    #: nothing if wrong: we simply don't ask the agent to close anything.
+    supports_close_session: bool = False
 
 
 def _agent_info_from(init: Any) -> AgentInfo:
@@ -160,6 +171,11 @@ def _agent_info_from(init: Any) -> AgentInfo:
         supports_audio=bool(prompt_caps.audio),
         supports_embedded_context=bool(prompt_caps.embedded_context),
         supports_load_session=bool(caps.load_session),
+        # `sessionCapabilities.close` follows the same contract as `auth.logout`:
+        # absent or None means unsupported, an empty object means supported.
+        supports_close_session=(
+            getattr(getattr(caps, "session_capabilities", None), "close", None) is not None
+        ),
         # The AgentAuthCapabilities.logout contract is exactly this: a
         # missing field or None means "the agent doesn't support it", and
         # LogoutCapabilities() (an empty but non-None object) means "it
@@ -793,6 +809,24 @@ class AcpWorker(QtCore.QThread):
         if self._conn is not None:
             await self._conn.cancel(session_id=session_id)
 
+    async def do_close_session(self, session_id: str) -> None:
+        """Hand a session back to the agent.
+
+        Never fatal: an agent that doesn't implement `session/close`, or has
+        already forgotten this session, is not a reason to bother anybody —
+        the point is to release what CAN be released, not to police the
+        agent. Failures go to the log and nowhere else.
+        """
+        if self._conn is None or not session_id:
+            return
+        info = self._agent_info
+        if info is not None and not info.supports_close_session:
+            return
+        try:
+            await self._conn.close_session(session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 - releasing is best-effort
+            _log.debug("closing session %s failed", session_id, exc_info=exc)
+
     async def do_set_config_option(self, session_id: str, config_id: str, value: str) -> None:
         if self._conn is None:
             return
@@ -1156,6 +1190,15 @@ class AcpClient(QtCore.QObject):
 
     def cancel(self, session_id: str) -> None:
         self._submit(lambda w: w.do_cancel(session_id))
+
+    def close_session(self, session_id: str) -> None:
+        """Release a session the artist has finished with.
+
+        Cheap-looking, expensive to skip: with Claude each session is a
+        separate agent-SDK process that starts the user's entire MCP server
+        fleet, and none of it goes away on its own.
+        """
+        self._submit(lambda w: w.do_close_session(session_id))
 
     def set_mode(self, session_id: str, mode_id: str) -> None:
         self._submit(lambda w: w.do_set_mode(session_id, mode_id))

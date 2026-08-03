@@ -1,14 +1,30 @@
 """Shared fixtures.
 
-Two rules are enforced here: no test writes to the real user data folder,
-and no test reaches the network.
+Three rules are enforced here: no test writes to the real user data folder,
+no test reaches the network, and no test opens a window on the developer's
+screen.
+
+That last one was learned the hard way. Fifty-eight `show()` calls across the
+suite, a suite run dozens of times a day, and nothing anywhere set Qt's
+platform — so every run put real windows on a real desktop, and any run that
+did not exit cleanly left them there. The person whose machine it was
+eventually reported hundreds of stray panels and a computer crawling, and it
+took an embarrassingly long detour through the macOS window server to work
+out that the windows were ours and the tests had put them there.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+
+# BEFORE anything imports Qt: once a QGuiApplication exists the platform
+# plugin is fixed, and setting this afterwards does nothing at all. Assigned,
+# not `setdefault`ed — an inherited value is exactly the accident being
+# prevented, so the test suite decides this and nothing else does.
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import pytest
 

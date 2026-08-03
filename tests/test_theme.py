@@ -138,3 +138,24 @@ def test_no_direct_application_palette_reads_outside_theme():
             if direct_read.search(line):
                 offenders.append(f"{path.name}:{lineno}: {line.strip()}")
     assert offenders == [], "direct QApplication.palette() read(s) found:\n" + "\n".join(offenders)
+
+
+def test_the_suite_never_opens_a_real_window():
+    """Qt must be running headless for every test in this suite.
+
+    Not a style rule. The suite calls `show()` in dozens of places and gets
+    run dozens of times a day; without this it puts real windows on a real
+    desktop, and any run that dies before cleanup leaves them there. That
+    ended in a machine covered in stray panels and an afternoon spent
+    interrogating the macOS window server to find out whose they were.
+    """
+    import os
+
+    from houdini_agent_panel.ui.qt import QtWidgets
+
+    assert os.environ.get("QT_QPA_PLATFORM") == "offscreen"
+    app = QtWidgets.QApplication.instance()
+    assert app is not None and app.platformName() == "offscreen", (
+        f"Qt came up on {app.platformName() if app else 'no app'!r} — conftest sets the "
+        "platform before Qt is imported; something imported Qt earlier."
+    )

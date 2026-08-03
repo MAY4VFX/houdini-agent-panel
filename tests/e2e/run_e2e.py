@@ -31,7 +31,13 @@ import sys
 import time
 import traceback
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Assigned, not `setdefault`ed. This drives a real panel with real widgets
+# and calls `show()`; inheriting a windowing platform from whatever shell
+# launched it means the run scatters live windows across the desktop of
+# whoever is using the machine. `HAP_E2E_VISIBLE=1` opts back in for the rare
+# case of watching it work.
+if os.environ.get("HAP_E2E_VISIBLE") != "1":
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 
 def _select_source() -> str:
