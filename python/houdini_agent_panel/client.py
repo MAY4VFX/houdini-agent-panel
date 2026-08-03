@@ -50,6 +50,7 @@ instead of branching the code into "under Houdini" and "in tests".
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import subprocess
 import sys
@@ -1038,6 +1039,23 @@ class AcpClient(QtCore.QObject):
         self._running = False
         self._spawn_worker()
 
+        # A running QThread at interpreter shutdown is not a warning — Qt
+        # calls `qFatal` and the process dies with SIGABRT. Seen in a real
+        # crash report: `Py_FinalizeEx` -> `destroyQCoreApplication` ->
+        # `QThread::~QThread` -> `abort`, with our own `AcpWorker` among the
+        # threads. Inside Houdini that is Houdini crashing on the way out,
+        # blamed on whatever the artist did last.
+        #
+        # Both hooks, because neither alone covers every exit: `aboutToQuit`
+        # fires when the Qt application ends normally (Houdini closing) but
+        # not for a bare script, and `atexit` fires for the script but too
+        # late in a GUI teardown to be relied on by itself. Stopping twice is
+        # harmless — `stop()` returns immediately when there is no worker.
+        app = QtCore.QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.stop)
+        atexit.register(self._stop_quietly)
+
     def _spawn_worker(self) -> "AcpWorker":
         """Bring up a fresh worker thread and wire it to this facade.
 
@@ -1095,6 +1113,16 @@ class AcpClient(QtCore.QObject):
     def start(self, spec: "LaunchSpec", *, cwd: str) -> None:
         worker = self._live_worker()
         worker.submit(worker.do_start(spec, cwd))
+
+    def _stop_quietly(self) -> None:
+        """`stop()` for an interpreter that is already on its way out.
+
+        Nothing here may raise: an exception from an `atexit` handler is
+        printed over whatever the process was actually reporting, and at this
+        point there is nobody left to tell anyway.
+        """
+        with contextlib.suppress(Exception):
+            self.stop()
 
     def stop(self) -> None:
         """Reliable stop: close the connection, wait for the process, stop
