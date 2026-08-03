@@ -342,8 +342,33 @@ class AcpWorker(QtCore.QThread):
     def run(self) -> None:  # noqa: D102 - overrides QThread.run
         asyncio.set_event_loop(self.loop)
         self._ready.set()
-        self.loop.run_forever()
-        self.loop.close()
+        try:
+            self.loop.run_forever()
+        finally:
+            self._shutdown_loop()
+
+    def _shutdown_loop(self) -> None:
+        """Close the loop without ever blocking the thread that owns it.
+
+        `run_forever()` returning does not mean the work is finished — it
+        means someone asked the loop to stop. Anything still in flight gets
+        cancelled here so it does not sit around holding pipes.
+
+        Deliberately no `run_until_complete` to await those cancellations:
+        driving a stopped loop again at shutdown hung the process on exit,
+        and a Houdini that will not close is far worse than a few tasks
+        collected a moment later. The orderly wait happens earlier, in
+        `do_stop`, where the loop is still running and can afford it.
+        """
+        try:
+            for task in asyncio.all_tasks(self.loop):
+                if not task.done():
+                    task.cancel()
+        except Exception:  # noqa: BLE001 - teardown must not raise out of a thread
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                self.loop.close()
 
     def wait_until_ready(self, timeout: float = 5.0) -> None:
         self._ready.wait(timeout)
@@ -541,9 +566,9 @@ class AcpWorker(QtCore.QThread):
         then wait for/kill the process. We carry it here by hand — when
         `spawn_agent_process` went away, so did its automatic call to it."""
         self._closing = True
-        for task in (self._stderr_task, self._exit_watch_task):
-            if task is not None:
-                task.cancel()
+        await self._cancel_and_await(self._stderr_task, self._exit_watch_task)
+        self._stderr_task = None
+        self._exit_watch_task = None
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -552,11 +577,48 @@ class AcpWorker(QtCore.QThread):
 
         await self._close_writer()
         await self._terminate_process()
+        await self._drain_remaining_tasks()
 
         self._process = None
         self._reader = None
         self._stderr_reader = None
         self._agent_info = None
+
+    async def _cancel_and_await(self, *tasks) -> None:
+        """Cancel tasks AND wait for them to actually finish.
+
+        Cancelling alone only requests it. Stopping the loop straight after
+        left the tasks half-way, which is where "Task was destroyed but it is
+        pending" came from — noise today, but each abandoned task still holds
+        its pipes and its frames.
+        """
+        pending = [t for t in tasks if t is not None and not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _drain_remaining_tasks(self) -> None:
+        """Let the SDK's own tasks finish before the loop goes away.
+
+        `acp` runs a sender, a receiver and a dispatcher of its own. Closing
+        the connection cancels them, but the loop used to stop before they
+        had unwound, and the SDK's supervisor then tried to resume work that
+        was already over — the source of "cannot reuse already awaited
+        coroutine" in the log.
+        """
+        current = asyncio.current_task()
+        leftovers = [t for t in asyncio.all_tasks(self.loop) if t is not current and not t.done()]
+        if not leftovers:
+            return
+        for task in leftovers:
+            task.cancel()
+        with contextlib.suppress(Exception):
+            # Bounded: a task that refuses to unwind must not hold up
+            # Houdini's shutdown. Whatever is left after this is abandoned
+            # deliberately, not by accident.
+            await asyncio.wait(leftovers, timeout=2.0)
 
     async def do_authenticate(self, method_id: str) -> None:
         """Sign in, and say so when it worked.
@@ -948,7 +1010,13 @@ class AcpClient(QtCore.QObject):
         worker.request_loop_stop()
         worker.wait(5000)
         self._worker = None
-        self._retired.append(worker)
+        # Keep only workers whose thread is genuinely still winding down.
+        # The list used to grow forever: every agent switch left a finished
+        # QThread object alive, and a QThread that is still referenced and
+        # still running is exactly what keeps a process from exiting.
+        self._retired = [w for w in self._retired if w.isRunning()]
+        if worker.isRunning():
+            self._retired.append(worker)
         self._running = False
         self._agent_info = None
         self.disconnected.emit("")

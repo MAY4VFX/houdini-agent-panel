@@ -373,4 +373,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    # Leave immediately instead of unwinding the interpreter. Houdini's own
+    # threads and Qt teardown can keep hython alive long after the run has
+    # said everything it has to say, and a report nobody sees because the
+    # process never exits is worth nothing. Everything of ours is already
+    # closed by this point — `Harness.__exit__` stops each panel and client.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
