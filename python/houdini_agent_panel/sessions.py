@@ -44,6 +44,10 @@ class SessionState:
     current_mode_id: str | None = None
     available_modes: list[SessionMode] = field(default_factory=list)
     available_commands: list[AvailableCommand] = field(default_factory=list)
+    #: Agent-side settings for this session (model, effort, fast mode).
+    #: ACP delivers them as config options — that is where the model
+    #: picker lives.
+    config_options: list = field(default_factory=list)
     entries: list[Entry] = field(default_factory=list)  # the feed, see §8
     usage: Usage | None = None
     busy: bool = False

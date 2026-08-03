@@ -324,6 +324,7 @@ class Composer(QtWidgets.QWidget):
         self.model_chip = ChoiceButton(self)
         self.model_chip.activated.connect(self._on_model_activated)
         self.model_chip.setVisible(False)
+        self._model_descriptions: dict[str, str] = {}
 
         # --- правая сторона: счётчик, отправка/стоп
         self._usage_label = QtWidgets.QLabel()
@@ -442,13 +443,26 @@ class Composer(QtWidgets.QWidget):
         приватные/вложенные атрибуты)."""
         self.mode_chip.set_modes(modes, current_id)
 
-    def set_models(self, models: list[tuple[str, str]], current_id: str | None) -> None:
-        """Показать выбор модели только для списка, пришедшего от агента."""
+    def set_models(
+        self,
+        models: list[tuple[str, str]],
+        current_id: str | None,
+        descriptions: dict[str, str] | None = None,
+    ) -> None:
+        """Show the model picker only for the list the agent actually sent.
+
+        `descriptions` become tooltips: agents put genuinely useful text
+        there ("Opus 5 with 1M context · Best for everyday tasks"), and
+        throwing it away would leave the artist choosing between opaque
+        model names.
+        """
         self.model_chip.blockSignals(True)
         try:
             self.model_chip.clear()
             for model_id, label in models:
                 self.model_chip.addItem(label, model_id)
+            self._model_descriptions = dict(descriptions or {})
+            self.model_chip.setToolTip(self._model_descriptions.get(current_id or "", ""))
             index = self.model_chip.findData(current_id)
             if index >= 0:
                 self.model_chip.setCurrentIndex(index)
@@ -475,6 +489,7 @@ class Composer(QtWidgets.QWidget):
     def _on_model_activated(self, index: int) -> None:
         model_id = self.model_chip.itemData(index)
         if model_id:
+            self.model_chip.setToolTip(self._model_descriptions.get(str(model_id), ""))
             self.model_selected.emit(str(model_id))
 
     def set_busy(self, busy: bool) -> None:

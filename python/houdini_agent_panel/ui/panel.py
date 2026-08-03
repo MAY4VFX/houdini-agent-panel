@@ -267,6 +267,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer.submitted.connect(self._on_submitted)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
+        self._composer.model_selected.connect(self._on_model_selected)
         self._composer.attachment_rejected.connect(self._note)
         self._composer.buddy_selected.connect(self._on_buddy_selected)
 
@@ -442,6 +443,7 @@ class AgentPanel(QtWidgets.QWidget):
             (client.session_started, self._on_session_started),
             (client.modes_changed, self._on_modes_changed),
             (client.commands_changed, self._on_commands_changed),
+            (client.config_options_changed, self._on_config_options_changed),
             (client.message_chunk, self._on_message_chunk),
             (client.thought_chunk, self._on_thought_chunk),
             (client.tool_call, self._on_tool_call),
@@ -502,6 +504,32 @@ class AgentPanel(QtWidgets.QWidget):
             self._pool.mark_changed(session_id)
         if self._is_current(session_id):
             self._composer.set_modes(state.available_modes, state.current_mode_id)
+
+    def _on_config_options_changed(self, session_id: str, options: list) -> None:
+        """Agent-side settings: model, reasoning effort, fast mode.
+
+        This is where ACP keeps the model picker — as session config options,
+        not as a concept of its own. We draw only what the agent sent: `model`
+        gets its own chip, and nothing else is hardcoded by id.
+        """
+        state = self._pool.get(session_id)
+        if state is not None:
+            state.config_options = list(options)
+        if not self._is_current(session_id):
+            return
+        self._apply_config_options(options)
+
+    def _apply_config_options(self, options: list) -> None:
+        models = [o for o in options if o.id == "model"]
+        if not models:
+            self._composer.set_models([], None)
+            return
+        option = models[0]
+        self._composer.set_models(
+            [(choice.value, choice.name) for choice in option.choices],
+            option.current_value,
+            {choice.value: choice.description for choice in option.choices},
+        )
 
     def _on_commands_changed(self, session_id: str, commands: list) -> None:
         state = self._pool.get(session_id)
@@ -613,6 +641,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_busy(state.busy)
             self._composer.set_usage(state.usage)
             self._composer.set_commands(list(state.available_commands))
+            self._apply_config_options(list(state.config_options))
             self._composer.set_modes(state.available_modes, state.current_mode_id)
         self._sync_permission_popover()
         self._refresh_sessions()
@@ -777,6 +806,11 @@ class AgentPanel(QtWidgets.QWidget):
             "start a new conversation if it stays unresponsive."
         )
         self._touch(session_id, entry.id)
+
+    def _on_model_selected(self, model_id: str) -> None:
+        current = self._pool.current()
+        if current is not None:
+            shared_client().set_config_option(current.session_id, "model", model_id)
 
     def _on_mode_selected(self, mode_id: str) -> None:
         current = self._pool.current()
