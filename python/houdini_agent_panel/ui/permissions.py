@@ -1,12 +1,13 @@
-"""Компактный popover запроса разрешения над composer.
+"""Compact permission-request popover above the composer.
 
-Кнопки строятся строго из `view.options`, в порядке, присланном агентом:
-своих кнопок не добавляем (в том числе кнопку «отмена» — если агенту нужна
-такая опция, он пришлёт её сам), чужие не переименовываем. `kind` каждой
-опции влияет только на акцент (не текст, не порядок): `reject_*` получают
-цвет ошибки из `theme` (по форме, не по хардкод-цвету — см. `theme.status_color`),
-`*_always` — жирное начертание. Решение хранит TranscriptModel, а сам
-интерактивный popover исчезает сразу после ответа.
+Buttons are built strictly from `view.options`, in the order the agent sent
+them: we add none of our own (including a "cancel" — if the agent wants that
+option it will send it) and rename none of theirs. Each option's `kind` only
+affects emphasis, never the text or the order: `reject_*` take the error
+colour from `theme` (by role, not a hardcoded colour — see
+`theme.status_color`), `*_always` get bold weight. The decision itself is
+kept by TranscriptModel; the interactive popover disappears the moment it is
+answered.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class PermissionRow(QtWidgets.QWidget):
         buttons_row.setSpacing(theme.SPACING_TIGHT)
         buttons_row.addStretch(1)
         for option_id, name, kind in view.options:
-            button = QtWidgets.QPushButton(name, self)  # текст — ровно то, что прислал агент
+            button = QtWidgets.QPushButton(name, self)  # text is exactly what the agent sent
             button.setFlat(True)
             button.setMinimumHeight(26)
             font = button.font()
@@ -60,7 +61,7 @@ class PermissionRow(QtWidgets.QWidget):
             buttons_row.addWidget(button)
         layout.addLayout(buttons_row)
 
-        # Видна только после ответа — история решения человека.
+        # Only visible after an answer — the record of what the human chose.
         self._status_label = QtWidgets.QLabel(self)
         self._status_label.setVisible(False)
         layout.addWidget(self._status_label)
@@ -99,10 +100,11 @@ class PermissionRow(QtWidgets.QWidget):
         return self._view.request_key
 
     def apply_view(self, view: PermissionView) -> None:
-        """Обновить строку по свежему `PermissionView` (например `answered` пришёл извне).
+        """Refresh the row from a fresh `PermissionView` (e.g. `answered` arrived elsewhere).
 
-        Используется `ui/transcript.py`, чтобы патчить существующую строку на месте,
-        а не пересоздавать виджет — так порядок и состояние кнопок не дёргаются.
+        Used by `ui/transcript.py` to patch the existing row in place rather
+        than recreate the widget — that way the buttons' order and state
+        don't jump around.
         """
         self._view = view
         if view.answered is not None and self._answered is None:
@@ -110,7 +112,7 @@ class PermissionRow(QtWidgets.QWidget):
 
     def _on_clicked(self, option_id: str) -> None:
         if self._answered is not None:
-            return  # кнопки задизейблены после ответа, но защищаемся и здесь
+            return  # buttons are disabled after an answer, but guard here too
         self._apply_answered(option_id)
         self.answered.emit(self._view.request_key, option_id)
 
@@ -123,11 +125,12 @@ class PermissionRow(QtWidgets.QWidget):
             font = chosen.font()
             font.setUnderline(True)
             chosen.setFont(font)
-            self._status_label.setText(f"Выбрано: {chosen.text()}")
+            self._status_label.setText(f"Chosen: {chosen.text()}")
         else:
-            # option_id не из своего же списка options — не должно случаться в
-            # штатной работе, но не падаем: просто показываем сырое значение.
-            self._status_label.setText(f"Выбрано: {option_id}")
+            # An option_id that isn't in our own options list — shouldn't
+            # happen in normal operation, but we don't crash: just show the
+            # raw value.
+            self._status_label.setText(f"Chosen: {option_id}")
         self._status_label.setVisible(True)
 
 

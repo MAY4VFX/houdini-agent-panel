@@ -1,12 +1,14 @@
-"""«Добавил своего агента → сразу нажал Использовать».
+"""Add a custom agent, then pick it right away.
 
-Регрессия, найденная только живой проверкой в Houdini: панель держит снимок
-настроек с момента открытия, а экран «Агенты» пишет добавленного агента в файл
-напрямую. Сохранение снимка поверх стирало свежую запись, и запуск падал с
-«агента нет ни в реестре, ни среди своих» — при том что после перезапуска
-Houdini всё работало, что и делало баг таким коварным.
+A regression found only by testing live in Houdini: the panel holds a
+snapshot of the settings from the moment it opened, while the "Agents" screen
+writes an added agent straight to the file. Saving the snapshot on top erased
+the fresh record, and launching failed with "the agent isn't in the registry
+or among custom agents" — while everything worked after restarting Houdini,
+which is what made the bug so treacherous.
 
-Отдельным файлом от test_ui_panel.py: тот параллельно правит другая сессия.
+A separate file from test_ui_panel.py: that one is being edited in parallel by
+another session.
 """
 
 from __future__ import annotations
@@ -35,17 +37,18 @@ def test_choosing_a_just_added_custom_agent_does_not_erase_it(qapp, monkeypatch)
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
 
-    # Экран «Агенты» пишет в файл напрямую, мимо снимка панели — ровно как
+    # The "Agents" screen writes to the file directly, past the panel's
+    # snapshot — exactly as
     # AgentsView._on_add_custom.
     fresh = settings_mod.load()
     fresh.custom_agents.append(
         settings_mod.CustomAgent(
-            id="custom:my", name="Мой", command="/usr/bin/env", args=["python3"]
+            id="custom:my", name="Mine", command="/usr/bin/env", args=["python3"]
         )
     )
     settings_mod.save(fresh)
 
-    # Панель не должна доходить до реального запуска процесса.
+    # The panel must never reach a real process launch.
     started: list[str] = []
     monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started.append(agent_id))
 
@@ -53,12 +56,12 @@ def test_choosing_a_just_added_custom_agent_does_not_erase_it(qapp, monkeypatch)
 
     on_disk = settings_mod.load()
     assert [a.id for a in on_disk.custom_agents] == ["custom:my"], (
-        "выбор агента затёр только что добавленную запись"
+        "picking an agent wiped the record that had just been added"
     )
     assert on_disk.default_agent == "custom:my"
     assert started == ["custom:my"]
 
-    # И собственный снимок панели теперь свежий — _launch_spec найдёт агента.
+    # And the panel's own snapshot is fresh now — _launch_spec will find the agent.
     assert [a.id for a in widget._settings.custom_agents] == ["custom:my"]
 
     widget.shutdown()
@@ -70,7 +73,7 @@ def test_remember_seen_does_not_clobber_concurrent_settings_writes(qapp):
 
     fresh = settings_mod.load()
     fresh.custom_agents.append(
-        settings_mod.CustomAgent(id="custom:other", name="Другой", command="/bin/true")
+        settings_mod.CustomAgent(id="custom:other", name="Other", command="/bin/true")
     )
     settings_mod.save(fresh)
 

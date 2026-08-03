@@ -1,11 +1,10 @@
-"""Общие визуальные решения для виджетов ленты.
+"""Shared visual decisions for the feed widgets.
 
-Не публичный контракт из docs/architecture.md §10 — вспомогательный модуль,
-на который опираются `chips.py`, `transcript.py`, `permissions.py`, чтобы не
-разъезжаться в отступах, шрифтах и цветах. Панель живёт внутри Houdini как
-гость в чужом окне, поэтому цвет всегда берём из палитры текущего QApplication
-(`QtWidgets.QApplication.palette()`), а не хардкодим hex — тема Houdini может
-быть тёмной, светлой или полностью пользовательской (см. facts/houdini.md §5).
+Not part of the public contract in docs/architecture.md §10 — a helper module
+`chips.py`, `transcript.py` and `permissions.py` lean on so their spacing,
+fonts and colours don't drift apart. The panel lives inside Houdini as a guest
+in someone else's window, so colour is never hardcoded as hex — Houdini's
+theme can be dark, light or entirely custom (see facts/houdini.md §5).
 
 Houdini 22's "Edit Theme" presets (e.g. "Ponycorn Adventure") repaint the
 whole application's own widgets, but `QApplication.palette()` alone does not
@@ -21,7 +20,7 @@ from __future__ import annotations
 
 from .qt import QtCore, QtGui, QtWidgets
 
-# --- геометрия ---------------------------------------------------------
+# --- geometry ----------------------------------------------------------
 
 SPACING = 6
 SPACING_TIGHT = 3
@@ -29,7 +28,7 @@ MARGIN = 8
 RADIUS = 4
 ICON_SIZE = 16
 
-#: Десять видов вызова инструмента протокола ACP (facts/acp-sdk.md §4, ToolKind).
+#: The ten ACP tool-call kinds (facts/acp-sdk.md §4, ToolKind).
 TOOL_KINDS: tuple[str, ...] = (
     "read",
     "edit",
@@ -64,15 +63,15 @@ _STATUS_GLYPH: dict[str, str] = {
 }
 
 _STATUS_LABEL: dict[str, str] = {
-    "pending": "ожидание",
-    "in_progress": "выполняется",
-    "completed": "готово",
-    "failed": "ошибка",
+    "pending": "pending",
+    "in_progress": "running",
+    "completed": "done",
+    "failed": "failed",
 }
 
 
 def palette() -> QtGui.QPalette:
-    """Палитра хоста (Houdini), а не своя — единственный источник цвета."""
+    """The host's (Houdini's) palette, not our own — the only source of colour."""
     return QtWidgets.QApplication.palette()
 
 
@@ -146,23 +145,23 @@ def color(
 
 
 def monospace_font() -> QtGui.QFont:
-    """Системный моноширинный шрифт — для кода/diff в развёрнутом вызове инструмента."""
+    """System monospace font — for code/diffs inside an expanded tool call."""
     return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 
 
 def kind_glyph(kind: str) -> str:
-    """Однобуквенный/символьный бейдж для вида вызова инструмента."""
+    """A one-letter or symbol badge for a tool call's kind."""
     return _KIND_GLYPH.get(kind, _KIND_GLYPH["other"])
 
 
 def kind_icon(kind: str, *, size: int = ICON_SIZE) -> QtGui.QIcon:
-    """Иконка вызова инструмента по `kind`.
+    """Tool-call icon for a `kind`.
 
-    Штатные иконки Houdini (`hicon:/SVGIcons.index?...`) недоступны вне
-    Houdini и их точные имена не подтверждены в facts/ — вместо угадывания
-    рисуем маленький текстовый бейдж цветами текущей палитры (`color()`, so
-    it tracks Houdini's own live theme where that's available). Работает
-    одинаково в юнит-тестах и внутри Houdini — `hou` не обязателен.
+    Houdini's own icons (`hicon:/SVGIcons.index?...`) aren't reachable
+    outside Houdini and their exact names aren't confirmed in facts/ — rather
+    than guess, we draw a small text badge in `color()`'s colours, so it
+    tracks Houdini's own live theme wherever that is available. Behaves
+    identically in unit tests and inside Houdini, and needs no `hou`.
     """
     pixmap = QtGui.QPixmap(size, size)
     pixmap.fill(QtCore.Qt.transparent)
@@ -187,24 +186,24 @@ def kind_icon(kind: str, *, size: int = ICON_SIZE) -> QtGui.QIcon:
 
 
 def status_glyph(status: str) -> str:
-    """Символ статуса — форма, не цвет: единственный надёжный сигнал вне зависимости от темы."""
+    """Status symbol — shape, not colour: the only signal that survives any theme."""
     return _STATUS_GLYPH.get(status, _STATUS_GLYPH["pending"])
 
 
 def status_label(status: str) -> str:
-    """Человекочитаемая подпись статуса для сворачиваемой строки вызова инструмента."""
+    """Human-readable status caption for the collapsible tool-call row."""
     return _STATUS_LABEL.get(status, status)
 
 
 def status_color(status: str) -> QtGui.QColor:
-    """Цвет статуса — только роли `QPalette`, ничего своего.
+    """Status colour — `QPalette` roles only, nothing of our own.
 
-    У `QPalette` нет семантической роли «ошибка»: подкрашивать `failed` в
-    красный значило бы хардкодить цвет в обход палитры темы, что запрещено
-    правилами модуля. Поэтому `completed`/`failed` различаются формой значка
-    (`status_glyph`), а не цветом — `in_progress`/`pending` получают
-    заметный акцент (`Highlight`) и приглушение (`Disabled`/`Text`)
-    из самой палитры.
+    `QPalette` has no semantic "error" role: painting `failed` red would mean
+    hardcoding a colour around the theme's palette, which this module's rules
+    forbid. So `completed`/`failed` differ by the shape of the glyph
+    (`status_glyph`), not by colour — while `in_progress`/`pending` take a
+    visible accent (`Highlight`) and a muted tone (`Disabled`/`Text`) from
+    the palette itself.
     """
     if status == "in_progress":
         return color(QtGui.QPalette.Highlight)

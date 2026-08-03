@@ -127,13 +127,13 @@ class _BuddySprite(QtWidgets.QWidget):
         self._animated = os.environ.get("HOUDINI_AGENT_REDUCED_MOTION") != "1"
         self.set_buddy(self._key)
 
-    # Анимация живёт ровно столько, сколько её видно.
+    # The animation lives exactly as long as it is visible.
     #
-    # Раньше таймер запускался в __init__ и не останавливался никогда: 20 тиков
-    # в секунду крутились всё время жизни панели, в том числе когда её вкладка
-    # неактивна или скрыта. Это чужой процесс, в нём человек работает со
-    # сценой, и тратить его такт на перерисовку невидимого маскота панель
-    # права не имеет.
+    # The timer used to start in __init__ and never stop: twenty ticks a
+    # second for the whole life of the panel, including while its tab was
+    # inactive or hidden. This is someone else's process, a human is working
+    # on a scene in it, and the panel has no right to spend their frame time
+    # redrawing a mascot nobody can see.
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
@@ -163,7 +163,7 @@ class _BuddySprite(QtWidgets.QWidget):
             ),
         }
         self.setToolTip(
-            f"Houdini Test Geometry: {key.replace('-', ' ').title()} — нажмите, чтобы сменить"
+            f"Houdini Test Geometry: {key.replace('-', ' ').title()} — click to change"
         )
         self.update()
 

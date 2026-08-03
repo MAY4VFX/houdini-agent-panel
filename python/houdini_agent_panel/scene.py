@@ -34,17 +34,41 @@ _PORT_SCAN_TIMEOUT = 1.0
 
 _log = logging.getLogger(__name__)
 
+#: Remembered answer of the HTTP scan (`(scanned?, port)`). The scan costs up
+#: to `_PORT_SCAN_COUNT * _PORT_SCAN_TIMEOUT` = 16 seconds, and `fx_port()` is
+#: called from the MAIN thread on every "new conversation". Sixteen seconds of
+#: frozen Houdini per click is indistinguishable from a button that does
+#: nothing. Caching is safe because the scan is only reached when
+#: `fxhoudinimcp_server` can't be imported at all, and an import that failed
+#: once in a process will keep failing.
+_scanned_port: tuple[bool, int | None] = (False, None)
+
+
+def reset_port_cache_for_tests() -> None:
+    global _scanned_port
+    _scanned_port = (False, None)
+
 
 def fx_port() -> int | None:
     """The fx server's port in THIS Houdini process. None — the server isn't up."""
     try:
         import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - see the module docstring
     except ImportError:
-        return _scan_for_any_fx_port()
+        return _cached_scan_for_any_fx_port()
 
     if not startup.is_running():
         return None
     return startup.get_port()
+
+
+def _cached_scan_for_any_fx_port() -> int | None:
+    global _scanned_port
+    scanned, port = _scanned_port
+    if scanned:
+        return port
+    port = _scan_for_any_fx_port()
+    _scanned_port = (True, port)
+    return port
 
 
 def fx_host() -> str:

@@ -1,17 +1,17 @@
-"""Кнопка микрофона композера: запись с микрофона и (опционально) whisper.
+"""The composer's microphone button: recording and (optionally) whisper.
 
-Правило design.md для этого модуля: агент с capability ``audio`` получает
-аудио-блок как есть; агент без неё, но с настроенным локальным whisper —
-получает распознанный текст; ни того ни другого — кнопки нет вообще. Само
-API ``QtMultimedia`` разошлось между PySide2 (``QAudioRecorder``, Qt5) и
-PySide6 (``QMediaCaptureSession``/``QAudioInput``/``QMediaRecorder``, Qt6),
-поэтому единого пути нет — модуль пробует оба и честно прячет кнопку, если ни
-один не собрался, вместо того чтобы притворяться, что запись работает.
+design.md's rule for this module: an agent with the ``audio`` capability gets
+the audio block as-is; an agent without it but with a local whisper endpoint
+configured gets recognised text; neither, and there is no button at all. The
+``QtMultimedia`` API itself diverged between PySide2 (``QAudioRecorder``, Qt5)
+and PySide6 (``QMediaCaptureSession``/``QAudioInput``/``QMediaRecorder``,
+Qt6), so there is no single path — the module tries both and honestly hides
+the button if neither came together, rather than pretending recording works.
 
-Запись и сеть — не на главном потоке: сама запись идёт через `QMediaRecorder`
-(асинхронный, событийный — не блокирует UI), а загрузка на whisper — в
-отдельном `QThread` (`_UploadWorker`), чтобы сетевой таймаут не подвесил
-Houdini.
+Neither recording nor the network runs on the main thread: recording itself
+goes through `QMediaRecorder` (asynchronous and event-driven, so it doesn't
+block the UI), and the whisper upload runs on its own `QThread`
+(`_UploadWorker`) so a network timeout can't hang Houdini.
 """
 
 from __future__ import annotations
@@ -30,11 +30,12 @@ from .qt import QtCore, QtGui, QtWidgets, Signal
 
 
 def _import_qtmultimedia():
-    """Тот же трёхступенчатый путь, что и `ui/qt.py`, но локально.
+    """The same three-step path as `ui/qt.py`, but local.
 
-    `QtMultimedia` — не в наборе, который реэкспортирует `ui/qt.py`, и вне
-    Houdini его вообще может не быть в окружении (нет системного аудио-стека
-    у CI, например) — отсюда мягкий возврат `None`, а не ImportError наружу.
+    `QtMultimedia` isn't in the set `ui/qt.py` re-exports, and outside
+    Houdini it may not be in the environment at all (CI with no system audio
+    stack, for instance) — hence a soft `None` rather than an ImportError
+    escaping.
     """
     for modpath in ("hutil.PySide", "PySide6", "PySide2"):
         try:
@@ -50,12 +51,12 @@ class Uploader(Protocol):
 
 
 def default_uploader(endpoint: str, audio_path: Path, mime_type: str) -> str:
-    """POST записи на локальный whisper-эндпоинт, без сторонних зависимостей.
+    """POST the recording to a local whisper endpoint, with no third-party deps.
 
-    Простая multipart-форма руками через `urllib`: тащить `requests` в
-    `--target`-дерево внутри Houdini ради одного POST-запроса того не стоит.
-    Ответ ожидается вида `{"text": "..."}` — этого достаточно для локального
-    whisper (см. `whisper`-скилл проекта, тот же контракт).
+    A simple hand-rolled multipart form over `urllib`: dragging `requests`
+    into the `--target` tree inside Houdini for the sake of one POST isn't
+    worth it. The reply is expected to look like `{"text": "..."}` — enough
+    for a local whisper (see the project's `whisper` skill, same contract).
     """
     boundary = uuid.uuid4().hex
     data = audio_path.read_bytes()
@@ -78,8 +79,8 @@ def default_uploader(endpoint: str, audio_path: Path, mime_type: str) -> str:
 
 
 class RecordBackend(Protocol):
-    """Платформенный адаптер записи — единственное место, где расходятся
-    PySide2/PySide6. `start`/`stop` пишут WAV/PCM в `destination`."""
+    """Platform recording adapter — the only place PySide2 and PySide6 part
+    ways. `start`/`stop` write WAV/PCM into `destination`."""
 
     def start(self, destination: Path) -> None: ...
     def stop(self) -> None: ...
@@ -104,7 +105,7 @@ class _Qt6RecordBackend:
 
 
 class _Qt5RecordBackend:
-    """PySide2/Qt5: `QAudioRecorder` — простой одноклассовый API."""
+    """PySide2/Qt5: `QAudioRecorder` — a simple single-class API."""
 
     def __init__(self, qtmultimedia) -> None:
         self._recorder = qtmultimedia.QAudioRecorder()
@@ -118,30 +119,30 @@ class _Qt5RecordBackend:
 
 
 def build_default_backend() -> tuple[RecordBackend | None, str]:
-    """`(backend, "")` либо `(None, причина)` — вторым элементом диагностика.
+    """`(backend, "")` or `(None, reason)` — the second element is diagnostics.
 
-    Пробует Qt6-путь, затем Qt5-путь; любое исключение при конструировании
-    (нет аудио-устройства, недоступен бэкенд платформы и т.п.) — это тоже
-    "недоступно", а не повод уронить панель.
+    Tries the Qt6 path, then the Qt5 path; any exception while constructing
+    (no audio device, the platform backend unavailable and so on) also counts
+    as "unavailable" rather than a reason to take the panel down.
     """
     qtmultimedia = _import_qtmultimedia()
     if qtmultimedia is None:
-        return None, "QtMultimedia недоступен в этом окружении"
+        return None, "QtMultimedia is unavailable in this environment"
     if hasattr(qtmultimedia, "QMediaCaptureSession") and hasattr(qtmultimedia, "QAudioInput"):
         try:
             return _Qt6RecordBackend(qtmultimedia), ""
-        except Exception as exc:  # noqa: BLE001 - деградация, не падение
+        except Exception as exc:  # noqa: BLE001 - degrade, don't crash
             return None, f"QtMultimedia (Qt6): {exc!r}"
     if hasattr(qtmultimedia, "QAudioRecorder"):
         try:
             return _Qt5RecordBackend(qtmultimedia), ""
         except Exception as exc:  # noqa: BLE001
             return None, f"QtMultimedia (Qt5): {exc!r}"
-    return None, "QtMultimedia не даёт известного API записи"
+    return None, "QtMultimedia offers no recording API we know"
 
 
 class _UploadWorker(QtCore.QThread):
-    """Один POST на whisper — на своём потоке, чтобы сеть не морозила UI."""
+    """One POST to whisper, on its own thread so the network can't freeze the UI."""
 
     done = Signal(str)
     failed = Signal(str)
@@ -153,27 +154,27 @@ class _UploadWorker(QtCore.QThread):
         self._mime_type = mime_type
         self._uploader = uploader
 
-    def run(self) -> None:  # noqa: D102 - переопределение QThread.run
+    def run(self) -> None:  # noqa: D102 - QThread.run override
         try:
             text = self._uploader(self._endpoint, self._audio_path, self._mime_type)
-        except Exception as exc:  # noqa: BLE001 - сетевая ошибка не должна ронять панель
+        except Exception as exc:  # noqa: BLE001 - a network error must not take the panel down
             self.failed.emit(str(exc))
             return
         self.done.emit(text)
 
 
 class VoiceButton(QtWidgets.QToolButton):
-    """Кнопка микрофона. Живёт в `Composer`, но не знает о нём ничего, кроме
-    того, что сообщает через свои сигналы.
+    """The microphone button. Lives inside `Composer` but knows nothing about
+    it beyond what it reports through its own signals.
 
-    `backend_factory`/`uploader` — параметры именно ради тестируемости: юнит-
-    тесты подсовывают фейковую запись и фейковую сеть, не трогая ни настоящий
-    микрофон, ни настоящий whisper.
+    `backend_factory`/`uploader` are parameters purely for testability: unit
+    tests hand in a fake recorder and a fake network, touching neither a real
+    microphone nor a real whisper.
     """
 
-    recorded_audio = Signal(dict)  # готовый ACP audio-блок: {"type": "audio", ...}
-    transcribed_text = Signal(str)  # текст, распознанный локальным whisper
-    failed = Signal(str)  # причина — в диагностику, не модалкой пользователю
+    recorded_audio = Signal(dict)  # a ready ACP audio block: {"type": "audio", ...}
+    transcribed_text = Signal(str)  # text recognised by a local whisper
+    failed = Signal(str)  # the reason, for diagnostics — never a modal at the user
 
     def __init__(
         self,
@@ -185,7 +186,7 @@ class VoiceButton(QtWidgets.QToolButton):
         super().__init__(parent)
         self._backend_factory = backend_factory
         self._uploader = uploader
-        self._mode: str | None = None  # "audio" | "whisper" | None (скрыта)
+        self._mode: str | None = None  # "audio" | "whisper" | None (hidden)
         self._whisper_endpoint = ""
         self._recording = False
         self._backend: RecordBackend | None = None
@@ -196,7 +197,7 @@ class VoiceButton(QtWidgets.QToolButton):
 
         self.setText("")
         self.setFixedSize(28, 28)
-        self.setToolTip("Голосовой ввод")
+        self.setToolTip("Voice input")
         self.setCheckable(True)
         self.setVisible(False)
         self.clicked.connect(self._on_clicked)
@@ -218,13 +219,13 @@ class VoiceButton(QtWidgets.QToolButton):
         painter.drawLine(QtCore.QPointF(14.0, 19.5), QtCore.QPointF(14.0, 22.0))
         painter.drawLine(QtCore.QPointF(10.5, 22.0), QtCore.QPointF(17.5, 22.0))
 
-    # --- публичное -----------------------------------------------------
+    # --- public --------------------------------------------------------
 
     def configure(self, *, supports_audio: bool, whisper_endpoint: str) -> None:
-        """Пересчитать видимость кнопки под свежие capability агента.
+        """Recompute the button's visibility for fresh agent capabilities.
 
-        Порядок предпочтения ровно из design.md: `audio` агента важнее
-        локального whisper, потому что не требует лишнего шага транскрипции.
+        The order of preference comes straight from design.md: the agent's
+        `audio` beats a local whisper, because it saves a transcription step.
         """
         self._whisper_endpoint = whisper_endpoint or ""
         if supports_audio:
@@ -254,7 +255,7 @@ class VoiceButton(QtWidgets.QToolButton):
     def unavailable_reason(self) -> str:
         return self._unavailable_reason
 
-    # --- запись ----------------------------------------------------------
+    # --- recording -------------------------------------------------------
 
     def _on_clicked(self) -> None:
         if self._recording:

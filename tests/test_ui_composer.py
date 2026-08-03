@@ -1,4 +1,4 @@
-"""Тесты Composer: рост поля, capability-гейтинг, слеш-попап, вложения, блокировка."""
+"""Composer tests: field growth, capability gating, slash popup, attachments, blocking."""
 
 from __future__ import annotations
 
@@ -30,11 +30,11 @@ def _info(**overrides) -> AgentInfo:
 
 
 def _type_text(edit: QtWidgets.QPlainTextEdit, text: str) -> None:
-    """Вставить текст в поле ввода, вызвав `textChanged` как от реального ввода.
+    """Put text in the input field, firing `textChanged` as real typing would.
 
-    `QtTest.QTest.keyClicks` не годится: она умеет только ASCII (падает
-    `ASSERT` на кириллице в `qasciikey.cpp`), а тесты нарочно проверяют
-    кириллический текст — то, чем реально пользуется художник.
+    `QtTest.QTest.keyClicks` won't do: it only handles ASCII (it hits an
+    `ASSERT` in `qasciikey.cpp` on anything else), and an artist types in
+    whatever language they like.
     """
     edit.setFocus()
     cursor = edit.textCursor()
@@ -46,7 +46,7 @@ def _press_enter(edit: QtWidgets.QWidget, *, shift: bool = False) -> None:
     QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return, modifiers)
 
 
-# --- capability-гейтинг -------------------------------------------------------
+# --- capability gating --------------------------------------------------------
 
 
 def test_attach_button_hidden_without_capability(qapp):
@@ -81,7 +81,8 @@ def test_voice_button_hidden_without_audio_and_whisper(qapp):
 def test_voice_button_visible_with_whisper_endpoint_even_without_audio_capability(qapp, monkeypatch):
     composer = Composer()
     composer.show()
-    # Бэкенд записи подделываем — тест про видимость кнопки, не про реальный микрофон.
+    # The recording backend is faked — this is about the button's visibility,
+    # not about a real microphone.
     monkeypatch.setattr(
         composer._voice_button,
         "_backend_factory",
@@ -96,7 +97,7 @@ def test_mode_chip_hidden_until_agent_sends_modes(qapp):
     composer.show()
     assert not composer.mode_chip.isVisible()
 
-    composer.mode_chip.set_modes([SessionMode("code", "Код"), SessionMode("ask", "Вопрос")], "code")
+    composer.mode_chip.set_modes([SessionMode("code", "Code"), SessionMode("ask", "Ask")], "code")
     assert composer.mode_chip.isVisible()
 
     composer.mode_chip.set_modes([], None)
@@ -107,7 +108,7 @@ def test_mode_chip_selection_forwards_to_composer_signal(qapp):
     composer = Composer()
     composer.show()
 
-    composer.mode_chip.set_modes([SessionMode("code", "Код")], "code")
+    composer.mode_chip.set_modes([SessionMode("code", "Code")], "code")
     received = []
     composer.mode_selected.connect(received.append)
     composer.mode_chip.mode_selected.emit("code")
@@ -115,13 +116,13 @@ def test_mode_chip_selection_forwards_to_composer_signal(qapp):
 
 
 def test_composer_set_modes_is_a_facade_over_mode_chip(qapp):
-    """Панель кормит режимы через `Composer.set_modes`, не дотягиваясь до
-    вложенного `mode_chip` напрямую (architecture.md §10)."""
+    """The panel feeds modes through `Composer.set_modes` instead of reaching
+    into the nested `mode_chip` (architecture.md §10)."""
     composer = Composer()
     composer.show()
     assert not composer.mode_chip.isVisible()
 
-    composer.set_modes([SessionMode("code", "Код"), SessionMode("ask", "Вопрос")], "ask")
+    composer.set_modes([SessionMode("code", "Code"), SessionMode("ask", "Ask")], "ask")
     assert composer.mode_chip.isVisible()
 
     received = []
@@ -133,7 +134,7 @@ def test_composer_set_modes_is_a_facade_over_mode_chip(qapp):
     assert not composer.mode_chip.isVisible()
 
 
-# --- отправка текста ----------------------------------------------------------
+# --- sending text -------------------------------------------------------------
 
 
 def test_enter_submits_text_block(qapp):
@@ -142,10 +143,10 @@ def test_enter_submits_text_block(qapp):
     received = []
     composer.submitted.connect(received.append)
 
-    _type_text(composer._text_edit, "привет")
+    _type_text(composer._text_edit, "hello")
     _press_enter(composer._text_edit)
 
-    assert received == [[{"type": "text", "text": "привет"}]]
+    assert received == [[{"type": "text", "text": "hello"}]]
     assert composer._text_edit.toPlainText() == ""
 
 
@@ -155,12 +156,12 @@ def test_shift_enter_inserts_newline_without_submitting(qapp):
     received = []
     composer.submitted.connect(received.append)
 
-    _type_text(composer._text_edit, "строка1")
+    _type_text(composer._text_edit, "line1")
     _press_enter(composer._text_edit, shift=True)
-    _type_text(composer._text_edit, "строка2")
+    _type_text(composer._text_edit, "line2")
 
     assert received == []
-    assert composer._text_edit.toPlainText() == "строка1\nстрока2"
+    assert composer._text_edit.toPlainText() == "line1\nline2"
 
 
 def test_empty_input_does_not_emit_submitted(qapp):
@@ -200,29 +201,29 @@ def test_submitted_includes_attachments_after_text(qapp, tmp_path):
 
     received = []
     composer.submitted.connect(received.append)
-    _type_text(composer._text_edit, "смотри")
+    _type_text(composer._text_edit, "look")
     _press_enter(composer._text_edit)
 
     assert len(received) == 1
     blocks = received[0]
-    assert blocks[0] == {"type": "text", "text": "смотри"}
+    assert blocks[0] == {"type": "text", "text": "look"}
     assert blocks[1]["type"] == "image"
     assert blocks[1]["mimeType"] == "image/png"
     assert base64.b64decode(blocks[1]["data"]) == image_path.read_bytes()
-    # Вложения и текст очищаются после отправки.
+    # Attachments and text are cleared after sending.
     assert composer._text_edit.toPlainText() == ""
 
 
 def test_add_attachment_without_capability_is_rejected(qapp, tmp_path):
     composer = Composer()
     composer.show()
-    composer.set_capabilities(_info(), "")  # ни image, ни embeddedContext
+    composer.set_capabilities(_info(), "")  # neither image nor embeddedContext
     path = tmp_path / "pic.png"
     path.write_bytes(b"data")
     assert composer.add_attachment(path) is False
 
 
-# --- build_attachment_block напрямую -------------------------------------------
+# --- build_attachment_block directly -------------------------------------------
 
 
 def test_build_attachment_block_image(tmp_path):
@@ -261,14 +262,14 @@ def test_set_busy_turns_send_button_into_stop_and_emits_cancelled(qapp):
     composer.cancelled.connect(lambda: received_cancel.append(True))
 
     composer.set_busy(True)
-    _type_text(composer._text_edit, "должно быть проигнорировано")
+    _type_text(composer._text_edit, "should be ignored")
     composer._send_button.click()
 
     assert received_submit == []
     assert received_cancel == [True]
 
 
-# --- блокировка ввода -----------------------------------------------------------
+# --- input blocking -------------------------------------------------------------
 
 
 def test_block_input_disables_only_text_and_send(qapp):
@@ -277,12 +278,12 @@ def test_block_input_disables_only_text_and_send(qapp):
     composer.set_capabilities(_info(supports_image=True), "")
 
     assert not composer.is_input_blocked()
-    composer.block_input("Обновление обязательно")
+    composer.block_input("Update required")
 
     assert composer.is_input_blocked()
     assert not composer._text_edit.isEnabled()
     assert not composer._send_button.isEnabled()
-    # Мод-чип блокировкой ввода не затрагивается.
+    # The mode chip is untouched by input blocking.
     assert composer.mode_chip.isEnabled()
 
     composer.unblock_input()
@@ -297,16 +298,16 @@ def test_blocked_input_does_not_submit_on_enter(qapp):
     received = []
     composer.submitted.connect(received.append)
 
-    _type_text(composer._text_edit, "текст")
-    composer.block_input("подождите")
-    # Поле выключено — искусственно шлём Enter напрямую в обработчик,
-    # т.к. QTest не может кликнуть в disabled-виджет реалистично.
+    _type_text(composer._text_edit, "text")
+    composer.block_input("please wait")
+    # The field is disabled, so Enter goes straight to the handler:
+    # QTest cannot click a disabled widget realistically.
     composer._submit()
 
     assert received == []
 
 
-# --- счётчик токенов --------------------------------------------------------------
+# --- token counter ----------------------------------------------------------------
 
 
 def test_set_usage_shows_compact_count_and_hides_on_none(qapp):
@@ -333,14 +334,14 @@ def test_set_usage_shows_used_over_size_for_the_real_acp_shape(qapp):
     assert composer._usage_label.text() == "12.3K/200K"
 
 
-# --- слеш-команды -----------------------------------------------------------------
+# --- slash commands ---------------------------------------------------------------
 
 
 def _commands() -> list[AvailableCommand]:
     return [
-        AvailableCommand(name="model", description="сменить модель"),
-        AvailableCommand(name="mode", description="сменить режим"),
-        AvailableCommand(name="clear", description="очистить"),
+        AvailableCommand(name="model", description="change the model"),
+        AvailableCommand(name="mode", description="change the mode"),
+        AvailableCommand(name="clear", description="clear"),
     ]
 
 
@@ -419,7 +420,7 @@ def test_slash_popup_escape_closes_without_changing_text(qapp):
 
 
 def test_slash_command_sent_as_plain_text(qapp):
-    """Команда уходит агенту обычным текстом — своей семантики не изобретаем."""
+    """A command goes to the agent as plain text — we invent no semantics."""
     composer = Composer()
     composer.show()
     composer.set_commands(_commands())
@@ -427,8 +428,8 @@ def test_slash_command_sent_as_plain_text(qapp):
     composer.submitted.connect(received.append)
 
     _type_text(composer._text_edit, "/clear")
-    _press_enter(composer._text_edit)  # выбирает "/clear " из попапа
-    _press_enter(composer._text_edit)  # отправляет как текст
+    _press_enter(composer._text_edit)  # picks "/clear " from the popup
+    _press_enter(composer._text_edit)  # sends it as text
 
     assert received == [[{"type": "text", "text": "/clear"}]]
 
@@ -453,4 +454,84 @@ def test_text_edit_grows_with_more_lines_then_caps(qapp):
         _press_enter(composer._text_edit, shift=True)
         _type_text(composer._text_edit, "x")
     capped_height = composer._text_edit.height()
-    assert capped_height <= multi_line_height * 3  # растёт до потолка, не бесконечно
+    assert capped_height <= multi_line_height * 3  # grows to a ceiling, not forever
+
+
+# --- agent-side config options (the model picker) ----------------------------
+
+
+def _option(option_id="model", current="a", choices=(("a", "A"), ("b", "B")), description=""):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=option_id,
+        name=option_id.title(),
+        description=description,
+        current_value=current,
+        choices=tuple(SimpleNamespace(value=v, name=n) for v, n in choices),
+    )
+
+
+def test_config_chips_appear_only_for_what_the_agent_sent(qapp):
+    composer = Composer()
+    composer.show()
+    assert composer._config_chips == []
+
+    composer.set_config_options([_option()])
+    assert len(composer._config_chips) == 1
+    assert composer._config_bar.isVisible()
+
+    composer.set_config_options([])
+    assert composer._config_chips == []
+    assert not composer._config_bar.isVisible()
+
+
+def test_config_chip_starts_on_the_agents_current_value(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_config_options([_option(current="b")])
+    assert composer._config_chips[0].currentData() == "b"
+
+
+def test_single_choice_option_draws_no_chip(qapp):
+    """A dropdown with one entry is a label pretending to be a control."""
+    composer = Composer()
+    composer.show()
+    composer.set_config_options([_option(choices=(("only", "Only"),))])
+    assert composer._config_chips == []
+
+
+def test_choosing_a_config_value_reports_id_and_value(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_config_options([_option(option_id="reasoning", current="a")])
+    received: list[tuple[str, str]] = []
+    composer.config_option_selected.connect(lambda cid, value: received.append((cid, value)))
+
+    composer._config_chips[0]._choose(1)
+
+    assert received == [("reasoning", "b")]
+
+
+def test_hiding_the_composer_takes_the_slash_palette_with_it(qapp):
+    """The palette is reparented to the panel so it isn't clipped, which also
+    means hiding the composer stopped hiding it: switching to settings left a
+    command list floating over the form."""
+    host = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(host)
+    composer = Composer(host)
+    layout.addWidget(composer)
+    host.resize(800, 400)
+    host.show()
+    qapp.processEvents()
+
+    composer.set_commands([AvailableCommand(name="clear", description="clear")])
+    _type_text(composer._text_edit, "/cl")
+    qapp.processEvents()
+    assert composer._popup.isVisible()
+
+    composer.setVisible(False)
+    qapp.processEvents()
+
+    assert not composer._popup.isVisible()
+    assert composer._text_edit.popup_active is False

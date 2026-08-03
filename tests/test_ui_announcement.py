@@ -1,4 +1,4 @@
-"""Тесты NoticeStrip/BlockingNotice: рендер строго из присланных данных."""
+"""NoticeStrip/BlockingNotice tests: rendering strictly from the data sent."""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ def test_notice_strip_shows_title_and_buttons(qapp):
     ann = Announcement(
         id="ann-1",
         severity="info",
-        title="Новая версия панели",
-        buttons=(Button(label="Подробнее", url="https://example.test"),),
+        title="A new panel version",
+        buttons=(Button(label="Details", url="https://example.test"),),
     )
     strip.show_notice(ann)
 
     assert strip.isVisible()
-    assert "Новая версия панели" in strip._label.text()
+    assert "A new panel version" in strip._label.text()
     buttons = strip.findChildren(QtWidgets.QPushButton)
-    assert [b.text() for b in buttons] == ["Подробнее"]
+    assert [b.text() for b in buttons] == ["Details"]
 
 
 def test_notice_strip_button_click_emits_action_with_url(qapp):
@@ -31,7 +31,7 @@ def test_notice_strip_button_click_emits_action_with_url(qapp):
         id="ann-1",
         severity="info",
         title="t",
-        buttons=(Button(label="Открыть", url="https://example.test"),),
+        buttons=(Button(label="Open", url="https://example.test"),),
     )
     strip.show_notice(ann)
 
@@ -62,7 +62,7 @@ def test_notice_strip_show_update_offers_single_update_button(qapp):
     assert strip.isVisible()
     assert "1.0.0" in strip._label.text() and "1.2.0" in strip._label.text()
     buttons = strip.findChildren(QtWidgets.QPushButton)
-    assert [b.text() for b in buttons] == ["Обновить"]
+    assert [b.text() for b in buttons] == ["Update"]
 
     received = []
     strip.action_clicked.connect(lambda target, url: received.append((target, url)))
@@ -86,17 +86,17 @@ def test_blocking_notice_renders_title_body_and_buttons_from_announcement(qapp):
     ann = Announcement(
         id="block-1",
         severity="blocking",
-        title="Обязательное обновление",
-        body="Пожалуйста, обновите панель.",
-        buttons=(Button(label="Понятно", url=""), Button(label="Скачать", url="https://example.test")),
+        title="A required update",
+        body="Please update the panel.",
+        buttons=(Button(label="Got it", url=""), Button(label="Download", url="https://example.test")),
     )
     notice.show_notice(ann)
 
     assert notice.isVisible()
-    assert notice._title.text() == "Обязательное обновление"
-    assert notice._body.text() == "Пожалуйста, обновите панель."
+    assert notice._title.text() == "A required update"
+    assert notice._body.text() == "Please update the panel."
     buttons = notice.findChildren(QtWidgets.QPushButton)
-    assert [b.text() for b in buttons] == ["Понятно", "Скачать"]
+    assert [b.text() for b in buttons] == ["Got it", "Download"]
 
 
 def test_blocking_notice_button_click_emits_action_clicked(qapp):
@@ -112,7 +112,7 @@ def test_blocking_notice_button_click_emits_action_clicked(qapp):
 
 def test_blocking_notice_does_not_invent_its_own_buttons(qapp):
     notice = BlockingNotice()
-    ann = Announcement(id="block-3", severity="blocking", title="t")  # без кнопок
+    ann = Announcement(id="block-3", severity="blocking", title="t")  # no buttons
     notice.show_notice(ann)
     assert notice.findChildren(QtWidgets.QPushButton) == []
 

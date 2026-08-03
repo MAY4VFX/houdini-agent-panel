@@ -1,10 +1,10 @@
-"""Экран входа — рисуется целиком из `authMethods`, присланных агентом.
+"""The sign-in screen — drawn entirely from the `authMethods` the agent sent.
 
-Ни одного своего поля: список кнопок — ровно `AuthMethod` из
-`AgentInfo.auth_methods` (см. docs/architecture.md §6). Кнопка выхода
-показывается только если агент объявил `supports_logout` — своих полей
-логина/пароля/чего угодно ещё панель не изобретает (design.md: «агент не
-умеет — контрол не рисуется»).
+Not one field of our own: the button list is exactly the `AuthMethod` entries
+from `AgentInfo.auth_methods` (see docs/architecture.md §6). The sign-out
+button appears only if the agent declared `supports_logout` — the panel
+invents no login/password/anything-else fields of its own (design.md: "the
+agent doesn't support it, the control doesn't get drawn").
 """
 
 from __future__ import annotations
@@ -33,14 +33,14 @@ class AuthView(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        title = QtWidgets.QLabel("Войти")
+        title = QtWidgets.QLabel("Sign in")
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._methods_layout = QtWidgets.QVBoxLayout()
-        self._empty_label = QtWidgets.QLabel("Агент не прислал способов входа.")
+        self._empty_label = QtWidgets.QLabel("The agent offered no sign-in methods.")
         self._empty_label.setVisible(False)
 
-        self._logout_button = QtWidgets.QPushButton("Выйти")
+        self._logout_button = QtWidgets.QPushButton("Sign out")
         self._logout_button.setVisible(False)
         self._logout_button.clicked.connect(self.logout_requested.emit)
 
@@ -52,8 +52,8 @@ class AuthView(QtWidgets.QWidget):
         layout.addWidget(self._logout_button)
 
     def set_methods(self, methods: list["AuthMethod"], *, can_logout: bool) -> None:
-        """Перерисовать список способов входа. Пустой список — не ошибка:
-        показываем это человеку текстом, а не пустым экраном без объяснений."""
+        """Redraw the list of sign-in methods. An empty list isn't an error:
+        we say so in words rather than show a blank screen with no explanation."""
         _clear_layout(self._methods_layout)
         methods = list(methods)
         self._empty_label.setVisible(not methods)

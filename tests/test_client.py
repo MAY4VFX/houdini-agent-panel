@@ -138,6 +138,30 @@ def test_connect_reports_agent_info_from_initialize(qapp, make_client, tmp_path)
     assert client.agent_info() == info
 
 
+def test_client_comes_back_up_after_stop(qapp, make_client, tmp_path):
+    """Switching agents must not kill the client for good.
+
+    `AgentPanel._on_agent_chosen` stops the shared client and starts the new
+    agent on the SAME object — every panel's slots are wired to it. A worker
+    whose asyncio loop has been closed can never accept work again
+    ("Event loop is closed"), so the second launch used to go nowhere: the
+    header chip named the new agent and nothing else ever happened, no new
+    conversation, no reply, until Houdini was restarted.
+    """
+    client = make_client()
+    _connect(qapp, client, "stream", tmp_path)
+    first = _new_session(qapp, client, tmp_path)
+
+    client.stop()
+    assert client.is_running() is False
+
+    _connect(qapp, client, "stream", tmp_path)
+    second = _new_session(qapp, client, tmp_path)
+
+    assert client.is_running() is True
+    assert second and first
+
+
 # --- reply streaming ---------------------------------------------------------
 
 

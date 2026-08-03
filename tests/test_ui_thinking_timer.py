@@ -1,10 +1,10 @@
-"""Анимация компаньона живёт ровно столько, сколько её видно.
+"""The companion's animation lives exactly as long as it is visible.
 
-Регрессия из релиза 0.1.2: таймер запускался в `__init__` и не останавливался
-никогда — 20 тиков в секунду всё время жизни панели, включая моменты, когда её
-вкладка неактивна или скрыта. Панель живёт в чужом процессе, в котором человек
-работает со сценой, и тратить его такт на перерисовку невидимого маскота она
-права не имеет.
+A regression from release 0.1.2: the timer started in `__init__` and never
+stopped — twenty ticks a second for the whole life of the panel, including
+while its tab was inactive or hidden. The panel lives in someone else's
+process, where a human is working on a scene, and it has no right to spend
+their frame time redrawing a mascot nobody can see.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def test_timer_stops_when_hidden_and_resumes_when_shown(sprite, qapp):
 
     host.hide()
     qapp.processEvents()
-    assert not widget._timer.isActive(), "скрытая панель не имеет права тикать"
+    assert not widget._timer.isActive(), "a hidden panel has no right to tick"
 
     host.show()
     qapp.processEvents()

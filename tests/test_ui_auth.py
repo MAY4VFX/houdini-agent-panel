@@ -1,4 +1,4 @@
-"""Тесты AuthView: экран входа рисуется целиком из authMethods."""
+"""AuthView tests: the sign-in screen is drawn entirely from authMethods."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from houdini_agent_panel.ui.auth_view import AuthView
 
 
 def _method_buttons(view: AuthView) -> list[QtWidgets.QPushButton]:
-    """Кнопки способов входа — только из `_methods_layout`, не из всего дерева:
-    `_logout_button` тоже `QPushButton` и парентится раньше динамических
-    кнопок, так что порядок в `findChildren` на него полагаться не может."""
+    """Method buttons come from `_methods_layout` only, not the whole tree:
+    `_logout_button` is a `QPushButton` too and is parented before the dynamic
+    buttons, so `findChildren` order can't be trusted for it."""
     return [view._methods_layout.itemAt(i).widget() for i in range(view._methods_layout.count())]
 
 
@@ -20,11 +20,11 @@ def test_renders_one_button_per_auth_method(qapp):
     view.show()
     methods = [
         AuthMethod(id="anthropic", name="Anthropic Console", description="OAuth"),
-        AuthMethod(id="api-key", name="API-ключ"),
+        AuthMethod(id="api-key", name="API key"),
     ]
     view.set_methods(methods, can_logout=False)
 
-    assert [b.text() for b in _method_buttons(view)] == ["Anthropic Console", "API-ключ"]
+    assert [b.text() for b in _method_buttons(view)] == ["Anthropic Console", "API key"]
 
 
 def test_method_button_click_emits_method_chosen(qapp):
@@ -70,7 +70,7 @@ def test_set_methods_replaces_previous_buttons(qapp):
 
 
 def test_no_own_fields_beyond_what_agent_sent(qapp):
-    """Нет своих полей логина/пароля — только то, что пришло в authMethods."""
+    """No login/password fields of our own — only what authMethods carried."""
     view = AuthView()
     view.set_methods([AuthMethod(id="a", name="A")], can_logout=False)
     assert view.findChildren(QtWidgets.QLineEdit) == []

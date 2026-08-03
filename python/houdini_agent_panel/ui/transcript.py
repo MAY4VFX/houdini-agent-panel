@@ -1,13 +1,16 @@
-"""`TranscriptView` — лента панели (docs/architecture.md §10, §8).
+"""`TranscriptView` — the panel's feed (docs/architecture.md §10, §8).
 
-Отрисовывает `TranscriptModel.entries()` построчно, без рамок у сообщений.
-Два требования критичны для ощущения от панели (design.md, «Середина»):
+Renders `TranscriptModel.entries()` row by row, with no frames around
+messages. Two requirements are critical to how the panel feels (design.md,
+"The middle"):
 
-- `refresh(entry_id)` патчит ОДНУ запись на месте, не пересоздавая остальные
-  виджеты — полная перерисовка (`refresh(None)`) только при смене сессии.
-  Перерисовка всей ленты на каждый чанк стрима видна глазом и тормозит.
-- Автопрокрутка вниз работает, только если человек и так был внизу: отлистал
-  вверх читать — оставляем его там, а не утаскиваем к последнему чанку.
+- `refresh(entry_id)` patches ONE entry in place instead of rebuilding the
+  other widgets — a full redraw (`refresh(None)`) happens only when the
+  session changes. Redrawing the whole feed on every streamed chunk is
+  visible to the eye and slow.
+- Auto-scroll to the bottom only kicks in if the human was already there:
+  someone who scrolled up to read stays where they are instead of being
+  dragged down to the latest chunk.
 """
 
 from __future__ import annotations
@@ -19,30 +22,30 @@ from . import theme
 from .qt import QtCore, QtGui, QtWidgets
 from .thinking import ThinkingIndicator
 
-#: Сколько пикселей до низа ещё считается «внизу» — маленький запас на
-#: округления layout'а, чтобы автопрокрутка не отваливалась от одного пикселя.
+#: How many pixels from the bottom still count as "at the bottom" — a small
+#: allowance for layout rounding, so auto-scroll doesn't break over one pixel.
 _BOTTOM_EPSILON = 4
 
-#: `QTextEdit.setMarkdown` есть с Qt 5.14 — в PySide2 5.15.15 (H20.5) и
-#: PySide6 6.8.3 (H22) он точно есть (facts/houdini.md §3), но проверяем
-#: динамически, а не полагаемся на версию: деградация на обычный текст лучше
-#: падения, если метод вдруг отсутствует в чьей-то сборке.
+#: `QTextEdit.setMarkdown` has existed since Qt 5.14 — PySide2 5.15.15
+#: (H20.5) and PySide6 6.8.3 (H22) definitely have it (facts/houdini.md §3),
+#: but we check at runtime rather than trust a version: degrading to plain
+#: text beats crashing if someone's build turns out to lack the method.
 _HAS_MARKDOWN = hasattr(QtWidgets.QTextEdit, "setMarkdown")
 
-#: Тройные бэктики — с необязательным языком на той же строке. Незакрытый
-#: fence (агент ещё не дострил ```` ``` ```` на конце стрима) матчится до
-#: конца строки — так частично пришедший код рендерится кодом, а не сырыми
-#: бэктиками посреди текста.
+#: Triple backticks, with an optional language on the same line. An unclosed
+#: fence (the agent hasn't streamed the trailing ```` ``` ```` yet) matches to
+#: the end of the text — so half-arrived code renders as code instead of raw
+#: backticks in the middle of a sentence.
 _CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\r?\n(.*?)(?:```|\Z)", re.DOTALL)
 
 
 def _split_markdown_segments(text: str) -> list[tuple[str, str]]:
-    """Разбить текст на чередующиеся куски ``("text", ...)`` / ``("code", ...)``.
+    """Split text into alternating ``("text", ...)`` / ``("code", ...)`` chunks.
 
-    Блок кода рендерится ОТДЕЛЬНЫМ виджетом с собственной горизонтальной
-    прокруткой и без переноса строк (иначе ломается отступ VEX/питона) —
-    поэтому он не может быть просто частью общего markdown-документа прозы,
-    у которого перенос по словам должен работать как обычно.
+    A code block renders as a SEPARATE widget with its own horizontal scroll
+    and no word wrap (wrapping would ruin VEX/Python indentation) — so it
+    can't simply be part of one markdown document of prose, where word wrap
+    has to keep working as usual.
     """
     segments: list[tuple[str, str]] = []
     pos = 0
@@ -62,22 +65,22 @@ class TranscriptView(QtWidgets.QScrollArea):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
-        # Длинный вывод инструмента не должен растягивать панель по горизонтали —
-        # весь текст внутри строк переносится по словам, горизонтальный скролл не нужен.
+        # Long tool output must not stretch the panel horizontally — text
+        # inside rows wraps by word, so a horizontal scrollbar is never needed.
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         self._content = QtWidgets.QWidget(self)
         self._layout = QtWidgets.QVBoxLayout(self._content)
         self._layout.setContentsMargins(14, 39, 14, 8)
         self._layout.setSpacing(14)
-        # Activity rows остаются в хронологии: user → Worked for… → answer.
+        # Activity rows stay in the chronology: user -> Worked for… -> answer.
         self._layout.addStretch(1)
         self.setWidget(self._content)
 
         self._model: TranscriptModel | None = None
         self._rows: dict[str, QtWidgets.QWidget] = {}
 
-    # --- публичный API -------------------------------------------------
+    # --- public API ----------------------------------------------------
 
     def set_model(self, model: TranscriptModel) -> None:
         self._model = model
@@ -100,7 +103,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         if was_at_bottom:
             self._scroll_to_bottom()
 
-    # --- перестройка ------------------------------------------------------
+    # --- rebuilding -------------------------------------------------------
 
     def _rebuild_all(self) -> None:
         for row in list(self._rows.values()):
@@ -129,8 +132,8 @@ class TranscriptView(QtWidgets.QScrollArea):
             return
 
         if entry is None:
-            # Протокол сегодня записи не удаляет, но не падаем, если это
-            # когда-нибудь изменится — просто снимаем строку со сцены.
+            # The protocol doesn't delete entries today, but we don't crash
+            # if that ever changes — the row simply leaves the stage.
             row = self._rows.pop(entry_id, None)
             if row is not None:
                 self._layout.removeWidget(row)
@@ -143,10 +146,10 @@ class TranscriptView(QtWidgets.QScrollArea):
             self._update_row(row, entry)
             return
 
-        # Новая запись — вставляем на её позицию среди уже отрисованных.
-        # Записи из TranscriptModel всегда добавляются в конец и не
-        # переставляются, так что позиция среди уже отрисованных строк
-        # совпадает с индексом записи в полном списке модели.
+        # A new entry goes at its own position among the drawn ones.
+        # TranscriptModel always appends and never reorders, so the position
+        # among already-drawn rows matches the entry's index in the model's
+        # full list.
         index = sum(
             1
             for candidate in entries[: entries.index(entry)]
@@ -156,7 +159,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._rows[entry.id] = row
         self._layout.insertWidget(index, row)
 
-    # --- сборка строк по kind ----------------------------------------------
+    # --- building rows by kind ---------------------------------------------
 
     def _make_row(self, entry: Entry) -> QtWidgets.QWidget:
         if entry.kind == "activity":
@@ -170,7 +173,7 @@ class TranscriptView(QtWidgets.QScrollArea):
     def _update_row(self, row: QtWidgets.QWidget, entry: Entry) -> None:
         row.update_from(entry)
 
-    # --- автопрокрутка -----------------------------------------------------
+    # --- auto-scroll -------------------------------------------------------
 
     def _is_at_bottom(self) -> bool:
         bar = self.verticalScrollBar()
@@ -221,21 +224,21 @@ class _ActivityRow(QtWidgets.QWidget):
 
 
 class _MessageRow(QtWidgets.QWidget):
-    """Сообщение (user/agent/thought) или ошибка — без рамок, текст выделяется мышью.
+    """A message (user/agent/thought) or an error — no frames, text selectable.
 
-    Автор реплики должен читаться с одного взгляда, без вчитывания (design.md
-    просит именно «без рамок», поэтому различаем цветом/отступом, не боксом):
-    реплика человека — приглушённым цветом палитры и с отступом слева, ответ
-    агента — обычным цветом на всю ширину, размышление — курсивом и тоже
-    приглушённое, но без отступа (это не вопрос человека, а мысль агента).
+    Who said it has to read at a glance, without effort (design.md asks for
+    "no frames" specifically, so we distinguish by colour and indent, not by
+    a box): a human's line is muted and indented from the left, the agent's
+    reply is normal colour across the full width, a thought is italic and
+    muted too but not indented (it isn't a human's question, it's the agent
+    thinking).
 
-    Текст рендерится через `QTextDocument.setMarkdown` — агент присылает
-    markdown (бэктики, **жирный**, списки, ```code```) постоянно, и это
-    единственный путь показать его отформатированным, не скармливая
-    недоверенный текст агента в `setHtml` напрямую. Блоки кода вырезаются из
-    markdown и рендерятся отдельными моноширинными виджетами со своей
-    горизонтальной прокруткой — прозу это не касается, она просто переносится
-    по словам.
+    Text renders through `QTextDocument.setMarkdown` — agents send markdown
+    (backticks, **bold**, lists, ```code```) constantly, and this is the only
+    way to show it formatted without feeding untrusted agent text straight
+    into `setHtml`. Code blocks are cut out of the markdown and rendered as
+    separate monospace widgets with their own horizontal scroll — prose is
+    untouched and simply wraps by word.
     """
 
     def __init__(self, entry: Entry, parent=None) -> None:
@@ -250,10 +253,10 @@ class _MessageRow(QtWidgets.QWidget):
     def update_from(self, entry: Entry) -> None:
         segments = _split_markdown_segments(entry.text)
 
-        # Стриминг чаще всего просто дописывает текст в последний кусок, не
-        # меняя число/тип кусков — тогда достаточно обновить содержимое на
-        # месте, не пересоздавая виджеты (та же логика, что и у остальной
-        # ленты: патчим, а не строим заново).
+        # Streaming usually just appends to the last chunk without changing
+        # the number or type of chunks — then updating contents in place is
+        # enough, no widgets recreated (the same logic as the rest of the
+        # feed: patch, don't rebuild).
         same_shape = len(segments) == len(self._segments) and all(
             isinstance(widget, _CodeBlock) == (kind == "code")
             for widget, (kind, _content) in zip(self._segments, segments)
@@ -284,7 +287,8 @@ class _MessageRow(QtWidgets.QWidget):
             self._layout.addWidget(widget, 0, alignment)
 
     def _apply_kind_margins(self, kind: str) -> None:
-        # Отступ — визуальный маркер «это ввёл человек», без рамок и боксов.
+        # The indent is the visual marker for "a human typed this" — no
+        # frames, no boxes.
         indent = theme.SPACING * 4 if kind == "user" else 0
         bottom = 32 if kind == "user" else 0
         self._layout.setContentsMargins(indent, 0, 0, bottom)
@@ -293,8 +297,8 @@ class _MessageRow(QtWidgets.QWidget):
         font = widget.font()
         palette = widget.palette()
         if kind == "thought":
-            # Мысль вторична; пользовательский bubble, напротив, держит
-            # нормальный контраст как в референсах Claude/Codex.
+            # A thought is secondary; the user bubble, by contrast, keeps
+            # normal contrast as in the Claude/Codex references.
             palette.setColor(QtGui.QPalette.Text, theme.status_color("pending"))
         elif kind == "user":
             user_text = palette.color(QtGui.QPalette.Text)
@@ -327,23 +331,24 @@ class _MessageRow(QtWidgets.QWidget):
 
 
 class _ProseBlock(QtWidgets.QTextBrowser):
-    """Кусок markdown-прозы сообщения — без рамки, с переносом по словам.
+    """One chunk of a message's markdown prose — no frame, word wrap on.
 
-    Высота подгоняется под содержимое: внутренний вертикальный скролл не
-    нужен, лента и так скроллится целиком (`TranscriptView`), а свой скролл
-    внутри строки сообщения был бы лишним уровнем прокрутки.
+    Height follows the content: an inner vertical scrollbar isn't needed, the
+    feed already scrolls as a whole (`TranscriptView`), and a second scroll
+    inside a message row would be one level of scrolling too many.
     """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setReadOnly(True)
-        # Ссылки — во внешний браузер: панель не файловый менеджер и не веб-вьюер.
+        # Links open in the external browser: the panel is neither a file
+        # manager nor a web view.
         self.setOpenExternalLinks(True)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        # Без собственной заливки — фон ленты просвечивает, никакого бокса.
+        # No fill of its own — the feed's background shows through, no box.
         self.setAutoFillBackground(False)
         self.viewport().setAutoFillBackground(False)
         self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
@@ -351,7 +356,7 @@ class _ProseBlock(QtWidgets.QTextBrowser):
     def set_text(self, text: str) -> None:
         if _HAS_MARKDOWN:
             self.setMarkdown(text)
-        else:  # pragma: no cover — на всех целевых Qt (5.14+, см. facts/houdini.md §3) есть
+        else:  # pragma: no cover — present on every target Qt (5.14+, facts/houdini.md §3)
             self.setPlainText(text)
         self._sync_height()
 
@@ -365,13 +370,13 @@ class _ProseBlock(QtWidgets.QTextBrowser):
 
 
 class _CodeBlock(QtWidgets.QPlainTextEdit):
-    """Блок кода из ```fence``` — моноширинный, своя горизонтальная прокрутка.
+    """A code block from a ```fence``` — monospace, with its own horizontal scroll.
 
-    `NoWrap` намеренно: перенос сломал бы отступы VEX/питона. Длинная строка
-    скроллится ВНУТРИ этого виджета (`sizeHint()` у `QPlainTextEdit` не растёт
-    от длины документа — см. `_sync_height`, ширину задаёт только layout), а
-    не раздвигает панель по горизонтали — снаружи `TranscriptView` держит
-    `ScrollBarAlwaysOff` именно ради этого.
+    `NoWrap` is deliberate: wrapping would break VEX/Python indentation. A
+    long line scrolls INSIDE this widget (`QPlainTextEdit.sizeHint()` doesn't
+    grow with the document — see `_sync_height`, only the layout sets the
+    width) instead of pushing the panel wider — which is exactly why
+    `TranscriptView` outside keeps `ScrollBarAlwaysOff`.
     """
 
     def __init__(self, code: str, parent=None) -> None:
@@ -384,9 +389,9 @@ class _CodeBlock(QtWidgets.QPlainTextEdit):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         palette = self.palette()
-        # Едва заметная подложка — из палитры (роль именно для такого
-        # «альтернативного» блока), не рамка и не хардкод-цвет: просто
-        # отличает код от прозы вокруг него.
+        # A barely visible backing, from the palette (the role exists for
+        # exactly this kind of "alternate" block) — not a frame and not a
+        # hardcoded colour: it just tells code apart from the prose around it.
         palette.setColor(QtGui.QPalette.Base, theme.palette().color(QtGui.QPalette.AlternateBase))
         self.setPalette(palette)
         self.set_code(code)
@@ -453,7 +458,7 @@ class _ToolTrigger(QtWidgets.QAbstractButton):
 
 
 class _ToolCallRow(QtWidgets.QWidget):
-    """Сворачиваемая строка вызова инструмента: иконка по `kind`, живой статус."""
+    """Collapsible tool-call row: an icon for `kind`, a live status."""
 
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
@@ -508,7 +513,7 @@ def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
             else:
                 parts.append(f"+++ {path}\n{new_text}")
         elif item_type == "terminal":
-            parts.append(f"[терминал {item.get('terminal_id', '?')}]")
+            parts.append(f"[terminal {item.get('terminal_id', '?')}]")
         elif item_type == "content":
             block = item.get("content") or {}
             text = block.get("text")
@@ -518,13 +523,13 @@ def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
 
     if locations:
         paths = ", ".join(loc.get("path", "?") for loc in locations)
-        parts.append(f"[файлы: {paths}]")
+        parts.append(f"[files: {paths}]")
 
-    return "\n\n".join(parts) if parts else "(без содержимого)"
+    return "\n\n".join(parts) if parts else "(no content)"
 
 
 class _PlanRow(QtWidgets.QWidget):
-    """План агента — блок со списком шагов и их статусами."""
+    """The agent's plan — a block listing the steps and their statuses."""
 
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
@@ -532,7 +537,7 @@ class _PlanRow(QtWidgets.QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(theme.SPACING_TIGHT)
 
-        self._title = QtWidgets.QLabel("План", self)
+        self._title = QtWidgets.QLabel("Plan", self)
         font = self._title.font()
         font.setBold(True)
         self._title.setFont(font)
@@ -543,9 +548,9 @@ class _PlanRow(QtWidgets.QWidget):
 
     def update_from(self, entry: Entry) -> None:
         steps = entry.plan
-        # Переиспользуем уже созданные QLabel там, где можем — обычно план
-        # правится по количеству шагов не сильно, но на первом рендере или
-        # при изменении длины просто досоздаём/убираем недостающее.
+        # Reuse the QLabels we already have where we can — a plan's step
+        # count usually barely changes; on the first render, or when the
+        # length does change, we just add or drop what's missing.
         while len(self._step_labels) < len(steps):
             label = QtWidgets.QLabel(self)
             label.setWordWrap(True)

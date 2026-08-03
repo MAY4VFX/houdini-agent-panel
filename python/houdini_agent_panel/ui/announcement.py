@@ -1,15 +1,16 @@
-"""Плашки над лентой (`NoticeStrip`) и над полем ввода (`BlockingNotice`).
+"""Strips above the feed (`NoticeStrip`) and above the input field (`BlockingNotice`).
 
-Оба класса нарочно ничего не знают о сети, о том, что запись пришла из фида
-или из проверки версий, и не решают про `settings.seen_announcements` — это
-дело вызывающего кода (см. docs/design.md «Оповещения»). Здесь только
-отрисовка того, что уже разобрано в `Announcement`/`Update`, и сигналы наружу
-о нажатых кнопках.
+Both classes deliberately know nothing about the network, nothing about
+whether the record came from the feed or from a version check, and decide
+nothing about `settings.seen_announcements` — that's the caller's business
+(see docs/design.md, "Announcements"). All that lives here is the rendering
+of something already parsed into `Announcement`/`Update`, plus signals about
+which button was pressed.
 
-`NoticeStrip` — тихая строка: закрывается по кнопке и не блокирует ничего.
-`BlockingNotice` — попап НАД полем ввода: сам виджет ничего не блокирует
-(`Composer.block_input`/`unblock_input` — забота вызывающего), он только
-показывает сообщение и отдаёт нажатия кнопок.
+`NoticeStrip` is a quiet line: it closes on a button and blocks nothing.
+`BlockingNotice` is a popup ABOVE the input field: the widget itself blocks
+nothing (`Composer.block_input`/`unblock_input` is the caller's job), it only
+shows the message and reports button presses.
 """
 
 from __future__ import annotations
@@ -20,12 +21,13 @@ from .qt import QtWidgets, Signal
 
 
 class NoticeStrip(QtWidgets.QWidget):
-    """Строка над лентой: обычное оповещение или уведомление об обновлении.
+    """A line above the feed: an ordinary announcement or an update notice.
 
-    `action_clicked(id, url)` — для оповещения `id` это `Announcement.id`,
-    `url` — ссылка нажатой кнопки. Для обновления `id` — `Update.target`
-    (agent_id или имя пакета), `url` всегда пустой: там нет ссылки, кнопка
-    «Обновить» — сигнал вызывающему запустить установку самому.
+    `action_clicked(id, url)` — for an announcement `id` is `Announcement.id`
+    and `url` is the pressed button's link. For an update `id` is
+    `Update.target` (an agent_id or a package name) and `url` is always
+    empty: there is no link there, the "Update" button is a signal to the
+    caller to run the install itself.
     """
 
     action_clicked = Signal(str, str)
@@ -42,7 +44,7 @@ class NoticeStrip(QtWidgets.QWidget):
         close_button = QtWidgets.QToolButton()
         close_button.setText("✕")
         close_button.setAutoRaise(True)
-        close_button.setToolTip("Закрыть")
+        close_button.setToolTip("Dismiss")
         close_button.clicked.connect(self._on_close)
         self._close_button = close_button
 
@@ -53,7 +55,7 @@ class NoticeStrip(QtWidgets.QWidget):
 
         self.setVisible(False)
 
-    # --- публичное -----------------------------------------------------
+    # --- public --------------------------------------------------------
 
     def show_notice(self, ann: Announcement) -> None:
         self._id = ann.id
@@ -63,18 +65,21 @@ class NoticeStrip(QtWidgets.QWidget):
 
     def show_update(self, update: Update) -> None:
         self._id = update.target
-        self._label.setText(f"Есть обновление: {update.label} ({update.current} → {update.latest})")
-        self._set_buttons([("Обновить", "")])
+        self._label.setText(
+            f"Update available: {update.label} ({update.current} → {update.latest})"
+        )
+        self._set_buttons([("Update", "")])
         self.setVisible(True)
 
-    # --- внутреннее ------------------------------------------------------
+    # --- internal --------------------------------------------------------
 
     def _set_buttons(self, buttons: list[tuple[str, str]]) -> None:
         if self._buttons_row is not None:
             self._layout.removeWidget(self._buttons_row)
-            # `setParent(None)` отвязывает СРАЗУ (иначе виджет ещё числится
-            # ребёнком до следующего прохода цикла событий, и повторный показ
-            # оповещения на мгновение видел бы кнопки старого и нового разом).
+            # `setParent(None)` detaches IMMEDIATELY (otherwise the widget
+            # still counts as a child until the next event-loop pass, and
+            # re-showing an announcement would briefly show the old and new
+            # buttons at once).
             self._buttons_row.setParent(None)
             self._buttons_row.deleteLater()
             self._buttons_row = None
@@ -87,7 +92,7 @@ class NoticeStrip(QtWidgets.QWidget):
             btn = QtWidgets.QPushButton(label)
             btn.clicked.connect(lambda checked=False, u=url: self.action_clicked.emit(self._id, u))
             row_layout.addWidget(btn)
-        # Кнопки — сразу после текста, до крестика закрытия.
+        # Buttons come right after the text, before the close cross.
         self._layout.insertWidget(1, row)
         self._buttons_row = row
 
@@ -98,12 +103,13 @@ class NoticeStrip(QtWidgets.QWidget):
 
 
 class BlockingNotice(QtWidgets.QWidget):
-    """Попап над полем ввода — рисуется строго из присланных кнопок.
+    """A popup above the input field — drawn strictly from the buttons it was sent.
 
-    Сам виджет не трогает ввод: то, что появление `BlockingNotice` обязано
-    заблокировать поле композера, а нажатие кнопки — разблокировать, решает
-    код, который его показывает (владеет и `BlockingNotice`, и `Composer`).
-    Здесь — только рендер сообщения и сигнал о нажатой кнопке.
+    The widget itself never touches the input: that showing a
+    `BlockingNotice` must block the composer's field, and pressing a button
+    must unblock it, is decided by the code that shows it (which owns both
+    the `BlockingNotice` and the `Composer`). Here there is only the message
+    and a signal about the pressed button.
     """
 
     action_clicked = Signal(str, str)
@@ -152,9 +158,10 @@ class BlockingNotice(QtWidgets.QWidget):
         self.setVisible(True)
 
     def hide_notice(self) -> None:
-        """Не в контракте architecture.md, но нужна вызывающему коду, чтобы
-        убрать попап после того, как нажатая кнопка разблокировала ввод —
-        без этого метода закрыть `BlockingNotice` снаружи нечем."""
+        """Not in the architecture.md contract, but the calling code needs it
+        to take the popup down once a pressed button has unblocked the
+        input — without this there is no way to close a `BlockingNotice`
+        from outside."""
         self.setVisible(False)
 
 
@@ -162,15 +169,15 @@ __all__ = ["NoticeStrip", "BlockingNotice"]
 
 
 class ConsentStrip(QtWidgets.QWidget):
-    """Разовый вопрос художнику — сейчас единственный такой вопрос про телеметрию.
+    """A one-time question for the artist — today only the telemetry one.
 
-    Строкой, а не модальным окном, сознательно. Диалог посреди Houdini
-    останавливает работу и заставляет отвечать немедленно, а вопрос
-    «поделишься ли ты анонимной статистикой» такого права не имеет. Строка
-    ждёт, ничего не блокирует и уходит после ответа.
+    A strip rather than a modal, deliberately. A dialog in the middle of
+    Houdini stops the work and demands an answer right now, and "will you
+    share anonymous stats" has no right to do that. The strip waits, blocks
+    nothing, and leaves once answered.
 
-    Кнопки нарочно равнозначны по весу: у вопроса про сбор данных не должно
-    быть визуально «правильного» ответа, подталкивающего нажать согласие.
+    The buttons carry deliberately equal weight: a question about collecting
+    data must not have a visually "correct" answer nudging towards yes.
     """
 
     answered = Signal(bool)
@@ -181,8 +188,8 @@ class ConsentStrip(QtWidgets.QWidget):
         self._label = QtWidgets.QLabel()
         self._label.setWordWrap(True)
 
-        self._yes = QtWidgets.QPushButton("Разрешить")
-        self._no = QtWidgets.QPushButton("Не надо")
+        self._yes = QtWidgets.QPushButton("Allow")
+        self._no = QtWidgets.QPushButton("No thanks")
         self._yes.clicked.connect(lambda: self._answer(True))
         self._no.clicked.connect(lambda: self._answer(False))
 

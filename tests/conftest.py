@@ -67,6 +67,21 @@ def fetcher() -> FakeFetcher:
 
 
 @pytest.fixture(autouse=True)
+def fresh_fx_port_cache():
+    """`scene` remembers the HTTP port scan for the life of the process.
+
+    That's deliberate in production (the scan costs 16 seconds on the main
+    thread), but process-wide state leaks between tests, so it's cleared
+    around every one of them.
+    """
+    from houdini_agent_panel import scene
+
+    scene.reset_port_cache_for_tests()
+    yield
+    scene.reset_port_cache_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def no_real_network(monkeypatch):
     """Safety net: a real network call from a test fails with a clear message."""
 
