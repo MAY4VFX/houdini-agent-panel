@@ -347,7 +347,9 @@ class AgentPanel(QtWidgets.QWidget):
     def _make_settings_view(self) -> QtWidgets.QWidget:
         from .settings_view import SettingsView
 
-        view = SettingsView(self, before_install=self._before_agent_install)
+        view = SettingsView(
+            self, before_install=self._before_agent_install, before_uninstall=self._before_agent_uninstall
+        )
         self._settings_view = view
         view.changed.connect(self._on_settings_changed)
         view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
@@ -1272,6 +1274,21 @@ class AgentPanel(QtWidgets.QWidget):
                 "it restarts automatically once the update finishes."
             )
             client.stop()
+
+    def _before_agent_uninstall(self, agent_id: str) -> None:
+        """About to delete `agent_id`'s files entirely (Remove). Same hazard
+        as `_before_agent_install`, without the "brings it back up" half —
+        Remove means the artist wants it gone, not restarted, so unlike an
+        update this never sets `_restart_after_update`. The header is reset
+        to blank rather than left naming a process that is both stopped and
+        no longer installed — the same blank state a fresh panel starts in,
+        before any agent has been chosen.
+        """
+        client = shared_client()
+        if client.is_running() and self._settings.default_agent == agent_id:
+            self._note(f"Stopping {self._display_label(agent_id)} to remove it.")
+            client.stop()
+            self._header.set_agent("", None)
 
     def _on_agent_install_succeeded(self, agent_id: str) -> None:
         if self._active_update is not None and self._active_update.target == agent_id:

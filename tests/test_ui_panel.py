@@ -935,6 +935,88 @@ def test_update_stops_the_running_agent_first_and_restarts_it_after(qapp, monkey
     widget.shutdown()
 
 
+def test_removing_the_running_default_agent_stops_it_first_and_resets_the_header(qapp, monkeypatch):
+    """The same hazard `_before_agent_install` already guards against for
+    Update — swapping/deleting a live agent's files out from under it
+    without saying so — applied to Remove. Unlike Update, this must never
+    set `_restart_after_update`: the artist asked for it to be gone, not
+    brought back. Found while diagnosing "remove and reinstall does
+    nothing" — `_uninstall` never stopped the running agent at all, and
+    left `default_agent`/the header naming an agent that was both stopped
+    and no longer installed.
+    """
+    from houdini_agent_panel import runtime
+    from houdini_agent_panel.registry import AgentEntry
+
+    widget = _make_panel(qapp)
+    agent_id = "claude-acp"  # a real FEATURED_AGENT_IDS member — registry.featured() needs one
+    entry = AgentEntry(id=agent_id, name="Claude Agent", version="1.0.0")
+    runtime._write_manifest(entry, kind="npx")
+    current = settings_mod.load()
+    current.installed_agents[agent_id] = settings_mod.InstalledAgent(
+        agent_id=agent_id, version="1.0.0", kind="npx", installed_at="now"
+    )
+    current.default_agent = agent_id
+    settings_mod.save(current)
+    widget._settings.default_agent = agent_id
+    widget._settings_view.set_agents([entry])
+    widget._header.set_agent("Claude Agent", None)
+
+    client = panel_mod.shared_client()
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    stopped = []
+    monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
+
+    widget._settings_view._agents_view._uninstall(agent_id)
+
+    assert stopped == [True], "the running agent was never stopped before its files were removed"
+    assert widget._restart_after_update is None, "Remove must never schedule bringing it back"
+    assert widget._header._agent_button.text() == ""
+    assert runtime.installed_version(agent_id) is None
+    assert not settings_mod.load().default_agent, (
+        "default_agent must not keep pointing at an agent that no longer exists"
+    )
+
+    current_session = widget._current_session()
+    session_id = current_session.session_id if current_session else "__idle__"
+    feed_text = " ".join(e.text for e in widget._model(session_id).entries())
+    assert "Stopping" in feed_text and "remove" in feed_text
+
+    widget.shutdown()
+
+
+def test_removing_an_agent_that_is_not_the_running_default_touches_nothing_live(qapp, monkeypatch):
+    """Removing a background agent — installed, but not the one currently
+    running — must not stop or disturb the live connection at all."""
+    from houdini_agent_panel import runtime
+    from houdini_agent_panel.registry import AgentEntry
+
+    widget = _make_panel(qapp)
+    live_agent, other_agent = "claude-acp", "codex-acp"
+    entry = AgentEntry(id=other_agent, name="Codex", version="1.0.0")
+    runtime._write_manifest(entry, kind="npx")
+    current = settings_mod.load()
+    current.installed_agents[other_agent] = settings_mod.InstalledAgent(
+        agent_id=other_agent, version="1.0.0", kind="npx", installed_at="now"
+    )
+    current.default_agent = live_agent
+    settings_mod.save(current)
+    widget._settings.default_agent = live_agent
+    widget._settings_view.set_agents([entry])
+
+    client = panel_mod.shared_client()
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    stopped = []
+    monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
+
+    widget._settings_view._agents_view._uninstall(other_agent)
+
+    assert stopped == [], "removing a background agent must not stop the live one"
+    assert settings_mod.load().default_agent == live_agent, "the real default_agent must be untouched"
+
+    widget.shutdown()
+
+
 def test_update_failure_is_reported_in_the_feed_not_silently(qapp, monkeypatch, fetcher):
     """A failed update must not look the same as a button that does nothing."""
     widget = _make_panel(qapp)

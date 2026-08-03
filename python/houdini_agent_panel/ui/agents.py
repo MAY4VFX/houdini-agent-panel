@@ -276,6 +276,7 @@ class AgentsView(QtWidgets.QWidget):
         *,
         fetch: "Fetcher | None" = None,
         before_install: Callable[[str], None] | None = None,
+        before_uninstall: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._fetch = fetch
@@ -286,6 +287,10 @@ class AgentsView(QtWidgets.QWidget):
         # currently running, and should it be stopped first" is entirely
         # the caller's call, made here rather than skipped.
         self._before_install = before_install
+        # Same reasoning, for Remove: silently deleting a running agent's
+        # files out from under it is exactly the same hazard installing
+        # over them was — the caller decides whether to stop it first.
+        self._before_uninstall = before_uninstall
         self._entries: list["AgentEntry"] = []
         self._updates_by_target: dict[str, "Update"] = {}
         # Keep references to live threads here — otherwise Python's garbage
@@ -477,9 +482,20 @@ class AgentsView(QtWidgets.QWidget):
         self.install_succeeded.emit(entry.id)
 
     def _uninstall(self, agent_id: str) -> None:
+        if self._before_uninstall is not None:
+            self._before_uninstall(agent_id)
         runtime.uninstall_agent(agent_id)
         current = settings_module.load()
         current.installed_agents.pop(agent_id, None)
+        if current.default_agent == agent_id:
+            # Otherwise this is a dangling reference: nothing installed
+            # under that id any more, but `default_agent` still names it —
+            # the next autostart would silently reinstall and relaunch the
+            # very agent the artist just removed, and in the meantime the
+            # header chip would go on showing its name as if it were still
+            # the one in charge. Removing it clears the pick along with the
+            # files, the same as choosing "no agent" would.
+            current.default_agent = ""
         settings_module.save(current)
         self._rebuild_registry_rows()
         self.installed_changed.emit()

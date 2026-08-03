@@ -113,6 +113,7 @@ class SettingsView(QtWidgets.QWidget):
         *,
         fetch: "Fetcher | None" = None,
         before_install: "Callable[[str], None] | None" = None,
+        before_uninstall: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__(parent)
         self._loading = False
@@ -139,7 +140,9 @@ class SettingsView(QtWidgets.QWidget):
         header.setAlignment(QtCore.Qt.AlignHCenter)
         header.addWidget(self._header_rail)
 
-        self._agents_view = AgentsView(self, fetch=fetch, before_install=before_install)
+        self._agents_view = AgentsView(
+            self, fetch=fetch, before_install=before_install, before_uninstall=before_uninstall
+        )
         # An installed/custom agent list change is exactly the kind of
         # settings change that should make the default-agent combo and the
         # header chip's menu refresh, so it rides the same `changed` signal
