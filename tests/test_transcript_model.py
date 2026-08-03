@@ -85,16 +85,17 @@ def test_thought_chunk_is_a_separate_kind_from_agent_chunk():
     assert len(model.entries()) == 2
 
 
-def test_chunk_without_message_id_never_merges():
+def test_chunks_without_a_message_id_merge_into_one_message():
+    """`messageId` is optional in ACP and Grok omits it on every chunk.
+    Treating each one as its own entry shredded an answer one word per line
+    down the page; consecutive unkeyed chunks belong to the same message."""
     model = TranscriptModel()
-    first = model.apply_chunk("", "a")
-    second = model.apply_chunk("", "b")
 
-    assert first is not second
-    assert [e.text for e in model.entries()] == ["a", "b"]
+    model.apply_chunk("", "one ")
+    model.apply_chunk("", "two")
 
+    assert [e.text for e in model.entries()] == ["one two"]
 
-# --- tool calls --------------------------------------------------------
 
 
 def test_apply_tool_call_creates_entry_with_defaults_for_missing_fields():

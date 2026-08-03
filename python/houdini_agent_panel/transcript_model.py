@@ -87,6 +87,12 @@ def _plain_list(values: Any) -> list[dict]:
     return [_plain(item) for item in (values or [])]
 
 
+#: Marks an entry built from chunks that carried no `messageId`, so a
+#: following chunk can tell "keep appending to this" from "this belongs to
+#: a message the agent actually named".
+_UNKEYED_PREFIX = "unkeyed:"
+
+
 class TranscriptModel:
     """Folds the session/update stream into a list of Entry.
 
@@ -141,10 +147,19 @@ class TranscriptModel:
             entry = Entry(kind=kind, id=message_id, text=text)
             self._by_message_id[message_id] = entry
         else:
-            # With no message_id there's nothing to stitch to — the agent
-            # sent a one-off chunk, and every one of those becomes its own
-            # entry.
-            entry = Entry(kind=kind, id=str(uuid.uuid4()), text=text)
+            # No message_id at all. `messageId` is optional in ACP, and Grok
+            # omits it on every chunk — which used to mean one entry per
+            # word, an answer shredded down the page one line at a time.
+            #
+            # Consecutive chunks of the same kind with no id belong to the
+            # same message: nothing else could have come between them,
+            # because anything else (a tool call, a plan, the artist's own
+            # line) appends its own entry and ends the run.
+            last = self._entries[-1] if self._entries else None
+            if last is not None and last.kind == kind and last.id.startswith(_UNKEYED_PREFIX):
+                last.text += text
+                return last
+            entry = Entry(kind=kind, id=_UNKEYED_PREFIX + str(uuid.uuid4()), text=text)
 
         self._entries.append(entry)
         return entry
