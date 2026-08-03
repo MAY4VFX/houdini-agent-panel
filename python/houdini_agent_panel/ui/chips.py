@@ -12,6 +12,11 @@ from .conversations import sidebar_icon
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _RAIL_WIDTH = 736
+#: Floor for the centered rail. Without it — and without the
+#: `minimumSizeHint` override below — the rail's `setFixedWidth` became the
+#: header's minimum, the header's minimum became the panel's, and the panel
+#: could not be docked into any Houdini pane narrower than 736px.
+_MIN_RAIL_WIDTH = 180
 _AMBER = "#dfa047"
 
 
@@ -187,6 +192,33 @@ class ChoiceButton(QtWidgets.QWidget):
         self.activated.emit(index)
 
 
+class _ElidedLabel(QtWidgets.QLabel):
+    """A label that gives up width instead of pushing its neighbours away.
+
+    A plain `QLabel` demands enough room for its whole string, and a project
+    path is long: the header's "+" and "⋯" buttons were the ones paying for
+    it. This one keeps the full text (so `text()` and the tooltip still tell
+    the truth) and elides at paint time — from the left, because the tail of
+    a $HIP path, the shot folder, is the part worth reading.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        return QtCore.QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802 - Qt override
+        del event
+        painter = QtGui.QPainter(self)
+        area = self.contentsRect()
+        metrics = QtGui.QFontMetrics(self.font())
+        text = metrics.elidedText(self.text(), QtCore.Qt.ElideLeft, area.width())
+        painter.setPen(self.palette().color(QtGui.QPalette.WindowText))
+        painter.drawText(area, int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter), text)
+
+
 class HeaderBar(QtWidgets.QWidget):
     """Top context rail matching ``houdini-agent-precision.html``."""
 
@@ -228,10 +260,21 @@ class HeaderBar(QtWidgets.QWidget):
         self._divider.setObjectName("contextDivider")
         layout.addWidget(self._divider)
 
-        self._cwd_label = QtWidgets.QLabel(self._rail)
+        self._cwd_label = _ElidedLabel(self._rail)
         self._cwd_label.setObjectName("contextPath")
-        self._cwd_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        layout.addWidget(self._cwd_label)
+        # Margins on the widget, not `padding:` in the stylesheet — the custom
+        # paintEvent draws into contentsRect(), which only the former moves.
+        self._cwd_label.setContentsMargins(7, 0, 7, 0)
+        # Colour set on the palette rather than through the stylesheet: the
+        # label paints its own (elided) text, and a stylesheet `color:` never
+        # reaches a custom paintEvent.
+        cwd_palette = self._cwd_label.palette()
+        cwd_palette.setColor(
+            QtGui.QPalette.WindowText,
+            cwd_palette.color(QtGui.QPalette.Disabled, QtGui.QPalette.Text),
+        )
+        self._cwd_label.setPalette(cwd_palette)
+        layout.addWidget(self._cwd_label, 1)
         layout.addStretch(1)
 
         self._new_conversation_button = QtWidgets.QToolButton(self._rail)
@@ -256,7 +299,6 @@ class HeaderBar(QtWidgets.QWidget):
             "QToolButton#contextButton:hover, QToolButton#contextIcon:hover {"
             " color: palette(text); background: palette(alternate-base);"
             "}"
-            "QLabel#contextPath { color: palette(disabled, text); padding: 0 7px; }"
             "QLabel#contextDivider { color: palette(mid); }"
         )
 
@@ -317,9 +359,13 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_popup_layout = None
         popup.deleteLater()
 
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(min(hint.width(), _MIN_RAIL_WIDTH), hint.height())
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._rail.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
+        self._rail.setFixedWidth(max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 28)))
 
     def set_agent(self, name: str, icon: QtGui.QIcon | None) -> None:
         self._agent_button.setText(name)

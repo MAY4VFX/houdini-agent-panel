@@ -1,9 +1,9 @@
-"""Интеграция панели.
+"""Panel integration.
 
-Здесь проверяется не отрисовка, а склейка: кто кого переживает, что происходит
-со вторым табом, куда уходит ответ на разрешение. Клиент берём настоящий — но
-не запускаем: его Qt-сигналы настоящие, и эмитить их из теста честнее, чем
-подсовывать заглушку с похожим именем.
+What's checked here isn't rendering but the wiring: who outlives whom, what
+happens to a second tab, where a permission answer goes. The client is the
+real one — just never started: its Qt signals are real, and emitting them from
+a test is more honest than substituting a stand-in with a similar name.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from houdini_agent_panel.ui import panel as panel_mod
 
 @pytest.fixture(autouse=True)
 def isolated_panel_state(qapp, monkeypatch):
-    """Каждому тесту — свой процессный синглтон и никакой сети из _boot."""
+    """A fresh process-wide singleton per test, and no network out of _boot."""
     monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: "/tmp")
     monkeypatch.setattr(
         panel_mod.scene,
@@ -39,13 +39,14 @@ def _make_panel(qapp):
 
 def _session(session_id: str = "s1") -> sessions.SessionState:
     return sessions.SessionState(
-        session_id=session_id, title="Новый разговор", cwd="/tmp", created_at=0.0
+        session_id=session_id, title="New conversation", cwd="/tmp", created_at=0.0
     )
 
 
 def test_without_default_agent_panel_opens_on_agents_settings(qapp):
-    """Первое открытие: агент не выбран, значит человеку показывают, из чего
-    выбирать — теперь это блок «Агенты» в настройках, не отдельный экран."""
+    """First open: no agent picked, so the human is shown what there is to
+    pick from — which is now the "Agents" block in settings, not a separate
+    screen."""
     widget = _make_panel(qapp)
     widget._boot()
 
@@ -55,8 +56,8 @@ def test_without_default_agent_panel_opens_on_agents_settings(qapp):
 
 
 def test_two_panels_share_one_client_and_one_pool(qapp):
-    """Два таба — один процесс агента. Это прямое требование design.md:
-    «Один агент, много сессий»."""
+    """Two tabs, one agent process. A direct design.md requirement:
+    "one agent, many sessions"."""
     first = _make_panel(qapp)
     second = _make_panel(qapp)
 
@@ -81,11 +82,11 @@ def test_buddy_selection_is_saved_and_restored(qapp):
 
 
 def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
-    """Самое дорогое место интеграции.
+    """The most expensive spot in the integration.
 
-    Клиент общий, поэтому наивный `signal.disconnect()` в shutdown() одного
-    таба отписал бы заодно и соседний: тот продолжал бы выглядеть живым и
-    молчать в ответ на каждый промпт.
+    The client is shared, so a naive `signal.disconnect()` in one tab's
+    shutdown() would unsubscribe its neighbour too: that one would keep
+    looking alive and stay silent in reply to every prompt.
     """
     first = _make_panel(qapp)
     second = _make_panel(qapp)
@@ -98,18 +99,18 @@ def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
     first.shutdown()
     qapp.processEvents()
 
-    client.message_chunk.emit(state.session_id, "m1", "привет")
+    client.message_chunk.emit(state.session_id, "m1", "hello")
     qapp.processEvents()
 
     entries = second._model(state.session_id).entries()
-    assert [entry.text for entry in entries if entry.kind == "agent"] == ["привет"]
+    assert [entry.text for entry in entries if entry.kind == "agent"] == ["hello"]
 
     second.shutdown()
 
 
 def test_last_tab_closing_stops_the_agent(qapp):
-    """Пока жив хоть один таб, разговор продолжается; когда закрылся
-    последний — процесс агента держать не за чем."""
+    """While one tab is alive the conversation goes on; once the last one is
+    closed there is nothing left to keep the agent process for."""
     first = _make_panel(qapp)
     second = _make_panel(qapp)
 
@@ -121,8 +122,8 @@ def test_last_tab_closing_stops_the_agent(qapp):
 
 
 def test_shutdown_is_idempotent(qapp):
-    """Houdini может позвать onDestroyInterface повторно; второй вызов не
-    должен ни падать, ни гасить чужой клиент."""
+    """Houdini may call onDestroyInterface twice; the second call must
+    neither crash nor take someone else's client down."""
     widget = _make_panel(qapp)
     widget.shutdown()
     widget.shutdown()
@@ -144,18 +145,18 @@ def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monke
         client, "answer_permission", lambda key, option: answered.append((key, option))
     )
 
-    # У объекта вызова нет .title — панель обязана подставить свой текст,
-    # а не показать пустую строку с кнопками неизвестно к чему.
+    # The call object has no .title — the panel has to supply its own text
+    # rather than show an empty line with buttons for who-knows-what.
     tool_call = object()
 
-    # PermissionOption по форме: option_id / name / kind.
+    # PermissionOption by shape: option_id / name / kind.
     class _Option:
         def __init__(self, option_id, name, kind):
             self.option_id = option_id
             self.name = name
             self.kind = kind
 
-    options = [_Option("allow_once", "Разрешить один раз", "allow_once")]
+    options = [_Option("allow_once", "Allow once", "allow_once")]
     client.permission_requested.emit("req-1", state.session_id, tool_call, options)
     qapp.processEvents()
 
@@ -179,17 +180,17 @@ def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monke
 
 
 def test_blocking_announcement_blocks_input_but_not_the_transcript(qapp):
-    """Прямой запрет из design.md: лента читается, панель закрывается, Houdini
-    работает — блокируется только поле ввода."""
+    """A direct prohibition from design.md: the feed stays readable, the panel
+    closable, Houdini working — only the input field is blocked."""
     from houdini_agent_panel.announcements import Announcement, Button
 
     widget = _make_panel(qapp)
     ann = Announcement(
         id="a1",
         severity="blocking",
-        title="Важное",
-        body="Текст",
-        buttons=(Button(label="Понятно", url=""),),
+        title="Important",
+        body="Body",
+        buttons=(Button(label="Got it", url=""),),
     )
 
     class _Result:
@@ -212,8 +213,8 @@ def test_blocking_announcement_blocks_input_but_not_the_transcript(qapp):
 
 
 def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp):
-    """Стриминг в невидимую сессию не должен трогать виджеты той, которую
-    человек сейчас читает."""
+    """Streaming into an invisible session must not touch the widgets of the
+    one the human is reading."""
     widget = _make_panel(qapp)
     client = panel_mod.shared_client()
 
@@ -227,7 +228,7 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
     refreshed: list = []
     widget._transcript.refresh = lambda entry_id=None: refreshed.append(entry_id)
 
-    client.message_chunk.emit(background.session_id, "m1", "фон")
+    client.message_chunk.emit(background.session_id, "m1", "background")
     qapp.processEvents()
 
     assert refreshed == []
@@ -237,11 +238,11 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
 
 
 def test_registry_reaches_the_agents_section(qapp):
-    """Блок «Агенты» в настройках сам в сеть не ходит.
+    """The "Agents" block in settings never hits the network itself.
 
-    `AgentsView.refresh_from_registry` синхронный, и вызов с главного потока
-    заморозил бы Houdini ровно на время сетевого таймаута. Записи обязаны
-    приезжать готовыми из фонового обхода.
+    `AgentsView.refresh_from_registry` is synchronous, and calling it from the
+    main thread would freeze Houdini for exactly the length of a network
+    timeout. Entries have to arrive already fetched by the background pass.
     """
     from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 
@@ -269,7 +270,7 @@ def test_registry_reaches_the_agents_section(qapp):
 
 
 def test_installed_agent_reaches_the_header_chip_menu(qapp):
-    """«Установил → появился в меню чипа без перезапуска панели»."""
+    """"Installed it, and it shows up in the chip menu with no panel restart"."""
     from houdini_agent_panel import settings as settings_mod
 
     widget = _make_panel(qapp)
@@ -321,10 +322,10 @@ def test_manage_agents_clicked_opens_settings_focused_on_agents(qapp):
 
 
 def test_telemetry_consent_asked_once_and_remembered(qapp):
-    """Отказ тоже запоминается.
+    """A refusal is remembered too.
 
-    Иначе человек, сказавший «не надо», получал бы тот же вопрос при каждом
-    открытии панели — это уже не вопрос, а выклянчивание.
+    Otherwise someone who said "no thanks" would get the same question every
+    time they opened the panel — that isn't a question any more, it's nagging.
     """
     from houdini_agent_panel import settings as settings_mod
 
@@ -360,7 +361,7 @@ def test_telemetry_consent_yes_turns_it_on(qapp):
 
 
 def test_consent_strip_does_not_block_input(qapp):
-    """Вопрос про статистику не имеет права мешать работать."""
+    """The question about stats has no right to get in the way of working."""
     widget = _make_panel(qapp)
     widget._boot()
 
@@ -377,7 +378,7 @@ def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch)
     client.session_started.emit(state.session_id, state)
     monkeypatch.setattr(client, "prompt", lambda _session_id, _blocks: None)
 
-    widget._on_submitted([{"type": "text", "text": "построй тестовую геометрию"}])
+    widget._on_submitted([{"type": "text", "text": "build some test geometry"}])
     activity_rows = [
         row for row in widget._transcript._rows.values() if hasattr(row, "indicator")
     ]
@@ -407,19 +408,20 @@ def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch)
 
 
 def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
-    """Кнопки входа не должны говорить с покойником.
+    """The sign-in buttons must not talk to a corpse.
 
-    Клиент общий и пересоздаётся при смене агента. Прямая подписка
-    `view.method_chosen.connect(shared_client().authenticate)` навсегда
-    запомнила бы тот экземпляр, что был в момент сборки виджета.
+    The client is shared and gets recreated on an agent switch. Subscribing
+    directly with `view.method_chosen.connect(shared_client().authenticate)`
+    would permanently capture whichever instance existed when the widget was
+    built.
     """
     widget = _make_panel(qapp)
 
-    # Имитируем то, что делает смена агента: старый клиент гасится, новый
-    # создаётся. Именно гасится, а не бросается — иначе его рабочий поток
-    # остаётся крутиться без владельца, и Qt справедливо ругается
-    # «QThread: Destroyed while thread is still running». В Houdini такой
-    # осиротевший поток переживает закрытие панели.
+    # Imitate what an agent switch does: the old client is stopped and a new
+    # one created. Stopped, not dropped — otherwise its worker thread keeps
+    # spinning with no owner and Qt rightly complains "QThread: Destroyed
+    # while thread is still running". In Houdini such an orphaned thread
+    # outlives the closing of the panel.
     old = panel_mod.shared_client()
     old.stop()
     panel_mod._shared_client = None
@@ -434,4 +436,172 @@ def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     qapp.processEvents()
 
     assert seen == [("auth", "oauth"), ("logout",)]
+    widget.shutdown()
+
+
+def test_open_drawer_moves_the_conversation_aside_instead_of_covering_it(qapp):
+    """An open drawer must not sit on top of what the artist is reading.
+
+    It used to overlay the whole panel from x=0: the feed, the composer and
+    the header's own sidebar toggle all disappeared under it.
+    """
+    widget = _make_panel(qapp)
+    widget.resize(1000, 700)
+    widget.show()
+    qapp.processEvents()
+
+    widget._conversations.open_drawer()
+    qapp.processEvents()
+
+    drawer = widget._conversations
+    assert widget._body_layout.contentsMargins().left() == drawer.width()
+    # The header keeps its full width, so the toggle that closes the drawer
+    # stays where it was.
+    assert widget._header.x() == 0
+    assert drawer.y() >= widget._header.height()
+
+    widget._conversations.close_drawer()
+    qapp.processEvents()
+    assert widget._body_layout.contentsMargins().left() == 0
+
+    widget.shutdown()
+
+
+def test_narrow_panel_lets_the_drawer_overlay_instead_of_squeezing_the_feed(qapp):
+    widget = _make_panel(qapp)
+    widget.resize(320, 700)
+    widget.show()
+    qapp.processEvents()
+
+    widget._conversations.open_drawer()
+    qapp.processEvents()
+
+    assert widget._body_layout.contentsMargins().left() == 0
+    widget.shutdown()
+
+
+def test_panel_can_be_docked_into_a_narrow_houdini_pane(qapp):
+    """The centered 736px rails must not become the panel's minimum width.
+
+    `setFixedWidth` on a child hands that width up as the parent's minimum,
+    so the header, composer and settings rails between them pinned the whole
+    panel at 736px — wider than a typical docked Houdini pane.
+    """
+    widget = _make_panel(qapp)
+    widget.show()
+    qapp.processEvents()
+
+    assert widget.minimumSizeHint().width() <= 320
+
+    widget.resize(360, 700)
+    qapp.processEvents()
+    assert widget.width() == 360
+
+    widget.shutdown()
+
+
+def test_config_options_from_the_agent_become_composer_chips(qapp):
+    """The model picker. It exists in ACP only as session config options, and
+    nothing was listening to them — so the chip never appeared at all."""
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+    state = _session()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+
+    option = ConfigOption(
+        id="model",
+        name="Model",
+        current_value="opus",
+        choices=(
+            ConfigChoice(value="sonnet", name="Claude Sonnet 4.5"),
+            ConfigChoice(value="opus", name="Claude Opus 4.1"),
+        ),
+    )
+    client.config_options_changed.emit(state.session_id, [option])
+    qapp.processEvents()
+
+    chips = widget._composer._config_chips
+    assert len(chips) == 1
+    assert chips[0].currentData() == "opus"
+    assert widget._pool.get(state.session_id).config_options == [option]
+
+    chosen: list[tuple[str, str, str]] = []
+    panel_mod.shared_client().set_config_option = lambda sid, cid, value: chosen.append(
+        (sid, cid, value)
+    )
+    chips[0]._choose(0)
+
+    assert chosen == [(state.session_id, "model", "sonnet")]
+    widget.shutdown()
+
+
+def test_agent_offering_no_config_options_gets_no_chips(qapp):
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+    state = _session()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+
+    assert widget._composer._config_chips == []
+    assert not widget._composer._config_bar.isVisibleTo(widget._composer)
+    widget.shutdown()
+
+
+def test_text_typed_before_any_session_is_not_thrown_away(qapp, monkeypatch):
+    """The composer clears itself on submit, so the panel has to keep what it
+    was handed — otherwise the first message after opening the panel vanished
+    without a trace."""
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client()
+
+    started: list[bool] = []
+    monkeypatch.setattr(widget, "_start_new_session", lambda: started.append(True))
+    prompted: list[tuple[str, list]] = []
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: prompted.append((sid, blocks)))
+
+    widget._on_submitted([{"type": "text", "text": "make it rain"}])
+    assert started == [True]
+    assert prompted == []
+
+    state = _session()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+
+    assert prompted == [(state.session_id, [{"type": "text", "text": "make it rain"}])]
+    widget.shutdown()
+
+
+def test_permission_popover_does_not_float_over_the_settings_screen(qapp):
+    widget = _make_panel(qapp)
+    widget.resize(900, 700)
+    widget.show()
+    qapp.processEvents()
+    client = panel_mod.shared_client()
+
+    state = _session()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+
+    class _Option:
+        def __init__(self, option_id, name, kind):
+            self.option_id = option_id
+            self.name = name
+            self.kind = kind
+
+    client.permission_requested.emit(
+        "req-1", state.session_id, object(), [_Option("allow_once", "Allow once", "allow_once")]
+    )
+    qapp.processEvents()
+    assert widget._permission_popover is not None
+
+    widget._show_page(widget.PAGE_SETTINGS)
+    assert widget._permission_popover is None
+
+    # Still pending — it comes back with the conversation.
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    assert widget._permission_popover is not None
+
     widget.shutdown()

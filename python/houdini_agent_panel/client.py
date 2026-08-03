@@ -828,40 +828,92 @@ class AcpClient(QtCore.QObject):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._worker = AcpWorker()
+        self._worker: AcpWorker | None = None
+        #: Workers that have already been stopped. Kept alive only so Qt
+        #: never sees a `QThread` freed out from under it; nothing is ever
+        #: read back out of here.
+        self._retired: list[AcpWorker] = []
         self._agent_info: AgentInfo | None = None
         self._running = False
+        self._spawn_worker()
+
+    def _spawn_worker(self) -> "AcpWorker":
+        """Bring up a fresh worker thread and wire it to this facade.
+
+        Rebuilding the worker rather than the whole `AcpClient` is what makes
+        an agent switch possible at all. Every panel wires its slots to THIS
+        object's signals once, and a stopped worker's asyncio loop is closed
+        for good — `run_coroutine_threadsafe` on it raises "Event loop is
+        closed". Before this, switching agents killed the worker and then
+        submitted `do_start` into the corpse: the chip showed the new agent
+        and nothing else ever happened again, in that panel, until Houdini
+        was restarted.
+        """
+        worker = AcpWorker()
 
         # Connection order matters: Qt calls multiple slots of the same
         # signal in the order they were connected. Internal state
         # (`_running`, `_agent_info`) must be updated BEFORE the forwarding
         # reaches external subscribers — otherwise a UI slot reacting to
         # `connected` might see a not-yet-updated `is_running()`/`agent_info()`.
-        self._worker.connected.connect(self._on_connected)
-        self._worker.disconnected.connect(self._on_stopped)
-        self._worker.failed.connect(self._on_stopped)
+        worker.connected.connect(self._on_connected)
+        worker.disconnected.connect(self._on_stopped)
+        worker.failed.connect(self._on_stopped)
         for name in _FORWARDED_SIGNALS:
-            getattr(self._worker, name).connect(getattr(self, name).emit)
+            getattr(worker, name).connect(getattr(self, name).emit)
 
-        self._worker.start()
-        self._worker.wait_until_ready()
+        worker.start()
+        worker.wait_until_ready()
+        self._worker = worker
+        return worker
+
+    def _live_worker(self) -> "AcpWorker":
+        """The worker that can still accept work — a new one if the old died."""
+        worker = self._worker
+        if worker is None or not worker.isRunning() or worker.loop.is_closed():
+            return self._spawn_worker()
+        return worker
+
+    def _submit(self, make_coro) -> None:
+        """Schedule work on the live worker, or drop it if there is none.
+
+        Takes a factory rather than a coroutine so that nothing is ever
+        created for a dead worker — an un-awaited coroutine object would
+        only produce a RuntimeWarning nobody reads. Deliberately does NOT
+        resurrect the worker: with no agent running there is nothing for
+        `prompt`/`cancel`/`set_mode` to talk to, and quietly starting a
+        thread for them would hide that.
+        """
+        worker = self._worker
+        if worker is None or not worker.isRunning() or worker.loop.is_closed():
+            return
+        worker.submit(make_coro(worker))
 
     # --- connection lifecycle -----------------------------------------
 
     def start(self, spec: "LaunchSpec", *, cwd: str) -> None:
-        self._worker.submit(self._worker.do_start(spec, cwd))
+        worker = self._live_worker()
+        worker.submit(worker.do_start(spec, cwd))
 
     def stop(self) -> None:
         """Reliable stop: close the connection, wait for the process, stop
         the loop, join the thread with a timeout. A hung agent has no right
-        to hold up Houdini's shutdown — hence the timeout at every step."""
-        if not self._worker.isRunning():
+        to hold up Houdini's shutdown — hence the timeout at every step.
+
+        The client itself survives: `start()` builds a new worker. Callers
+        keep their signal connections, which is the whole point — they are
+        wired to this object, not to the thread behind it.
+        """
+        worker = self._worker
+        if worker is None or not worker.isRunning():
             return
-        future = self._worker.submit(self._worker.do_stop())
+        future = worker.submit(worker.do_stop())
         with contextlib.suppress(Exception):
             future.result(timeout=10.0)
-        self._worker.request_loop_stop()
-        self._worker.wait(5000)
+        worker.request_loop_stop()
+        worker.wait(5000)
+        self._worker = None
+        self._retired.append(worker)
         self._running = False
         self._agent_info = None
         self.disconnected.emit("")
@@ -875,33 +927,36 @@ class AcpClient(QtCore.QObject):
     # --- sessions ---------------------------------------------------------------
 
     def authenticate(self, method_id: str) -> None:
-        self._worker.submit(self._worker.do_authenticate(method_id))
+        self._submit(lambda w: w.do_authenticate(method_id))
 
     def logout(self) -> None:
         """Only if `agent_info().supports_logout` — otherwise the agent
         never declared this method, and calling it is guaranteed to error
         out."""
-        self._worker.submit(self._worker.do_logout())
+        self._submit(lambda w: w.do_logout())
 
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None:
-        self._worker.submit(self._worker.do_new_session(cwd, mcp_servers))
+        self._submit(lambda w: w.do_new_session(cwd, mcp_servers))
 
     def prompt(self, session_id: str, blocks: list[dict]) -> None:
-        self._worker.submit(self._worker.do_prompt(session_id, blocks))
+        self._submit(lambda w: w.do_prompt(session_id, blocks))
 
     def cancel(self, session_id: str) -> None:
-        self._worker.submit(self._worker.do_cancel(session_id))
+        self._submit(lambda w: w.do_cancel(session_id))
 
     def set_mode(self, session_id: str, mode_id: str) -> None:
-        self._worker.submit(self._worker.do_set_mode(session_id, mode_id))
+        self._submit(lambda w: w.do_set_mode(session_id, mode_id))
 
     def set_config_option(self, session_id: str, config_id: str, value: str) -> None:
         """Change an agent-side setting: model, reasoning effort, fast mode."""
-        self._worker.submit(self._worker.do_set_config_option(session_id, config_id, value))
+        self._submit(lambda w: w.do_set_config_option(session_id, config_id, value))
 
     def answer_permission(self, request_key: str, option_id: str | None) -> None:
         """`option_id=None` — "cancelled", results in a `DeniedOutcome`."""
-        self._worker.resolve_permission(request_key, option_id)
+        worker = self._worker
+        if worker is None or not worker.isRunning() or worker.loop.is_closed():
+            return
+        worker.resolve_permission(request_key, option_id)
 
     # --- internals ----------------------------------------------------------
 

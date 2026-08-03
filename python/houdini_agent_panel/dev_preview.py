@@ -78,9 +78,22 @@ class PreviewPanel(QtWidgets.QWidget):
             "approval",
         )
         self.composer.set_usage(Usage(total_tokens=8_200))
-        self.composer.set_models(
-            [("sonnet", "Claude Sonnet 4.5"), ("opus", "Claude Opus 4.1")],
-            "sonnet",
+        # Shaped exactly like `client.ConfigOption` — the preview feeds the
+        # composer the same duck-typed data a real agent's `configOptions`
+        # would arrive as.
+        self.composer.set_config_options(
+            [
+                SimpleNamespace(
+                    id="model",
+                    name="Model",
+                    description="Model",
+                    current_value="sonnet",
+                    choices=(
+                        SimpleNamespace(value="sonnet", name="Claude Sonnet 4.5"),
+                        SimpleNamespace(value="opus", name="Claude Opus 4.1"),
+                    ),
+                ),
+            ]
         )
         self.composer.enable_preview_microphone()
         self.composer.set_buddy("crag")

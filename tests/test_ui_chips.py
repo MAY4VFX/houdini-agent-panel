@@ -1,4 +1,4 @@
-"""Тесты `ui/chips.py` — `HeaderBar` и `ModeChip`. Нужен `QApplication` (фикстура `qapp`)."""
+"""Tests for `ui/chips.py` — `HeaderBar` and `ModeChip`. Needs `QApplication` (the `qapp` fixture)."""
 
 from __future__ import annotations
 

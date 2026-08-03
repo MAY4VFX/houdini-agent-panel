@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from ..network import Fetcher
 
 _RAIL_WIDTH = 736
+#: Floor for the centered rail — see `Composer._MIN_RAIL_WIDTH`.
+_MIN_RAIL_WIDTH = 180
 
 
 class _Section(QtWidgets.QWidget):
@@ -104,11 +106,22 @@ class SettingsView(QtWidgets.QWidget):
         close_button.setToolTip("Back")
         close_button.clicked.connect(self.closed.emit)
 
+        # The back arrow lines up with the left edge of the settings rail
+        # below it, not with the panel's own edge. Full width put it out at
+        # the very border, where an open conversation drawer covered it —
+        # and the one control that leaves settings has no business hiding.
+        self._header_rail = QtWidgets.QWidget()
+        header_rail_layout = QtWidgets.QHBoxLayout(self._header_rail)
+        header_rail_layout.setContentsMargins(0, 10, 0, 4)
+        header_rail_layout.setSpacing(6)
+        header_rail_layout.addWidget(close_button)
+        header_rail_layout.addWidget(QtWidgets.QLabel("Settings"))
+        header_rail_layout.addStretch(1)
+
         header = QtWidgets.QHBoxLayout()
-        header.setContentsMargins(12, 10, 12, 4)
-        header.addWidget(close_button)
-        header.addWidget(QtWidgets.QLabel("Settings"))
-        header.addStretch(1)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setAlignment(QtCore.Qt.AlignHCenter)
+        header.addWidget(self._header_rail)
 
         self._agents_view = AgentsView(fetch=fetch)
         # An installed/custom agent list change is exactly the kind of
@@ -184,6 +197,11 @@ class SettingsView(QtWidgets.QWidget):
             data_section,
         ):
             rail_layout.addWidget(section)
+        # Slack goes to the bottom, not between the sections. The scroll area
+        # stretches its content to the viewport, and without this the spare
+        # height was shared out among the section bodies, drifting them
+        # apart into a form with holes in it.
+        rail_layout.addStretch(1)
         self._rail = rail
 
         content = QtWidgets.QWidget()
@@ -205,12 +223,25 @@ class SettingsView(QtWidgets.QWidget):
 
         self.reload()
 
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        """Don't let the rail's fixed width become the panel's minimum.
+
+        Same reason as `Composer.minimumSizeHint`: a `setFixedWidth` child
+        propagates its width upward as a minimum, and the settings page is
+        part of the panel's page stack, so its rail was pinning the whole
+        panel wide.
+        """
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(min(hint.width(), _MIN_RAIL_WIDTH), hint.height())
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         # Same centered-rail rule as the header and composer (chips.py,
         # composer.py): a fixed reading width up to 736px, shrinking only
         # when the panel itself is narrower than that.
-        self._rail.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
+        width = max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 28))
+        self._rail.setFixedWidth(width)
+        self._header_rail.setFixedWidth(width)
 
     # --- public -----------------------------------------------------
 

@@ -1,5 +1,6 @@
-"""Тесты экрана настроек: набор строго из design.md, чтение/запись settings.json,
-плюс встроенный блок «Агенты» (см. ui/agents.py и ui/panel.py)."""
+"""Settings screen tests: the field set straight from design.md, reading and
+writing settings.json, plus the embedded "Agents" block (see ui/agents.py and
+ui/panel.py)."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from houdini_agent_panel import paths
 from houdini_agent_panel import settings as settings_module
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 from houdini_agent_panel.ui.agents import AgentsView
+from houdini_agent_panel.ui.qt import QtCore
 from houdini_agent_panel.ui.settings_view import SettingsView
 
 
@@ -92,8 +94,8 @@ def test_copy_diagnostics_sets_clipboard(qapp, monkeypatch):
 
 
 def test_reload_does_not_resave_settings(qapp, monkeypatch):
-    """Перечитывание не должно порождать запись — иначе внешний touch файла
-    зациклился бы через `_on_field_changed`."""
+    """A reload must not cause a write — otherwise an external touch of the
+    file would loop back through `_on_field_changed`."""
     view = SettingsView()
     calls = []
     monkeypatch.setattr(settings_module, "save", lambda s, path=None: calls.append(s))
@@ -105,7 +107,7 @@ def test_reload_does_not_resave_settings(qapp, monkeypatch):
 
 
 def test_agents_section_is_embedded_at_top(qapp):
-    """The old standalone «Агенты» screen is gone: its content lives inside
+    """The old standalone "Agents" screen is gone: its content lives inside
     settings now, as an `AgentsView` instance, inside the first (topmost)
     collapsible section."""
     view = SettingsView()
@@ -136,8 +138,8 @@ def test_set_agents_forwards_to_embedded_view(qapp, monkeypatch):
 
 
 def test_installing_agent_refreshes_default_agent_combo_without_recreating_panel(qapp, monkeypatch):
-    """«После установки агента из настроек он должен без перезапуска панели
-    появиться в меню чипа» — here we check the SettingsView-side half of
+    """"Install an agent from settings and it shows up in the chip menu with
+    no panel restart" — here we check the SettingsView-side half of
     that: the default-agent combo (and `changed`, which the panel listens to
     for the chip menu) update from the same `installed_changed` signal."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
@@ -156,3 +158,23 @@ def test_installing_agent_refreshes_default_agent_combo_without_recreating_panel
     options = {view._default_agent_combo.itemData(i) for i in range(view._default_agent_combo.count())}
     assert "agent-a" in options
     assert changed == [True]
+
+
+def test_back_button_lines_up_with_the_settings_rail(qapp):
+    """Full width put the back arrow at the panel's own edge, where an open
+    conversation drawer covered it — and it is the only way out of settings."""
+    view = SettingsView()
+    view.resize(1000, 700)
+    view.show()
+    qapp.processEvents()
+
+    header_left = view._header_rail.mapTo(view, QtCore.QPoint(0, 0)).x()
+    rail_left = view._rail.mapTo(view, QtCore.QPoint(0, 0)).x()
+
+    assert view._header_rail.width() == view._rail.width()
+    assert abs(header_left - rail_left) <= 1
+
+
+def test_settings_screen_does_not_pin_the_panel_wide(qapp):
+    view = SettingsView()
+    assert view.minimumSizeHint().width() <= 200

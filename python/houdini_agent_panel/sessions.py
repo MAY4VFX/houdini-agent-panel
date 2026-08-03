@@ -44,6 +44,11 @@ class SessionState:
     current_mode_id: str | None = None
     available_modes: list[SessionMode] = field(default_factory=list)
     available_commands: list[AvailableCommand] = field(default_factory=list)
+    #: The agent's own settings for this session (model, reasoning effort,
+    #: fast mode…) as `client.ConfigOption`. Kept per session because that's
+    #: the scope ACP gives them, and because switching conversations has to
+    #: restore the chips the artist saw last time.
+    config_options: list = field(default_factory=list)
     entries: list[Entry] = field(default_factory=list)  # the feed, see §8
     usage: Usage | None = None
     busy: bool = False

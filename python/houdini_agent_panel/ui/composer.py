@@ -1,16 +1,17 @@
-"""Composer — поле ввода панели: рост под текст, вложения, слеш-команды, голос.
+"""Composer — the panel's input field: growth, attachments, slash commands, voice.
 
-Правило проекта живёт здесь буквально построчно: каждый контрол на панели
-показывается только если `AgentInfo` (см. `docs/architecture.md` §6) реально
-объявил соответствующую capability. Ничего не решаем и не изобретаем поверх
-протокола — агент не прислал `supports_image`/`supports_embedded_context` —
-кнопки «+» нет; нет `availableModes` — нет чипа режима; нет `audio` и не задан
-whisper — нет микрофона.
+The project rule lives here almost line by line: a control shows up only if
+`AgentInfo` (see `docs/architecture.md` §6) actually declared the matching
+capability. We decide nothing and invent nothing on top of the protocol — no
+`supports_image`/`supports_embedded_context`, no "+" button; no
+`availableModes`, no mode chip; no `configOptions`, no model picker; no
+`audio` and no whisper endpoint, no microphone.
 
-`submitted` отдаёт `list[dict]` в формате контент-блоков ACP (см.
-`docs/facts/acp-sdk.md` §4) — ключи ровно на проводе (`"mimeType"`, а не
-`"mime_type"`), потому что `client.py` строит из них pydantic-модели через
-`cls(**block)`, а поля этих моделей объявлены с алиасами camelCase.
+`submitted` hands out `list[dict]` in ACP content-block shape (see
+`docs/facts/acp-sdk.md` §4) — keys exactly as they go on the wire
+(`"mimeType"`, not `"mime_type"`), because `client.py` builds pydantic models
+out of them via `cls(**block)`, and those models' fields are declared with
+camelCase aliases.
 """
 
 from __future__ import annotations
@@ -32,16 +33,22 @@ if TYPE_CHECKING:
 _MIN_LINES = 1
 _MAX_LINES = 6
 _MAX_POPUP_HEIGHT = 360
-_DEFAULT_PLACEHOLDER = "Что изменить в сцене?"
+_DEFAULT_PLACEHOLDER = "What should change in the scene?"
 _RAIL_WIDTH = 736
+#: The composer never forces the panel wider than this. Its own rail wants
+#: 736px, and a `setFixedWidth` child hands its width straight to the parent's
+#: minimum — which pinned the whole panel at 736px and made it impossible to
+#: dock the panel in a normal, narrow Houdini pane.
+_MIN_RAIL_WIDTH = 180
 
 
 class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
-    """Поле ввода: Enter отправляет, Shift+Enter — перенос строки.
+    """The input field: Enter sends, Shift+Enter breaks the line.
 
-    Пока открыт слеш-попап (`popup_active`), стрелки/Enter/Esc не редактируют
-    текст, а листают и закрывают попап — сам виджет не знает о содержимом
-    попапа, только сигнализирует композеру о намерении пользователя.
+    While the slash popup is up (`popup_active`), arrows/Enter/Esc don't edit
+    text — they move through the popup and close it. The widget itself knows
+    nothing about the popup's contents, it only reports the intent to the
+    composer.
     """
 
     submit_requested = Signal()
@@ -55,7 +62,7 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
         self.setTabChangesFocus(True)
         self.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
 
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802 - Qt-переопределение
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802 - Qt override
         key = event.key()
         if self.popup_active and key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
             self.navigate_requested.emit(-1 if key == QtCore.Qt.Key_Up else 1)
@@ -71,7 +78,7 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
                 event.accept()
                 return
             if event.modifiers() & QtCore.Qt.ShiftModifier:
-                super().keyPressEvent(event)  # перенос строки
+                super().keyPressEvent(event)  # line break
                 return
             self.submit_requested.emit()
             event.accept()
@@ -80,9 +87,9 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
 
 
 class _CommandPopup(QtWidgets.QListWidget):
-    """Список слеш-команд над полем ввода. Обычный дочерний виджет, не
-    системный попап — так навигация целиком остаётся в руках `_GrowingTextEdit`
-    (клавиатурный фокус не покидает поле ввода)."""
+    """The slash-command list above the input field. An ordinary child widget,
+    not a system popup — that keeps navigation entirely in `_GrowingTextEdit`'s
+    hands (keyboard focus never leaves the input field)."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -141,23 +148,23 @@ class _CommandPopup(QtWidgets.QListWidget):
 
 
 def _format_tokens(n: int) -> str:
-    """Компактное число для счётчика токенов: 950, 1.2K, 3M."""
+    """Compact number for the token counter: 950, 1.2K, 3M."""
     if n < 1000:
         return str(n)
     for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
         if n >= threshold:
             text = f"{n / threshold:.1f}".rstrip("0").rstrip(".")
             return f"{text}{suffix}"
-    return str(n)  # pragma: no cover - недостижимо при n >= 1000
+    return str(n)  # pragma: no cover - unreachable for n >= 1000
 
 
 def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
-    """Файл -> готовый ACP content-блок, под ту capability, что реально есть.
+    """File -> a ready ACP content block, shaped by the capability that exists.
 
-    Картинка при `supports_image` — блоком `image`. Иначе, при
-    `supports_embedded_context` — встроенный ресурс (`resource`): текстовый
-    файл — как текст, иначе — blob в base64. Ни одна из двух capability не
-    подошла — `None`: приложить нечем, агент не поймёт этот блок.
+    An image with `supports_image` becomes an `image` block. Otherwise, with
+    `supports_embedded_context`, an embedded `resource`: a text file as text,
+    anything else as a base64 blob. Neither capability fits — `None`: there is
+    nothing to attach with, and the agent wouldn't understand the block.
     """
     mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     if info.supports_image and mime_type.startswith("image/"):
@@ -253,12 +260,12 @@ class _ComposerSurface(QtWidgets.QFrame):
 
 
 class Composer(QtWidgets.QWidget):
-    """Низ панели: growing-поле, «+», микрофон, чип режима, счётчик, отправка/стоп."""
+    """Bottom of the panel: growing field, "+", microphone, chips, counter, send/stop."""
 
-    submitted = Signal(list)  # list[dict] — готовые контент-блоки ACP
+    submitted = Signal(list)  # list[dict] — ready ACP content blocks
     cancelled = Signal()
     mode_selected = Signal(str)
-    model_selected = Signal(str)
+    config_option_selected = Signal(str, str)  # config_id, value
     attachment_rejected = Signal(str)
     buddy_selected = Signal(str)
 
@@ -269,10 +276,11 @@ class Composer(QtWidgets.QWidget):
         self._blocked = False
         self._attachments: list[dict] = []
         self._all_commands: list["AvailableCommand"] = []
+        self._config_chips: list[ChoiceButton] = []
 
         self.setAcceptDrops(True)
 
-        # --- вложения (строка чипов над полем, видна только если есть что показать)
+        # --- attachments (a chip row above the field, only shown when there is something)
         self._attachments_bar = QtWidgets.QWidget()
         # Without a vertical Maximum the bar takes every spare pixel the
         # column has and the whole input card balloons to fill the panel —
@@ -285,7 +293,7 @@ class Composer(QtWidgets.QWidget):
         self._attachments_layout.setSpacing(6)
         self._attachments_bar.setVisible(False)
 
-        # --- поле ввода
+        # --- input field
         self._text_edit = _GrowingTextEdit(self)
         self._text_edit.setObjectName("composerInput")
         self._text_edit.setPlaceholderText(_DEFAULT_PLACEHOLDER)
@@ -302,11 +310,11 @@ class Composer(QtWidgets.QWidget):
 
         self._popup = _CommandPopup(self)
 
-        # --- левые кнопки: вложения, голос
+        # --- left-hand buttons: attachments, voice
         self._attach_button = QtWidgets.QToolButton()
         self._attach_button.setObjectName("composerTool")
         self._attach_button.setText("+")
-        self._attach_button.setToolTip("Прикрепить файл")
+        self._attach_button.setToolTip("Attach a file")
         self._attach_button.setVisible(False)
         self._attach_button.clicked.connect(self._on_attach_clicked)
 
@@ -315,24 +323,28 @@ class Composer(QtWidgets.QWidget):
         self._voice_button.recorded_audio.connect(self._on_voice_audio)
         self._voice_button.transcribed_text.connect(self._on_voice_text)
 
-        # --- чип режима: настоящий (chips.py) или временная заглушка
+        # --- mode chip, straight from the session's availableModes
         self.mode_chip = ModeChip(self)
         self.mode_chip.mode_selected.connect(self.mode_selected.emit)
 
-        # Модель — такой же data-driven control: по умолчанию скрыта и
-        # появляется только если вызывающая сторона передала варианты.
-        self.model_chip = ChoiceButton(self)
-        self.model_chip.activated.connect(self._on_model_activated)
-        self.model_chip.setVisible(False)
+        # --- the agent's own settings (model, reasoning effort, fast mode…).
+        # One chip per option the agent declared, rebuilt whenever it changes
+        # its mind. Empty by default: an agent that offers nothing gets no
+        # chips rather than an invented "model" dropdown.
+        self._config_bar = QtWidgets.QWidget()
+        self._config_layout = QtWidgets.QHBoxLayout(self._config_bar)
+        self._config_layout.setContentsMargins(0, 0, 0, 0)
+        self._config_layout.setSpacing(3)
+        self._config_bar.setVisible(False)
 
-        # --- правая сторона: счётчик, отправка/стоп
+        # --- right-hand side: counter, send/stop
         self._usage_label = QtWidgets.QLabel()
         self._usage_label.setVisible(False)
 
         self._send_button = QtWidgets.QPushButton("↑")
         self._send_button.setObjectName("composerSend")
         self._send_button.setFixedSize(32, 32)
-        self._send_button.setToolTip("Отправить")
+        self._send_button.setToolTip("Send")
         self._send_button.clicked.connect(self._on_send_clicked)
 
         action_row = QtWidgets.QHBoxLayout()
@@ -341,7 +353,7 @@ class Composer(QtWidgets.QWidget):
         action_row.addWidget(self.mode_chip)
         action_row.addWidget(self._attach_button)
         action_row.addStretch(1)
-        action_row.addWidget(self.model_chip)
+        action_row.addWidget(self._config_bar)
         action_row.addWidget(self._usage_label)
         action_row.addSpacing(12)
         action_row.addWidget(self._voice_button)
@@ -407,11 +419,24 @@ class Composer(QtWidgets.QWidget):
 
         self._adjust_text_height()
 
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        """Never demand the rail's full width from the panel around us.
+
+        `_surface.setFixedWidth()` makes the surface's minimum equal to its
+        maximum, and Qt hands a child's minimum straight up to the parent —
+        so the composer used to claim a 736px minimum, the panel inherited
+        it, and Houdini could not dock the panel any narrower than that.
+        """
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(min(hint.width(), _MIN_RAIL_WIDTH), hint.height())
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._surface.setFixedWidth(min(_RAIL_WIDTH, max(0, self.width() - 28)))
-        # Layout геометрию применяет уже после resizeEvent, поэтому X считаем
-        # из того же center rule напрямую, а не читаем устаревший mapTo().
+        self._surface.setFixedWidth(
+            max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 28))
+        )
+        # The layout applies geometry only after resizeEvent, so X comes from
+        # the same centering rule directly instead of a stale mapTo().
         surface_x = (self.width() - self._surface.width()) // 2
         surface_y = self._surface.y()
         self._buddy.move(
@@ -420,14 +445,14 @@ class Composer(QtWidgets.QWidget):
         )
         self._buddy.raise_()
 
-    # --- публичный контракт (docs/architecture.md §10) --------------------
+    # --- public contract (docs/architecture.md §10) -----------------------
 
     def set_capabilities(self, info: "AgentInfo | None", whisper: str) -> None:
-        """Пересчитать видимость «+» и микрофона под свежий `AgentInfo`.
+        """Recompute the visibility of "+" and the microphone for a fresh `AgentInfo`.
 
-        `info=None` (агент отключился/ещё не подключён) — оба контрола прячутся,
-        кроме случая, когда микрофону хватает одного whisper-эндпоинта: это
-        решает сам `VoiceButton.configure`, а не эта функция.
+        `info=None` (the agent disconnected, or hasn't connected yet) hides
+        both controls — except when a whisper endpoint alone is enough for
+        the microphone, which `VoiceButton.configure` decides, not this.
         """
         self._info = info
         can_attach = info is not None and (info.supports_image or info.supports_embedded_context)
@@ -436,25 +461,63 @@ class Composer(QtWidgets.QWidget):
         self._voice_button.configure(supports_audio=supports_audio, whisper_endpoint=whisper)
 
     def set_modes(self, modes: list["SessionMode"], current_id: str | None) -> None:
-        """Фасад над `mode_chip.set_modes` — панель кормит режимы сессии сюда,
-        не дотягиваясь до вложенного виджета напрямую (architecture.md §10:
-        общение между виджетами только через публичный API, не через чужие
-        приватные/вложенные атрибуты)."""
+        """Facade over `mode_chip.set_modes` — the panel feeds session modes
+        here instead of reaching into the nested widget (architecture.md §10:
+        widgets talk through public API, never through someone else's
+        private or nested attributes)."""
         self.mode_chip.set_modes(modes, current_id)
 
-    def set_models(self, models: list[tuple[str, str]], current_id: str | None) -> None:
-        """Показать выбор модели только для списка, пришедшего от агента."""
-        self.model_chip.blockSignals(True)
-        try:
-            self.model_chip.clear()
-            for model_id, label in models:
-                self.model_chip.addItem(label, model_id)
-            index = self.model_chip.findData(current_id)
-            if index >= 0:
-                self.model_chip.setCurrentIndex(index)
-        finally:
-            self.model_chip.blockSignals(False)
-        self.model_chip.setVisible(bool(models))
+    def set_config_options(self, options: list) -> None:
+        """Draw one chip per agent-side setting, and only for what it sent.
+
+        This is where the model picker lives. ACP has no separate "model"
+        method: an agent publishes model, reasoning effort and fast mode as
+        session config options, each with its own choices and current value.
+        Everything visible here — labels, order, which options exist at all —
+        is the agent's, so an agent with no options simply gets no chips.
+
+        Each element is duck-typed: `id`, `name`, `current_value` and
+        `choices` of `value`/`name`. That keeps this widget from importing
+        `client.py`, exactly like the rest of `ui/`.
+        """
+        while self._config_layout.count():
+            item = self._config_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._config_chips = []
+
+        for option in options:
+            choices = list(getattr(option, "choices", ()) or ())
+            if len(choices) < 2:
+                # Nothing to pick between — a one-entry dropdown is a label
+                # pretending to be a control.
+                continue
+            chip = ChoiceButton(self._config_bar)
+            chip.setToolTip(
+                getattr(option, "description", "") or getattr(option, "name", "") or ""
+            )
+            chip.blockSignals(True)
+            try:
+                for choice in choices:
+                    chip.addItem(
+                        str(getattr(choice, "name", "") or getattr(choice, "value", "")),
+                        str(getattr(choice, "value", "")),
+                    )
+                index = chip.findData(str(getattr(option, "current_value", "") or ""))
+                if index >= 0:
+                    chip.setCurrentIndex(index)
+            finally:
+                chip.blockSignals(False)
+            option_id = str(getattr(option, "id", "") or "")
+            chip.activated.connect(
+                lambda index, c=chip, oid=option_id: self._on_config_activated(c, oid, index)
+            )
+            self._config_layout.addWidget(chip)
+            self._config_chips.append(chip)
+
+        self._config_bar.setVisible(bool(self._config_chips))
 
     def set_buddy(self, key: str) -> None:
         self._buddy.set_buddy(key)
@@ -468,19 +531,19 @@ class Composer(QtWidgets.QWidget):
         return QtCore.QRect(top_left, self._surface.size())
 
     def enable_preview_microphone(self) -> None:
-        """Показать affordance в standalone preview без выдуманной capability."""
+        """Show the affordance in the standalone preview without inventing a capability."""
         self._voice_button.setVisible(True)
-        self._voice_button.setToolTip("Микрофон (в preview без аудиобэкенда)")
+        self._voice_button.setToolTip("Microphone (no audio backend in preview)")
 
-    def _on_model_activated(self, index: int) -> None:
-        model_id = self.model_chip.itemData(index)
-        if model_id:
-            self.model_selected.emit(str(model_id))
+    def _on_config_activated(self, chip: ChoiceButton, option_id: str, index: int) -> None:
+        value = chip.itemData(index)
+        if option_id and value:
+            self.config_option_selected.emit(option_id, str(value))
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
         self._send_button.setText("■" if busy else "↑")
-        self._send_button.setToolTip("Остановить" if busy else "Отправить")
+        self._send_button.setToolTip("Stop" if busy else "Send")
 
     def set_commands(self, commands: list["AvailableCommand"]) -> None:
         self._all_commands = list(commands)
@@ -512,9 +575,9 @@ class Composer(QtWidgets.QWidget):
         self._usage_label.setVisible(True)
 
     def block_input(self, reason: str) -> None:
-        """Блокирует ТОЛЬКО поле ввода и кнопку отправки/вложений/голоса —
-        лента, прокрутка, закрытие панели и вся остальная Houdini не в курсе,
-        что композер сейчас нельзя использовать (design.md)."""
+        """Blocks ONLY the input field and the send/attach/voice buttons — the
+        feed, scrolling, closing the panel and the whole rest of Houdini have
+        no idea the composer is currently unusable (design.md)."""
         self._blocked = True
         self._text_edit.setEnabled(False)
         self._text_edit.setPlaceholderText(reason)
@@ -531,19 +594,31 @@ class Composer(QtWidgets.QWidget):
         self._voice_button.setEnabled(True)
 
     def is_input_blocked(self) -> bool:
-        """Не из architecture.md §10, но нужна вызывающему коду (панель проверяет
-        это в тестах и, вероятно, в логике самой панели) — простой геттер к
-        состоянию, которое `block_input`/`unblock_input` уже держат."""
+        """Not part of architecture.md §10, but calling code needs it (the
+        panel checks this in tests and, most likely, in its own logic) — a
+        plain getter for the state `block_input`/`unblock_input` already keep."""
         return self._blocked
 
-    # --- вложения: «+», drag&drop -----------------------------------------
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:  # noqa: N802 - Qt override
+        """Take the slash palette down with the composer.
+
+        The palette is reparented to the panel so it isn't clipped by the
+        short composer widget (`_position_popup`), which also means hiding
+        the composer no longer hides it. Switching to settings with a slash
+        popup open used to leave a list of commands floating over the
+        settings form.
+        """
+        super().hideEvent(event)
+        self._hide_popup()
+
+    # --- attachments: "+", drag & drop ------------------------------------
 
     def add_attachment(self, path: Path) -> bool:
-        """Добавить файл как вложение к следующей отправке.
+        """Add a file as an attachment for the next send.
 
-        `False` — capability текущего агента не позволяет приложить именно
-        этот файл (не картинка при отсутствии `embeddedContext`, либо агент
-        ещё не подключён).
+        `False` — the current agent's capabilities don't allow this
+        particular file (not an image, and no `embeddedContext`), or the
+        agent isn't connected yet.
         """
         if self._info is None:
             return False
@@ -605,8 +680,8 @@ class Composer(QtWidgets.QWidget):
             item = self._attachments_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                # `setParent(None)` — сразу: иначе чип ещё числится ребёнком
-                # композера до следующего цикла событий.
+                # `setParent(None)` right away: otherwise the chip still
+                # counts as a child of the composer until the next event-loop pass.
                 widget.setParent(None)
                 widget.deleteLater()
         for index, block in enumerate(self._attachments):
@@ -657,15 +732,25 @@ class Composer(QtWidgets.QWidget):
 
     def dropEvent(self, event: QtGui.QDropEvent) -> None:  # noqa: N802
         added_any = False
+        rejected: list[str] = []
         for url in event.mimeData().urls():
-            if url.isLocalFile() and self.add_attachment(Path(url.toLocalFile())):
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if self.add_attachment(path):
                 added_any = True
+            else:
+                rejected.append(path.name)
+        if rejected:
+            # Same rule as the "+" button: a file is never dropped without a
+            # word. Silence here read as "drag and drop doesn't work".
+            self.attachment_rejected.emit("This agent can't take: " + ", ".join(rejected))
         if added_any:
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    # --- голос -------------------------------------------------------------
+    # --- voice -------------------------------------------------------------
 
     def _on_voice_audio(self, block: dict) -> None:
         self._attachments.append(block)
@@ -679,7 +764,7 @@ class Composer(QtWidgets.QWidget):
         cursor.movePosition(QtGui.QTextCursor.End)
         self._text_edit.setTextCursor(cursor)
 
-    # --- отправка ------------------------------------------------------------
+    # --- sending -------------------------------------------------------------
 
     def _gather_blocks(self) -> list[dict]:
         blocks: list[dict] = []
@@ -706,7 +791,7 @@ class Composer(QtWidgets.QWidget):
         else:
             self._submit()
 
-    # --- рост поля ввода -----------------------------------------------------
+    # --- input field growth --------------------------------------------------
 
     def _on_text_changed(self) -> None:
         self._adjust_text_height()
@@ -758,7 +843,7 @@ class Composer(QtWidgets.QWidget):
             else QtCore.Qt.ScrollBarAlwaysOff
         )
 
-    # --- слеш-команды -----------------------------------------------------
+    # --- slash commands ---------------------------------------------------
 
     def _slash_query(self) -> str | None:
         text = self._text_edit.toPlainText()

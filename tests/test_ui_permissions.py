@@ -1,4 +1,4 @@
-"""Тесты `ui/permissions.py::PermissionRow`. Нужен `QApplication` (фикстура `qapp`)."""
+"""Tests for `ui/permissions.py::PermissionRow`. Needs `QApplication` (the `qapp` fixture)."""
 
 from __future__ import annotations
 
@@ -63,8 +63,8 @@ def test_second_click_does_not_emit_again(qapp):
     row.answered.connect(lambda key, option_id: seen.append((key, option_id)))
 
     row._buttons["allow_once"].click()
-    # Кнопка задизейблена, но programmatic .click() всё равно может дойти до
-    # слота — проверяем, что повторный ответ не проходит логически.
+    # The button is disabled, but a programmatic .click() can still reach the
+    # slot — check that a second answer doesn't get through logically either.
     row._on_clicked("allow_always")
 
     assert seen == [("req1", "allow_once")]
@@ -74,9 +74,9 @@ def test_row_constructed_already_answered_shows_history_disabled(qapp):
     row = PermissionRow(_view(answered="allow_once"))
 
     assert all(not button.isEnabled() for button in row._buttons.values())
-    # Строка (`row`) не показана целиком (нет родителя-окна) — isVisible()
-    # ребёнка в PySide всегда False без показанного предка, поэтому проверяем
-    # именно наш собственный флаг видимости через isHidden().
+    # The row isn't fully shown (it has no window parent) — a child's
+    # isVisible() is always False in PySide without a shown ancestor, so we
+    # check our own visibility flag via isHidden().
     assert row._status_label.isHidden() is False
     assert "Allow" in row._status_label.text()
 

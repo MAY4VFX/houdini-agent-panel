@@ -207,3 +207,40 @@ def test_long_title_is_elided_not_left_to_overflow_the_drawer(qapp):
     assert button.text() != long_title
     assert button.text().endswith("…")
     assert button.toolTip() == long_title
+
+
+def test_drawer_starts_below_the_header_it_is_toggled_from(qapp):
+    """The drawer must never cover the control that closes it.
+
+    The only toggle is the header's sidebar button; a drawer spanning the
+    full height sat right on top of it, so an open drawer could not be
+    closed from the panel at all.
+    """
+    from PySide6 import QtWidgets
+
+    parent = QtWidgets.QWidget()
+    parent.resize(900, 700)
+    drawer = ConversationDrawer(parent)
+    drawer.set_top_inset(38)
+    drawer.open_drawer()
+    drawer._animation.setCurrentTime(drawer._animation.duration())
+
+    assert drawer.y() == 38
+    assert drawer.height() == 700 - 38
+
+
+def test_drawer_reports_its_open_state(qapp):
+    from PySide6 import QtWidgets
+
+    parent = QtWidgets.QWidget()
+    parent.resize(900, 700)
+    drawer = ConversationDrawer(parent)
+    states: list[bool] = []
+    drawer.open_state_changed.connect(states.append)
+
+    drawer.open_drawer()
+    assert drawer.is_open() is True
+    drawer.close_drawer()
+    assert drawer.is_open() is False
+
+    assert states == [True, False]

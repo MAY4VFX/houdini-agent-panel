@@ -180,14 +180,14 @@ def test_custom_agent_add_and_remove(qapp):
     changed = []
     view.installed_changed.connect(lambda: changed.append(True))
 
-    view._custom_name.setText("Моя команда")
+    view._custom_name.setText("My command")
     view._custom_command.setText("/usr/bin/my-acp-agent")
     view._custom_args.setText("--flag value")
     view._on_add_custom()
 
     current = settings_module.load()
     assert len(current.custom_agents) == 1
-    assert current.custom_agents[0].name == "Моя команда"
+    assert current.custom_agents[0].name == "My command"
     assert current.custom_agents[0].args == ["--flag", "value"]
 
     assert view._custom_rows_layout.count() == 1

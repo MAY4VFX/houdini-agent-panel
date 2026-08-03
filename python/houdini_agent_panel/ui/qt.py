@@ -1,28 +1,29 @@
-"""Единственная точка импорта Qt во всём проекте.
+"""The single Qt import point for the whole project.
 
-Houdini приносит свой Qt: на 22.0 это PySide6, на 20.5 — PySide2. Шим
-``hutil.PySide`` — код самой Houdini, он уже знает, какая из них живая, поэтому
-прямые ``import PySide6`` запрещены правилами проекта: они соберутся на одной
-версии и развалятся на другой.
+Houdini brings its own Qt: PySide6 on 22.0, PySide2 on 20.5. The
+``hutil.PySide`` shim is Houdini's own code and already knows which one is
+live, which is why a direct ``import PySide6`` is forbidden by the project's
+rules: it would build on one version and fall apart on the other.
 
-Вне Houdini (юнит-тесты, линтеры) ``hutil`` нет. Там берём PySide6 напрямую —
-это тот же Qt, что в H22, так что тесты проверяют настоящий код, а не заглушку.
+Outside Houdini (unit tests, linters) there is no ``hutil``. There we take
+PySide6 directly — the same Qt as in H22, so the tests exercise the real code
+rather than a stand-in.
 
-Импортировать так::
+Import like this::
 
     from houdini_agent_panel.ui.qt import QtCore, QtGui, QtWidgets, Signal, Slot
 """
 
 from __future__ import annotations
 
-#: Откуда реально приехал Qt. Полезно в диагностике для баг-репортов.
+#: Where Qt actually came from. Useful in diagnostics for bug reports.
 QT_SOURCE: str
 
-try:  # внутри Houdini
+try:  # inside Houdini
     from hutil.PySide import QtCore, QtGui, QtWidgets  # type: ignore[import-not-found]
 
     QT_SOURCE = "hutil.PySide"
-except ImportError:  # pragma: no cover - вне Houdini
+except ImportError:  # pragma: no cover - outside Houdini
     try:
         from PySide6 import QtCore, QtGui, QtWidgets  # type: ignore[no-redef]
 
@@ -32,14 +33,14 @@ except ImportError:  # pragma: no cover - вне Houdini
 
         QT_SOURCE = "PySide2"
 
-# PySide2 и PySide6 расходятся в мелочах, которые всплывают в каждом файле UI.
-# Сводим их здесь один раз, чтобы остальной код не знал о разнице.
+# PySide2 and PySide6 differ in small ways that surface in every UI file.
+# They're reconciled here once so the rest of the code never sees the split.
 Signal = QtCore.Signal
 Slot = QtCore.Slot
 Property = QtCore.Property
 Qt = QtCore.Qt
 
-#: PySide6 переехал: ``QAction`` теперь в QtGui, в PySide2 он был в QtWidgets.
+#: PySide6 moved things: ``QAction`` now lives in QtGui, PySide2 had it in QtWidgets.
 QAction = getattr(QtGui, "QAction", None) or QtWidgets.QAction  # type: ignore[attr-defined]
 
 QT_VERSION = QtCore.qVersion()

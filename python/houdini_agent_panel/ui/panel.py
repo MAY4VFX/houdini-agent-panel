@@ -115,16 +115,23 @@ class _RefreshWorker(QtCore.QThread):
         self.done.emit(result, entries)
 
 
-
-
-#: Names for the featured six, for when the registry hasn't arrived yet. Not
-#: a source of truth — the registry always wins — this only keeps the chip
 #: How long to wait for the agent to acknowledge a stop before releasing the
 #: input ourselves. `session/cancel` is a notification — an agent is free to
 #: never answer it, and the panel must not stay locked because of that.
 _CANCEL_GRACE_MS = 4000
 
+#: How long `session/new` may take before the panel says something. An agent
+#: that spawns an MCP server per session can genuinely need a few seconds;
+#: silence past this reads as a dead button, and a dead button is exactly
+#: what an artist reports when nothing at all appears after a click.
+_NEW_SESSION_GRACE_MS = 20_000
 
+#: Below this the panel is too narrow to give the drawer its own column, so
+#: the drawer overlays instead of pushing the conversation aside.
+_MIN_BODY_WIDTH = 260
+
+#: Names for the featured six, for when the registry hasn't arrived yet. Not
+#: a source of truth — the registry always wins — this only keeps the chip
 #: from showing a bare id for the first few seconds.
 _FALLBACK_LABELS = {
     "claude-acp": "Claude Agent",
@@ -206,6 +213,8 @@ class AgentPanel(QtWidgets.QWidget):
         self._launch_worker: _LaunchPrepWorker | None = None
         self._registry_entries: list = []
         self._pending_agent_label: str = ""
+        #: Blocks typed before any session existed, waiting for `session/new`.
+        self._pending_prompt: list | None = None
         self._closed = False
 
         self._build()
@@ -239,14 +248,25 @@ class AgentPanel(QtWidgets.QWidget):
         self._pages.insertWidget(self.PAGE_SETTINGS, self._make_settings_view())
         self._pages.insertWidget(self.PAGE_AUTH, self._make_auth_view())
 
+        # Everything except the header lives in its own column, so the open
+        # conversation drawer can push it aside instead of covering it. The
+        # header stays full width on purpose: its sidebar toggle is the only
+        # way to close the drawer again, and it must never end up underneath it.
+        self._body = QtWidgets.QWidget(self)
+        self._body_layout = QtWidgets.QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        self._body_layout.setSpacing(0)
+        self._body_layout.addWidget(self._notice)
+        self._body_layout.addWidget(self._consent)
+        self._body_layout.addWidget(self._pages, 1)
+        self._body_layout.addWidget(self._blocking)
+        self._body_layout.addWidget(self._composer)
+
         layout.addWidget(self._header)
-        layout.addWidget(self._notice)
-        layout.addWidget(self._consent)
-        layout.addWidget(self._pages, 1)
-        layout.addWidget(self._blocking)
-        layout.addWidget(self._composer)
+        layout.addWidget(self._body, 1)
 
         self._conversations = ConversationDrawer(self)
+        self._conversations.open_state_changed.connect(self._on_drawer_state_changed)
 
         # The panel forwards focus to the composer: Houdini activates the pane
         # tab and grants focus to the panel widget, not to anything inside it.
@@ -256,7 +276,7 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._header.manage_agents_clicked.connect(self._open_agent_management)
         self._header.agent_selected.connect(self._on_agent_chosen)
-        self._header.conversations_clicked.connect(self._conversations.toggle)
+        self._header.conversations_clicked.connect(self._toggle_conversations)
         self._header.new_session_clicked.connect(self._start_new_session)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
         self._conversations.new_session_clicked.connect(self._start_new_session)
@@ -267,6 +287,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer.submitted.connect(self._on_submitted)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
+        self._composer.config_option_selected.connect(self._on_config_option_selected)
         self._composer.attachment_rejected.connect(self._note)
         self._composer.buddy_selected.connect(self._on_buddy_selected)
 
@@ -303,6 +324,10 @@ class AgentPanel(QtWidgets.QWidget):
         # Writing to the agent from the settings or auth screen is pointless:
         # the reply lands in a feed the human can't see right now.
         self._composer.setVisible(index == self.PAGE_TRANSCRIPT)
+        # The permission popover is a free-floating child of the panel, not
+        # part of the page stack — without this it kept hovering over the
+        # settings form, anchored to a composer that isn't even on screen.
+        self._sync_permission_popover()
 
     def _open_agent_management(self) -> None:
         """Send the human to the agents section of settings.
@@ -442,6 +467,7 @@ class AgentPanel(QtWidgets.QWidget):
             (client.session_started, self._on_session_started),
             (client.modes_changed, self._on_modes_changed),
             (client.commands_changed, self._on_commands_changed),
+            (client.config_options_changed, self._on_config_options_changed),
             (client.message_chunk, self._on_message_chunk),
             (client.thought_chunk, self._on_thought_chunk),
             (client.tool_call, self._on_tool_call),
@@ -493,6 +519,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._pool.set_current(session_id)
         self._show_session(session_id)
         self._show_page(self.PAGE_TRANSCRIPT)
+        pending, self._pending_prompt = self._pending_prompt, None
+        if pending:
+            self._on_submitted(pending)
 
     def _on_modes_changed(self, session_id: str, mode_state: Any) -> None:
         state = self._pool.get(session_id)
@@ -510,6 +539,32 @@ class AgentPanel(QtWidgets.QWidget):
             self._pool.mark_changed(session_id)
         if self._is_current(session_id):
             self._composer.set_commands(list(commands))
+
+    def _on_config_options_changed(self, session_id: str, options: list) -> None:
+        """The model picker, and everything else the agent lets us change.
+
+        ACP has no dedicated "model" concept: agents expose model, reasoning
+        effort and fast mode as session config options (`configOptions` in
+        the `session/new` reply, refreshed by `config_option_update`). The
+        client has been reading them all along and nobody listened, so the
+        chip stayed hidden and the panel looked like it had no model choice
+        at all.
+
+        Nothing here is invented: the options, their labels, their order and
+        the current value are the agent's word. An agent that offers none
+        gets no chips, per the panel's standing rule.
+        """
+        state = self._pool.get(session_id)
+        if state is not None:
+            state.config_options = list(options)
+            self._pool.mark_changed(session_id)
+        if self._is_current(session_id):
+            self._composer.set_config_options(list(options))
+
+    def _on_config_option_selected(self, config_id: str, value: str) -> None:
+        current = self._pool.current()
+        if current is not None:
+            shared_client().set_config_option(current.session_id, config_id, value)
 
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
         entry = self._model(session_id).apply_chunk(message_id, text)
@@ -614,10 +669,17 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_usage(state.usage)
             self._composer.set_commands(list(state.available_commands))
             self._composer.set_modes(state.available_modes, state.current_mode_id)
+            self._composer.set_config_options(list(state.config_options))
         self._sync_permission_popover()
         self._refresh_sessions()
 
     def _sync_permission_popover(self) -> None:
+        if self._pages.currentIndex() != self.PAGE_TRANSCRIPT:
+            # It anchors to the composer, which is hidden on every other
+            # page. The pending request isn't lost — it comes back the moment
+            # the artist returns to the conversation.
+            self._hide_permission_popover()
+            return
         current = self._pool.current()
         session_id = current.session_id if current is not None else ""
         view = next(
@@ -668,12 +730,55 @@ class AgentPanel(QtWidgets.QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
+        self._sync_drawer_geometry()
         self._position_permission_popover()
+
+    def _toggle_conversations(self) -> None:
+        # Geometry first: the drawer's top inset is the header's height, and
+        # the header only knows it after a layout pass — which may not have
+        # happened by the time the button is first clicked.
+        self._sync_drawer_geometry()
+        self._conversations.toggle()
+
+    def _sync_drawer_geometry(self) -> None:
+        self._conversations.set_top_inset(self._header.height())
         self._conversations.sync_parent_geometry()
+        self._apply_drawer_inset()
         if self._conversations.isVisible():
             self._conversations.raise_()
 
+    def _on_drawer_state_changed(self, _open: bool) -> None:
+        self._apply_drawer_inset()
+        self._position_permission_popover()
+
+    def _apply_drawer_inset(self) -> None:
+        """Reserve the drawer's column so it never covers the conversation.
+
+        Only while there is room left: below `_MIN_BODY_WIDTH` the panel is
+        narrower than a drawer plus anything readable, so the drawer goes
+        back to overlaying — the same thing every responsive sidebar does,
+        and better than squeezing the feed into a hundred pixels.
+        """
+        drawer = self._conversations
+        inset = 0
+        if drawer.is_open() and self.width() - drawer.width() >= _MIN_BODY_WIDTH:
+            inset = drawer.width()
+        margins = self._body_layout.contentsMargins()
+        if margins.left() != inset:
+            self._body_layout.setContentsMargins(
+                inset, margins.top(), margins.right(), margins.bottom()
+            )
+
     def _start_new_session(self) -> None:
+        """Ask the agent for another session — and never do it silently.
+
+        `session/new` is a round trip to someone else's process, and for the
+        agents we ship it also spawns an MCP server. When that takes a while,
+        or never answers at all, the panel used to show absolutely nothing:
+        the artist clicks "+", nothing appears, and the only available
+        conclusion is that the button is broken. So the request is announced
+        when it goes out and chased up if the answer never comes.
+        """
         client = shared_client()
         if not client.is_running():
             agent_id = self._settings.default_agent
@@ -682,7 +787,22 @@ class AgentPanel(QtWidgets.QWidget):
             else:
                 self._open_agent_management()
             return
+        before = {state.session_id for state in self._pool.all()}
         client.new_session(cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers())
+        QtCore.QTimer.singleShot(
+            _NEW_SESSION_GRACE_MS, lambda: self._report_stalled_new_session(before)
+        )
+
+    def _report_stalled_new_session(self, before: set) -> None:
+        if self._closed:
+            return
+        if {state.session_id for state in self._pool.all()} - before:
+            return  # the agent answered, nothing to complain about
+        self._note(
+            "The agent hasn't opened a new conversation. It may be busy or "
+            "stuck — try switching agents in the header, or restart it from "
+            "settings."
+        )
 
     def _on_session_renamed(self, session_id: str, title: str) -> None:
         state = self._pool.get(session_id)
@@ -719,6 +839,12 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_submitted(self, blocks: list) -> None:
         current = self._pool.current()
         if current is None:
+            # The composer has already cleared itself by now, so dropping the
+            # blocks here would silently eat what the artist just typed — the
+            # first message after opening the panel, most often. Hold it and
+            # send it the moment a session exists.
+            self._pending_prompt = list(blocks)
+            self._note("No conversation open yet — starting one and sending this.")
             self._start_new_session()
             return
         text = " ".join(
@@ -918,6 +1044,10 @@ class AgentPanel(QtWidgets.QWidget):
         self._pool.clear()
         self._models.clear()
         self._pending_permissions.clear()
+        # A message queued for the old agent has nowhere to land: its
+        # transcript is gone, so sending it would put the artist's words into
+        # a conversation they can no longer see.
+        self._pending_prompt = None
         self._transcript.set_model(self._model("__idle__"))
         self._transcript.refresh(None)
         self._start_agent(agent_id)

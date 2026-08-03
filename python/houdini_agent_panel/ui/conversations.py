@@ -70,16 +70,32 @@ _ROW_MENU_STYLESHEET = (
 
 
 class ConversationDrawer(QtWidgets.QFrame):
+    """Slides in from the left, under the header.
+
+    Two geometry rules, both learned from the panel looking broken with the
+    drawer open. It starts BELOW the header (`set_top_inset`), because the
+    only control that closes it again is the header's own sidebar toggle —
+    a drawer covering its own toggle is a drawer you cannot close. And it
+    reports its state through `open_state_changed` so the panel can move the
+    conversation column out from under it instead of letting it cover the
+    text the artist is reading.
+    """
+
     session_selected = Signal(str)
     session_renamed = Signal(str, str)
     session_removed = Signal(str)
     new_session_clicked = Signal()
+    #: True when the drawer starts opening, False when it starts closing.
+    #: Fires on the way in/out, not on arrival — the panel reserves space for
+    #: it before the slide, so the content never has to be redrawn mid-animation.
+    open_state_changed = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("conversationDrawer")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setFixedWidth(_DRAWER_WIDTH)
+        self._top = 0
         self.hide()
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -229,8 +245,23 @@ class ConversationDrawer(QtWidgets.QFrame):
         self._pin_buttons[state.session_id] = pin_button
         return row
 
+    def set_top_inset(self, top: int) -> None:
+        """Where the drawer's top edge sits — right under the panel header.
+
+        Anything above stays visible and clickable, which is what keeps the
+        header's sidebar toggle reachable while the drawer is open.
+        """
+        top = max(0, int(top))
+        if top == self._top:
+            return
+        self._top = top
+        self.sync_parent_geometry()
+
+    def is_open(self) -> bool:
+        return not self.isHidden() and not self._closing
+
     def toggle(self) -> None:
-        if self.isVisible() and not self._closing:
+        if self.is_open():
             self.close_drawer()
         else:
             self.open_drawer()
@@ -241,12 +272,13 @@ class ConversationDrawer(QtWidgets.QFrame):
             return
         self._animation.stop()
         self._closing = False
-        self.setFixedHeight(parent.height())
-        self.move(-self.width(), 0)
+        self.setFixedHeight(max(0, parent.height() - self._top))
+        self.move(-self.width(), self._top)
         self.show()
         self.raise_()
-        self._animation.setStartValue(QtCore.QPoint(-self.width(), 0))
-        self._animation.setEndValue(QtCore.QPoint(0, 0))
+        self.open_state_changed.emit(True)
+        self._animation.setStartValue(QtCore.QPoint(-self.width(), self._top))
+        self._animation.setEndValue(QtCore.QPoint(0, self._top))
         self._animation.start()
 
     def close_drawer(self) -> None:
@@ -258,17 +290,18 @@ class ConversationDrawer(QtWidgets.QFrame):
             return
         self._animation.stop()
         self._closing = True
+        self.open_state_changed.emit(False)
         self._animation.setStartValue(self.pos())
-        self._animation.setEndValue(QtCore.QPoint(-self.width(), 0))
+        self._animation.setEndValue(QtCore.QPoint(-self.width(), self._top))
         self._animation.start()
 
     def sync_parent_geometry(self) -> None:
         parent = self.parentWidget()
         if parent is None:
             return
-        self.setFixedHeight(parent.height())
+        self.setFixedHeight(max(0, parent.height() - self._top))
         if self.isVisible() and self._animation.state() != QtCore.QAbstractAnimation.Running:
-            self.move(-self.width() if self._closing else 0, 0)
+            self.move(-self.width() if self._closing else 0, self._top)
 
     def _select_session(self, session_id: str) -> None:
         self.session_selected.emit(session_id)
