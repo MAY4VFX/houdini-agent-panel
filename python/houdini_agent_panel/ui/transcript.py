@@ -98,6 +98,25 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._scroll_timer.setSingleShot(True)
         self._scroll_timer.timeout.connect(self._scroll_to_bottom)
 
+        # Following the bottom is a MODE, not a measurement taken per update.
+        # It used to be re-derived on every refresh from "is the bar at the
+        # bottom right now", and that answer is wrong for one frame every
+        # time content grows faster than layout settles — the bar sits below
+        # the new maximum through no fault of the reader. One such frame and
+        # the feed decided the artist had scrolled up, and it never followed
+        # again for the rest of the answer. Reported exactly that way: the
+        # agent talks, the view stands still.
+        #
+        # So the mode changes only when the ARTIST moves the view, which is
+        # the only thing that should ever turn following off.
+        self._follow_bottom = True
+        self._scrolling_ourselves = False
+        bar = self.verticalScrollBar()
+        bar.valueChanged.connect(self._on_scroll_value_changed)
+        # Content growing while we are following must pull the view along,
+        # however many layout passes it takes to settle.
+        bar.rangeChanged.connect(self._on_scroll_range_changed)
+
     # --- public API ----------------------------------------------------
 
     def set_model(self, model: TranscriptModel) -> None:
@@ -113,12 +132,11 @@ class TranscriptView(QtWidgets.QScrollArea):
     def refresh(self, entry_id: str | None = None) -> None:
         if self._model is None:
             return
-        was_at_bottom = self._is_at_bottom()
         if entry_id is None:
             self._rebuild_all()
         else:
             self._refresh_one(entry_id)
-        if was_at_bottom:
+        if self._follow_bottom:
             # Deferred, not immediate: growing content (a streamed chunk
             # resizing its `QTextBrowser`) only widens the scrollbar's range
             # on a LATER layout pass — scrolling to `maximum()` right now
@@ -275,7 +293,27 @@ class TranscriptView(QtWidgets.QScrollArea):
 
     def _scroll_to_bottom(self) -> None:
         bar = self.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._scrolling_ourselves = True
+        try:
+            bar.setValue(bar.maximum())
+        finally:
+            self._scrolling_ourselves = False
+
+    def _on_scroll_value_changed(self, value: int) -> None:
+        """Only the artist's own scrolling decides whether we follow."""
+        if self._scrolling_ourselves:
+            return
+        bar = self.verticalScrollBar()
+        self._follow_bottom = value >= bar.maximum() - _BOTTOM_EPSILON
+
+    def _on_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
+        """The feed grew. If we are following, go with it.
+
+        This is what makes following survive a slow layout: the range widens
+        one pass later than the content arrives, and this fires then.
+        """
+        if self._follow_bottom:
+            self._scroll_timer.start(0)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
