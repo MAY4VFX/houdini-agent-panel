@@ -6,7 +6,15 @@
 гость в чужом окне, поэтому цвет всегда берём из палитры текущего QApplication
 (`QtWidgets.QApplication.palette()`), а не хардкодим hex — тема Houdini может
 быть тёмной, светлой или полностью пользовательской (см. facts/houdini.md §5).
-`hou` не импортируем: модуль обязан работать и в юнит-тестах вне Houdini.
+
+Houdini 22's "Edit Theme" presets (e.g. "Ponycorn Adventure") repaint the
+whole application's own widgets, but `QApplication.palette()` alone does not
+follow that — `color()` below tries Houdini's own live theme first
+(`hou.qt.getColor`) and falls back to the app palette for everything else:
+Houdini 20.5 (no such presets), outside Houdini entirely (unit tests,
+`dev_preview`), and any `QPalette` role with no solid Houdini scheme analog.
+`hou` is only ever imported lazily, inside a try/except, from `color()` —
+this module still has to work with no `hou` on the path at all.
 """
 
 from __future__ import annotations
@@ -68,6 +76,75 @@ def palette() -> QtGui.QPalette:
     return QtWidgets.QApplication.palette()
 
 
+#: `QPalette` role -> Houdini scheme color name, for roles with a solid,
+#: checked analog. Verified by hand against Houdini 22.0.368's own
+#: `houdini/config/UIDark.hcs` (and cross-checked against `UILight.hcs`) —
+#: guessing a name here and getting `hou.OperationFailed` at paint time is
+#: worse than just falling back, so a role stays out of this table rather
+#: than get a shaky guess.
+_HOU_COLOR_NAMES: dict[QtGui.QPalette.ColorRole, str] = {
+    QtGui.QPalette.Window: "BackColor",
+    QtGui.QPalette.Base: "BackColor",
+    QtGui.QPalette.AlternateBase: "MenuBG",
+    QtGui.QPalette.Text: "TextColor",
+    QtGui.QPalette.WindowText: "TextColor",
+    QtGui.QPalette.ButtonText: "TextColor",
+    QtGui.QPalette.Highlight: "MenuSelectedBG",
+    QtGui.QPalette.Mid: "SplitBarBackground",
+}
+
+#: The one `(group, role)` pair that needs a different scheme name than its
+#: `Active` counterpart — everything else falls back to the app palette for
+#: any non-`Active` group, which is what every call site needs today.
+_HOU_DISABLED_TEXT = "DisabledTextColor"
+
+
+def _hou_scheme_color(name: str) -> QtGui.QColor | None:
+    """`hou.qt.getColor(name)`, or `None` for any reason at all.
+
+    `hou` may not be importable (outside Houdini entirely), `hou.qt` may not
+    exist (Houdini 20.5 hython confirmed: `hou.isUIAvailable()` is `False`
+    and `hou.qt` isn't even there), or the name may not exist in whatever
+    scheme is active. All three, and anything else, mean "fall back to the
+    app palette" — this never raises.
+    """
+    try:
+        import hou
+    except ImportError:
+        return None
+    try:
+        if not hou.isUIAvailable():
+            return None
+        return hou.qt.getColor(name)
+    except Exception:  # noqa: BLE001 - a theme lookup has no right to break paint code
+        return None
+
+
+def color(
+    role: QtGui.QPalette.ColorRole,
+    group: QtGui.QPalette.ColorGroup = QtGui.QPalette.Active,
+) -> QtGui.QColor:
+    """One color: Houdini's own live theme first, the app palette otherwise.
+
+    This is the entry point every call site that used to read
+    `self.palette()`/`QApplication.palette()` for a single role goes
+    through now — a Houdini 22 "Edit Theme" preset changes what this
+    returns without the panel doing anything theme-specific itself. Houdini
+    20.5 and anything outside Houdini fall straight through to
+    `palette().color(group, role)`, byte-for-byte what every call site
+    already did before this existed.
+    """
+    if group == QtGui.QPalette.Disabled and role == QtGui.QPalette.Text:
+        name = _HOU_DISABLED_TEXT
+    else:
+        name = _HOU_COLOR_NAMES.get(role)
+    if name is not None:
+        hou_color = _hou_scheme_color(name)
+        if hou_color is not None:
+            return QtGui.QColor(hou_color)
+    return palette().color(group, role)
+
+
 def monospace_font() -> QtGui.QFont:
     """Системный моноширинный шрифт — для кода/diff в развёрнутом вызове инструмента."""
     return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
@@ -83,8 +160,9 @@ def kind_icon(kind: str, *, size: int = ICON_SIZE) -> QtGui.QIcon:
 
     Штатные иконки Houdini (`hicon:/SVGIcons.index?...`) недоступны вне
     Houdini и их точные имена не подтверждены в facts/ — вместо угадывания
-    рисуем маленький текстовый бейдж цветами текущей палитры. Работает
-    одинаково в юнит-тестах и внутри Houdini, не требует `hou`.
+    рисуем маленький текстовый бейдж цветами текущей палитры (`color()`, so
+    it tracks Houdini's own live theme where that's available). Работает
+    одинаково в юнит-тестах и внутри Houdini — `hou` не обязателен.
     """
     pixmap = QtGui.QPixmap(size, size)
     pixmap.fill(QtCore.Qt.transparent)
@@ -92,8 +170,7 @@ def kind_icon(kind: str, *, size: int = ICON_SIZE) -> QtGui.QIcon:
     painter = QtGui.QPainter(pixmap)
     try:
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pal = palette()
-        painter.setBrush(pal.color(QtGui.QPalette.Mid))
+        painter.setBrush(color(QtGui.QPalette.Mid))
         painter.setPen(QtCore.Qt.NoPen)
         painter.drawRoundedRect(0, 0, size, size, RADIUS, RADIUS)
 
@@ -101,7 +178,7 @@ def kind_icon(kind: str, *, size: int = ICON_SIZE) -> QtGui.QIcon:
         font.setPointSize(max(6, size // 2))
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(pal.color(QtGui.QPalette.Text))
+        painter.setPen(color(QtGui.QPalette.Text))
         painter.drawText(pixmap.rect(), QtCore.Qt.AlignCenter, kind_glyph(kind))
     finally:
         painter.end()
@@ -129,12 +206,11 @@ def status_color(status: str) -> QtGui.QColor:
     заметный акцент (`Highlight`) и приглушение (`Disabled`/`Text`)
     из самой палитры.
     """
-    pal = palette()
     if status == "in_progress":
-        return pal.color(QtGui.QPalette.Active, QtGui.QPalette.Highlight)
+        return color(QtGui.QPalette.Highlight)
     if status == "pending":
-        return pal.color(QtGui.QPalette.Disabled, QtGui.QPalette.Text)
-    return pal.color(QtGui.QPalette.Active, QtGui.QPalette.Text)
+        return color(QtGui.QPalette.Text, QtGui.QPalette.Disabled)
+    return color(QtGui.QPalette.Text)
 
 
 __all__ = [
@@ -144,6 +220,7 @@ __all__ = [
     "SPACING",
     "SPACING_TIGHT",
     "TOOL_KINDS",
+    "color",
     "kind_glyph",
     "kind_icon",
     "monospace_font",
