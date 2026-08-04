@@ -90,7 +90,55 @@ def setup(*, force: bool = False) -> None:
         return
 
     _configured = True
+    _install_excepthook()
     _log_environment()
+
+
+#: Set once `sys.excepthook` carries our addition, so a second `setup()` (a
+#: second tab, a reload) cannot chain it onto itself over and over.
+_excepthook_installed = False
+
+
+def _install_excepthook() -> None:
+    """Send otherwise-invisible exceptions to the log, then step aside.
+
+    An exception escaping a `QThread.run()` — or any Qt slot — is printed by
+    PySide straight to stderr, not through `logging`. Inside Houdini there is
+    no stderr anyone reads, so the failure that just cost an artist their
+    afternoon leaves no trace in the one file we ask them to send us. Four
+    hooks were measured on 20.5.445 and 22.0.368: `sys.unraisablehook`,
+    `threading.excepthook` (a `QThread` is not a `threading.Thread`) and
+    `qInstallMessageHandler` (Qt's own log categories, not Python
+    exceptions) all see nothing. `sys.excepthook` sees both.
+
+    Which makes this legitimate only because it is strictly additive. We are
+    a guest in someone else's process: the previous hook — Houdini's own
+    crash reporting, another plugin's, or Python's default — is called
+    afterwards, always, whatever happens here. We add a line to our file; we
+    do not decide for Houdini what an exception means.
+    """
+    global _excepthook_installed
+    if _excepthook_installed:
+        return
+    previous = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_traceback):
+        try:
+            logger().error(
+                "unhandled exception", exc_info=(exc_type, exc_value, exc_traceback)
+            )
+        except Exception:  # noqa: BLE001 - failing inside the failure handler helps nobody
+            pass
+        previous(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _hook
+    _excepthook_installed = True
+
+
+def _reset_excepthook_for_tests() -> None:
+    """Tests only — lets a test install and inspect the chain from scratch."""
+    global _excepthook_installed
+    _excepthook_installed = False
 
 
 def _log_environment() -> None:

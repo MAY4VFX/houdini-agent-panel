@@ -35,6 +35,7 @@ from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
+from .worker import Worker
 
 #: Connection to the agent for the whole Houdini process. Not a widget
 #: attribute — otherwise closing one tab would take the conversation open in
@@ -74,7 +75,7 @@ def reset_shared_state_for_tests() -> None:
     sessions.reset_pool_for_tests()
 
 
-class _RefreshWorker(QtCore.QThread):
+class _RefreshWorker(Worker):
     """One network round trip for everything the panel needs, off the main thread.
 
     A dedicated thread, not a timer with a blocking call: even with no
@@ -96,7 +97,7 @@ class _RefreshWorker(QtCore.QThread):
         super().__init__(parent)
         self._settings = current
 
-    def run(self) -> None:  # pragma: no cover - covered via refresh.py
+    def work(self) -> None:  # pragma: no cover - covered via refresh.py
         entries: list = []
         try:
             from .. import registry
@@ -150,7 +151,7 @@ _FALLBACK_LABELS = {
 }
 
 
-class _LaunchPrepWorker(QtCore.QThread):
+class _LaunchPrepWorker(Worker):
     """Prepares a LaunchSpec off the main thread.
 
     Everything slow that used to live in the old _launch_spec lives here: a
@@ -169,7 +170,7 @@ class _LaunchPrepWorker(QtCore.QThread):
         self._agent_id = agent_id
         self._settings = current
 
-    def run(self) -> None:  # pragma: no cover - thin wrapper, logic lives in runtime
+    def work(self) -> None:  # pragma: no cover - thin wrapper, logic lives in runtime
         from .. import registry, runtime
 
         agent_id = self._agent_id

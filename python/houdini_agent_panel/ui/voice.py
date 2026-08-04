@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .worker import Worker
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 
@@ -141,7 +142,7 @@ def build_default_backend() -> tuple[RecordBackend | None, str]:
     return None, "QtMultimedia offers no recording API we know"
 
 
-class _UploadWorker(QtCore.QThread):
+class _UploadWorker(Worker):
     """One POST to whisper, on its own thread so the network can't freeze the UI."""
 
     done = Signal(str)
@@ -154,7 +155,7 @@ class _UploadWorker(QtCore.QThread):
         self._mime_type = mime_type
         self._uploader = uploader
 
-    def run(self) -> None:  # noqa: D102 - QThread.run override
+    def work(self) -> None:  # noqa: D102 - QThread.run override
         try:
             text = self._uploader(self._endpoint, self._audio_path, self._mime_type)
         except Exception as exc:  # noqa: BLE001 - a network error must not take the panel down

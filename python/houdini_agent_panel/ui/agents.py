@@ -30,6 +30,7 @@ from .. import registry, runtime
 from ..updates import is_newer
 from .. import settings as settings_module
 from .qt import QtCore, QtWidgets, Signal
+from .worker import Worker
 
 if TYPE_CHECKING:
     from ..network import Fetcher
@@ -37,41 +38,27 @@ if TYPE_CHECKING:
     from ..updates import Update
 
 
-class _InstallWorker(QtCore.QThread):
-    """Installs (or updates) a single agent on a background thread."""
+class _InstallWorker(Worker):
+    """Installs (or updates) a single agent on a background thread.
+
+    Failure handling lives in `Worker` — see `ui/worker.py` for what that
+    class exists to prevent, and for the incident that produced it.
+    """
 
     progressed = Signal(int, object, str)  # done, total|None, note
     succeeded = Signal(object)  # runtime.LaunchSpec — this view doesn't use it
-    failed = Signal(str)
 
     def __init__(self, entry: "AgentEntry", *, fetch: "Fetcher | None", parent=None) -> None:
         super().__init__(parent)
         self._entry = entry
         self._fetch = fetch
 
-    def run(self) -> None:  # noqa: D102 - QThread.run override
-        # `Exception`, not just `runtime.InstallError`: this is a QThread
-        # boundary, and this method is the only place that can ever turn a
-        # failure into a signal. Caught live, by instrumentation, not
-        # guessed: `node.NpxNotFoundError` (a plain `RuntimeError`, not an
-        # `InstallError` — raised by `node.npx_argv` when no npm sits next
-        # to the detected Node) escaped the narrower catch, which meant
-        # neither `succeeded` nor `failed` ever fired. The consequences
-        # compounded silently — `AgentsView._installing` is only cleared in
-        # `_on_installed`/`_on_install_failed`, so the agent stayed marked
-        # "installing" forever, permanently blocking every later click on
-        # its Install/Update button too — and PySide only prints the
-        # traceback to stderr, which no Houdini GUI artist has open. Exactly
-        # "Remove, then Install — nothing happens", reproduced.
-        try:
-            spec = runtime.install_agent(
-                self._entry,
-                progress=lambda done, total, note: self.progressed.emit(done, total, note),
-                fetch=self._fetch,
-            )
-        except Exception as exc:  # noqa: BLE001 - see the comment above
-            self.failed.emit(str(exc))
-            return
+    def work(self) -> None:  # noqa: D102 - Worker.work override
+        spec = runtime.install_agent(
+            self._entry,
+            progress=lambda done, total, note: self.progressed.emit(done, total, note),
+            fetch=self._fetch,
+        )
         self.succeeded.emit(spec)
 
 
