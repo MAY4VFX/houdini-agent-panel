@@ -272,6 +272,15 @@ class SettingsView(QtWidgets.QWidget):
     ) -> None:
         super().__init__(parent)
         self._loading = False
+        #: True from the moment a Network field is edited until the restart
+        #: is either done (button clicked) or explicitly dismissed
+        #: (`_on_network_section_toggled`) or the screen reloads. The single
+        #: source of truth for "is there a restart the artist hasn't acted
+        #: on" — `_restart_banner.isVisible()` alone isn't enough for that,
+        #: since Qt reports a child as not visible whenever its ANCESTOR
+        #: (here, the collapsed section body) is hidden, regardless of the
+        #: child's own state; this flag doesn't have that ambiguity.
+        self._restart_pending = False
 
         close_button = QtWidgets.QToolButton()
         close_button.setText("←")
@@ -400,10 +409,16 @@ class SettingsView(QtWidgets.QWidget):
         # edited (`_on_network_field_changed`), never shown for any other
         # setting. Lives inside the section itself — right where the
         # artist's eyes already are the moment they type — rather than a
-        # separate global notice.
+        # separate global notice. Names BOTH ways the new value actually
+        # reaches the agent, not just the button: a restart is not the only
+        # path (`AgentPanel._switch_agent_process` always launches with
+        # whatever is in settings.json right now), so collapsing this
+        # section without clicking the button is a real choice the artist
+        # can make, not a dead end they were never told about — see
+        # `_on_network_section_toggled`.
         self._restart_banner = QtWidgets.QWidget()
         self._restart_label = QtWidgets.QLabel(
-            "The agent will pick this up after a restart."
+            "The agent will pick this up after a restart — or the next time you switch agents."
         )
         self._restart_label.setWordWrap(True)
         self._restart_button = QtWidgets.QPushButton("Restart agent")
@@ -447,6 +462,12 @@ class SettingsView(QtWidgets.QWidget):
         network_section.add_row("CA bundle", ca_bundle_row)
         network_section.add_widget(self._network_caption)
         network_section.add_widget(self._restart_banner)
+        # `.toggled` (not `.clicked`, which `_Section._on_toggled` itself
+        # uses) — it fires for a real click AND for a programmatic
+        # `setChecked()` alike, so a test can drive this the same way
+        # `reload()`/`_expand_network_section` already do elsewhere,
+        # without a second manual call.
+        network_section._toggle.toggled.connect(self._on_network_section_toggled)
 
         data_section = _Section("Data", self, expanded=False, grid=grid_metrics)
         data_section.add_row("Data folder", data_dir_row)
@@ -564,6 +585,7 @@ class SettingsView(QtWidgets.QWidget):
             # A reload is a fresh read of what's on disk, not an edit — the
             # invitation to restart only belongs to an edit THIS screen just
             # made (`_on_network_field_changed`).
+            self._restart_pending = False
             self._restart_banner.setVisible(False)
             self._data_dir_label.setText(str(paths.data_dir()))
         finally:
@@ -613,9 +635,29 @@ class SettingsView(QtWidgets.QWidget):
         if self._loading:
             return
         self._save_from_fields()
+        self._restart_pending = True
         self._restart_banner.setVisible(True)
         self.changed.emit()
         self.proxy_changed.emit()
+
+    def _on_network_section_toggled(self, expanded: bool) -> None:
+        """Collapsing "Network" while a restart is pending is treated as an
+        explicit dismissal, not a silent loss of the fact — the two are
+        different things. A locked-open section (never letting the artist
+        collapse it until they click "Restart agent") was the other option
+        considered; rejected because it punishes an artist who just wants
+        to glance at another field for looking at this one first, and
+        because the banner's own text already names a way to get the new
+        setting into the agent that ISN'T this button — restarting is not
+        the only door out, so collapsing without pressing it is a real
+        choice, not a trap. Re-expanding starts clean: nothing is carried
+        that the screen doesn't also show, i.e. this is never a case of
+        "the panel knows the agent is stale and says nothing about it" —
+        it said so once, plainly, and the artist chose to move on.
+        """
+        if not expanded and self._restart_pending:
+            self._restart_pending = False
+            self._restart_banner.setVisible(False)
 
     def _on_browse_ca_bundle(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -627,6 +669,7 @@ class SettingsView(QtWidgets.QWidget):
             self._ca_bundle_edit.setText(path)
 
     def _on_restart_agent_clicked(self) -> None:
+        self._restart_pending = False
         self._restart_banner.setVisible(False)
         self.restart_agent_requested.emit()
 

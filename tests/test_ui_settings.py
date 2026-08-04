@@ -167,6 +167,53 @@ def test_browse_ca_bundle_cancelled_changes_nothing(qapp, monkeypatch):
     assert view._restart_banner.isVisible() is False
 
 
+def test_collapsing_network_with_a_pending_restart_dismisses_it(qapp):
+    """Collapsing the section while a restart is pending is an explicit
+    dismiss, not a silent loss — re-expanding must land on a defined
+    state (still dismissed), not "however it happens to render" (`_on_
+    network_section_toggled`)."""
+    view = SettingsView()
+    view.show()
+    view._network_section._toggle.setChecked(True)
+    view._network_section._on_toggled(True)
+    qapp.processEvents()
+
+    view._proxy_edit.setText("http://proxy.studio.local:8080")
+    assert view._restart_pending is True
+    assert view._restart_banner.isVisible() is True
+
+    # A real click — fires BOTH `.clicked` (`_Section._on_toggled`, the
+    # body's own visibility) and `.toggled` (`_on_network_section_toggled`,
+    # the dismiss) exactly like the artist's mouse would.
+    view._network_section._toggle.click()
+    qapp.processEvents()
+
+    assert view._restart_pending is False
+
+    view._network_section._toggle.click()  # back open
+    qapp.processEvents()
+
+    assert view._restart_banner.isVisible() is False, (
+        "a dismissed restart must not silently come back on re-expand"
+    )
+
+
+def test_collapsing_network_with_no_pending_restart_does_nothing_odd(qapp):
+    """Collapsing an untouched (or already-dismissed) Network section is
+    just... collapsing it — no flag to flip, nothing to dismiss."""
+    view = SettingsView()
+    view.show()
+    view._network_section._toggle.setChecked(True)
+    view._network_section._on_toggled(True)
+    qapp.processEvents()
+
+    view._network_section._toggle.click()
+    qapp.processEvents()
+
+    assert view._restart_pending is False
+    assert view._restart_banner.isVisible() is False
+
+
 def test_default_agent_combo_lists_installed_and_custom(qapp):
     current = settings_module.load()
     current.installed_agents["claude-acp"] = settings_module.InstalledAgent(
