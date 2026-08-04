@@ -288,3 +288,16 @@ def test_deps_ready_true_when_both_present(tmp_path):
     (target / "acp").mkdir(parents=True)
     (target / "houdini_agent_panel").mkdir(parents=True)
     assert deps.deps_ready(target) is True
+
+
+def test_the_version_probe_allows_for_a_cold_hython():
+    """`hython -c "print(...)"` loads all of Houdini's Python first. Measured
+    warm and idle: 18.9s on 20.5, 20.2s on 22.0 — against a 30s ceiling that
+    a loaded farm node or a network-mounted install would blow straight
+    through, refusing to install and blaming Houdini for starting slowly. A
+    dry run on the developer's own machine did exactly that for 22.0."""
+    from houdini_agent_panel import deps
+
+    assert deps._VERSION_TIMEOUT >= 120.0, (
+        f"{deps._VERSION_TIMEOUT}s leaves no room over a ~20s cold start"
+    )

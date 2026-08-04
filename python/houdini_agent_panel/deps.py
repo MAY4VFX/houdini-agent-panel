@@ -18,7 +18,19 @@ from typing import Sequence
 from fxhoudinimcp.install import printable_argv
 
 #: Timeout for a one-off hython run — just printing the Python version.
-_VERSION_TIMEOUT = 30.0
+#:
+#: Not the couple of seconds "print one line" suggests: hython loads the
+#: whole of Houdini's Python before it runs anything. Measured on a warm,
+#: idle machine — 18.9s for 20.5 and 20.2s for 22.0, i.e. two thirds of the
+#: old 30s ceiling gone on a good day. On a farm node under load, or with
+#: the install on network storage, that ceiling is reached and the panel
+#: refuses to install at all, blaming a Houdini that was merely starting up.
+#: Seen for real: a dry run on this very machine failed for 22.0 while 20.5
+#: squeaked through.
+#:
+#: Generous rather than tuned, because the cost of waiting too long is a
+#: slow install and the cost of waiting too little is no install.
+_VERSION_TIMEOUT = 180.0
 #: Timeout for pip install — wheels with binary extensions can be heavy.
 _INSTALL_TIMEOUT = 600.0
 
