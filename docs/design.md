@@ -70,7 +70,7 @@ Plus **"Custom Agent"** — a field for a command and arguments, speaking ACP wi
 
 **Bound to its own scene.** The panel knows the fx server's actual port in its own process and passes the agent `mcpServers[0].env = {HOUDINI_HOST, HOUDINI_PORT}`. Two open Houdinis — each panel works against its own scene.
 
-**One agent, many sessions.** One process per Houdini, sessions are independent by `sessionId`, the panel shows the selected one. Two panels side by side — two conversations without a second process.
+**One agent process per agent id, many sessions.** Not one process per Houdini — that was the original decision (see the note below) and it broke: an artist opening a second panel tab on a *different* agent had that tab's switch silently stop and clear the first tab's own conversation and connection, because there was only ever one shared client and one shared session pool for the whole process, regardless of which agent any given tab was actually talking to. Two tabs on the SAME agent still share one process and one session list, independently by `sessionId`; a tab on a DIFFERENT agent gets its own of both. Which agent a given tab is attached to is a fact about that tab (`AgentPanel._agent_id`), not about the process — see `docs/architecture.md` §7.
 
 **We vendor Node.** A suitable system one — use it; none — download the official archive from nodejs.org, verify it against `SHASUMS256.txt`, extract it into our own directory. The system is never touched. Precedent: Houdini itself, which ships its own Python.
 
@@ -127,7 +127,7 @@ python/houdini_agent_panel/
   registry.py          # ACP registry, picking the distribution for the platform
   runtime.py           # download + sha256 + extract: agents and portable Node
   client.py            # ACP on top of agent-client-protocol, asyncio on a QThread
-  sessions.py          # session pool over one connection
+  sessions.py          # session pool per agent id, over that agent's connection
   auth.py              # authMethods / authenticate / logout
   updates.py           # versions from the registry and PyPI, cached daily
   announcements.py     # announcements feed, version targeting, seen-id memory
@@ -161,7 +161,7 @@ Qt imports — only through `hutil.PySide`. Reuse from `fxhoudinimcp/install.py`
 6. Ask it to create a node → the feed shows an fx tool call moving through statuses, the node shows up in the scene.
 7. Ask for a shell command → permission buttons from the agent; `reject_once` cancels it.
 8. Switch the mode chip → `session/set_mode`, behavior changes.
-9. Open a second panel → a new session, the first conversation is still alive, there's one agent process (verify with `ps`).
+9. Open a second panel on the SAME agent → a new session, the first conversation is still alive, there's one agent process (verify with `ps`). Open a second panel on a DIFFERENT agent instead → its own process, and switching it around must not disturb the first panel's conversation or connection at all.
 10. A second Houdini with a different scene → its panel works against its own scene (cross-check `hip_file` in fx's health).
 11. "Custom Agent" with an arbitrary command → the connection comes up, the session works.
 12. Fake a version in the cache → a banner appears, the button updates it.
@@ -176,6 +176,12 @@ Qt imports — only through `hutil.PySide`. Reuse from `fxhoudinimcp/install.py`
 
 - A networked studio install with runtimes pre-populated for chosen OSes.
 - Choosing a working folder and adding roots from `hou.fileReferences()` (API verified, works).
-- History across restarts (`session/load`, an optional capability).
-- Several different agents at once inside one Houdini.
+- History across restarts via the protocol's own `session/load` (an optional
+  capability) — what shipped instead is our own read-only
+  `conversations_store.py`, replaying a saved transcript rather than
+  resuming a live agent session; `session/load` itself is still unused.
 - Upstreaming the panel into fx via a PR.
+
+Done since, no longer deferred: **several different agents at once inside
+one Houdini** — one process per agent id, not per Houdini process (see "One
+agent process per agent id, many sessions" above).

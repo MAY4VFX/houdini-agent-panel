@@ -235,6 +235,13 @@ they exist in the SDK, but in practice not every agent supports them
 (Claude Code/Codex/Gemini CLI as the agent), the ones actually needed are just: `initialize`, `new_session`,
 `prompt`, `cancel`, `set_session_mode`, optionally `authenticate`.
 
+This project ended up going past minimal for `session/close` specifically:
+`AcpClient.close_session()` (`client.py`, `docs/architecture.md` §6) calls
+it deliberately, gated on `sessionCapabilities.close`, because with Claude
+each session is a whole agent-SDK process and its own MCP server fleet —
+leaving one open after the artist has moved on from it is a real resource
+leak, not just an unused capability.
+
 JSON-RPC method names for the agent (`AGENT_METHODS`, `acp/meta.py:3-32`):
 ```
 initialize            -> initialize

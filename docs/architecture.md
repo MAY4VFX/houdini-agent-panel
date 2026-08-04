@@ -337,12 +337,14 @@ class AcpClient(QtCore.QObject):
     disconnected = Signal(str)            # reason, "" on a normal stop
     failed = Signal(str)                  # human-readable text
     auth_required = Signal(list)          # list[AuthMethod]
+    authenticated = Signal(str)           # method_id — sign-in finished
     log_line = Signal(str)                # the agent's stderr, for diagnostics
 
     # --- sessions
     session_started = Signal(str, object) # session_id, SessionState
     modes_changed = Signal(str, object)   # session_id, SessionModeState
     commands_changed = Signal(str, list)  # session_id, list[AvailableCommand]
+    config_options_changed = Signal(str, list)  # session_id, list[ConfigOption]
 
     # --- feed
     message_chunk = Signal(str, str, str) # session_id, message_id, text
@@ -365,10 +367,19 @@ class AcpClient(QtCore.QObject):
     def agent_info(self) -> AgentInfo | None
 
     def authenticate(self, method_id: str) -> None
+    def logout(self) -> None
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None
     def prompt(self, session_id: str, blocks: list[dict]) -> None
     def cancel(self, session_id: str) -> None
+    def close_session(self, session_id: str) -> None
+        """Sends session/close if the agent declared sessionCapabilities.close
+        (AgentInfo.supports_close_session), otherwise a no-op. With Claude,
+        every session is a whole agent-SDK process and its own MCP server
+        fleet — a conversation the artist has moved on from must give that
+        back, or it sits there running (measured: three hours, three
+        sessions, ~300 MB never released)."""
     def set_mode(self, session_id: str, mode_id: str) -> None
+    def set_config_option(self, session_id: str, config_id: str, value: str) -> None
     def answer_permission(self, request_key: str, option_id: str | None) -> None
         """option_id=None — "cancelled", results in a DeniedOutcome."""
 ```
@@ -387,6 +398,7 @@ class AgentInfo:
     supports_embedded_context: bool
     supports_load_session: bool
     supports_logout: bool
+    supports_close_session: bool = False   # sessionCapabilities.close
     auth_methods: tuple[AuthMethod, ...]
 
 @dataclass(frozen=True)
@@ -400,16 +412,32 @@ class AuthMethod:
 whether to draw the attachment button and microphone. The panel never
 decides anything on its own.
 
-The implementation relies on `acp.spawn_agent_process` (see
-[facts/acp-sdk.md §1](facts/acp-sdk.md)). Two pitfalls from there, both
-mandatory to handle:
+`acp.spawn_agent_process` (see [facts/acp-sdk.md §1](facts/acp-sdk.md)) does
+NOT work inside Houdini — it needs a child watcher, and Houdini's own
+`asyncio` policy (`haio`) doesn't provide one (see
+[facts/houdini.md §9](facts/houdini.md)). The implementation spawns the
+process itself with plain `subprocess.Popen` and hooks its pipes into the
+loop by hand (`connect_read_pipe`/`connect_write_pipe`), then hands the
+resulting reader/writer to `acp.connect_to_agent` — the same public,
+byte-stream calling form the SDK itself uses internally, minus the step
+that needs the watcher. Two things this path has to get right that the SDK
+helper would otherwise have handled:
 
-1. `default_environment()` hands the agent an almost-empty environment
-   (`HOME`, `PATH`, `SHELL`, `TERM`, `USER`). Everything else via an
-   explicit `env=`.
+1. **Environment.** `acp.default_environment()` alone hands the agent an
+   almost-empty environment (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`,
+   `USER`). Houdini is launched by the window server, not a shell, so it
+   never saw the artist's own profile, and an agent launched from Houdini
+   sees even less — no API key, no studio proxy, no cloud project. The
+   panel widens that base with the artist's own LOGIN SHELL environment
+   (`shellenv.merged(dict(acp.default_environment()), spec.env)`,
+   precedence weakest-first: the SDK's own default, then the shell, then
+   `spec.env`) — see `shellenv.py` for how that's captured, why it needs an
+   interactive login shell specifically (`-ilc`, not just `-lc`), and why
+   it's cached.
 2. The default stdio buffer limit is 64 KB. A base64 image will overflow
-   it, and the connection will hang. We pass
-   `transport_kwargs={"limit": 50 * 1024 * 1024}`.
+   it, and the connection will hang. Both the stdout and stderr readers are
+   built with `asyncio.StreamReader(limit=_STDIO_BUFFER_LIMIT, ...)`,
+   `_STDIO_BUFFER_LIMIT = 50 * 1024 * 1024`.
 
 The agent's `stderr` is read by a separate task and forwarded to
 `log_line` — otherwise a full pipe hangs the process.
@@ -592,6 +620,22 @@ exception.
 
 The widget tree. Each file is one public class; no one reaches into a
 neighbor's private attributes, everyone communicates via signals.
+
+Every background `QThread` that does one job and reports how it went
+(`_RefreshWorker`, `_LaunchPrepWorker` in `ui/panel.py`, `_InstallWorker` in
+`ui/agents.py`, `_UploadWorker` in `ui/voice.py`) is a subclass of
+`ui/worker.py::Worker`, not a bare `QThread`. Subclasses implement `work()`;
+`Worker.run()` wraps it, and anything `work()` doesn't catch itself becomes
+a `failed` signal plus a log entry with the traceback — not a bare
+`QThread.run()` override, whose escaped exceptions PySide prints straight
+to stderr, past `logging` entirely (confirmed: neither
+`sys.unraisablehook`, `threading.excepthook`, nor `qInstallMessageHandler`
+sees them on either Houdini 20.5/PySide2 or 22/PySide6 — only
+`sys.excepthook` does, on both). `logbook.setup()` also installs a
+process-wide `sys.excepthook` as a second, independent net under this one —
+strictly additive: it logs, then always calls whatever hook was already
+there, for a future worker that doesn't use `Worker` and for exceptions in
+ordinary Qt slots outside any worker at all. Neither replaces the other.
 
 ```
 AgentPanel (ui/panel.py)                 root QWidget, returned by onCreateInterface()

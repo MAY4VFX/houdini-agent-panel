@@ -6,6 +6,26 @@ Right now it can't: `acp.default_environment()` strips them, so a studio-wide pr
 
 Date verified: 2026-08-03.
 
+> **Update, 2026-08-04.** The premise above is no longer the whole picture.
+> `shellenv.py` was added for an unrelated report (Gemini could not
+> authenticate from the panel because `GEMINI_API_KEY` never reached it) and
+> it captures the artist's login shell wholesale — `HTTPS_PROXY` and
+> `NO_PROXY` among everything else. So the common case this document opens
+> with, "the studio already exports the proxy in the profile", is closed as a
+> side effect, by a change written for a different reason.
+>
+> What it does NOT close, and what the rest of this document is still about:
+> the panel's own downloads (registry, updates, portable Node) still use
+> `urllib` with no proxy handling; a corporate CA bundle still has to be
+> trusted explicitly (`network.ssl_context`, `NODE_EXTRA_CA_CERTS`); `npx`
+> installs still run with whatever environment we hand them; there is still
+> no Network section in settings for an artist whose proxy is NOT in their
+> profile; and `NO_PROXY` still needs localhost protected so the fx bridge
+> is not sent through the office proxy to reach 127.0.0.1.
+>
+> The scope narrows, it does not vanish. Kept rather than rewritten so the
+> reasoning that produced it stays legible.
+
 ## Two problems that get called "proxy"
 
 They need different answers, and a studio usually has only one of them.
