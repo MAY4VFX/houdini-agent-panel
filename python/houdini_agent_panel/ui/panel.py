@@ -91,6 +91,29 @@ def reset_shared_state_for_tests() -> None:
     sessions.reset_pool_for_tests()
 
 
+def _apply_network_settings(current: settings_mod.Settings) -> None:
+    """Point the panel's own requests at the studio's proxy and CA.
+
+    `network.configure` is a primitive that nothing calls on its own — and a
+    proxy feature that is fully implemented and never invoked is exactly the
+    kind of thing that looks finished and does nothing. Called at startup and
+    again whenever settings are saved, so a studio artist who fills these in
+    does not have to restart Houdini to find out whether they got them right.
+
+    Never fatal: the panel's downloads failing is a bad afternoon, the panel
+    not opening is a worse one.
+    """
+    try:
+        from .. import network, proxy
+
+        network.configure(
+            proxy=proxy.effective_proxy(current),
+            ca_bundle=proxy.effective_ca_bundle(current),
+        )
+    except Exception:  # noqa: BLE001 - a misconfigured proxy must not stop the panel
+        pass
+
+
 def _update_is_stale(update: Any) -> bool:
     """Is this cached update already installed?
 
@@ -168,10 +191,6 @@ _CANCEL_GRACE_MS = 4000
 #: silence past this reads as a dead button, and a dead button is exactly
 #: what an artist reports when nothing at all appears after a click.
 _NEW_SESSION_GRACE_MS = 20_000
-
-#: Below this the panel is too narrow to give the drawer its own column, so
-#: the drawer overlays instead of pushing the conversation aside.
-_MIN_BODY_WIDTH = 260
 
 #: Names for the featured six, for when the registry hasn't arrived yet. Not
 #: a source of truth — the registry always wins — this only keeps the chip
@@ -266,6 +285,7 @@ class AgentPanel(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._settings = settings_mod.load()
+        _apply_network_settings(self._settings)
         #: Which agent id THIS tab is attached to — its own connection
         #: (`shared_client(self._agent_id)`) and its own session list
         #: (`self._pool`). NOT the same fact as `self._settings.default_agent`,
@@ -357,10 +377,18 @@ class AgentPanel(QtWidgets.QWidget):
         self._pages.insertWidget(self.PAGE_SETTINGS, self._make_settings_view())
         self._pages.insertWidget(self.PAGE_AUTH, self._make_auth_view())
 
-        # Everything except the header lives in its own column, so the open
-        # conversation drawer can push it aside instead of covering it. The
-        # header stays full width on purpose: its sidebar toggle is the only
-        # way to close the drawer again, and it must never end up underneath it.
+        # Everything except the header lives in its own column below it. The
+        # open conversation drawer always OVERLAYS this column — it used to
+        # push it aside by resizing `_body_layout`'s left margin, and pushing
+        # it made the feed and composer visibly jump sideways the moment the
+        # drawer started (or finished) opening. Reported as "the panel
+        # jumps", and once the fix was scoped it turned out the owner didn't
+        # want a smoother jump either: the feed and composer must not change
+        # horizontal position at all, so the drawer only ever draws on top of
+        # them (see `ConversationDrawer`'s own class docstring). The header
+        # stays full width regardless: its sidebar toggle is the only way to
+        # close the drawer again, and the drawer starts below the header
+        # (`set_top_inset`) so it can never end up underneath it.
         self._body = QtWidgets.QWidget(self)
         self._body_layout = QtWidgets.QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
@@ -1104,31 +1132,17 @@ class AgentPanel(QtWidgets.QWidget):
     def _sync_drawer_geometry(self) -> None:
         self._conversations.set_top_inset(self._header.height())
         self._conversations.sync_parent_geometry()
-        self._apply_drawer_inset()
         if self._conversations.isVisible():
             self._conversations.raise_()
 
     def _on_drawer_state_changed(self, _open: bool) -> None:
-        self._apply_drawer_inset()
+        # The drawer overlays `_body` rather than resizing it (see the
+        # comment where `_body` is built), so nothing here needs to move —
+        # only raised. Re-positioning keeps calling `.raise_()` at the end
+        # of `_position_permission_popover`, which is what keeps an active
+        # permission request visible on TOP of a drawer that just opened
+        # over it, instead of hidden underneath.
         self._position_permission_popover()
-
-    def _apply_drawer_inset(self) -> None:
-        """Reserve the drawer's column so it never covers the conversation.
-
-        Only while there is room left: below `_MIN_BODY_WIDTH` the panel is
-        narrower than a drawer plus anything readable, so the drawer goes
-        back to overlaying — the same thing every responsive sidebar does,
-        and better than squeezing the feed into a hundred pixels.
-        """
-        drawer = self._conversations
-        inset = 0
-        if drawer.is_open() and self.width() - drawer.width() >= _MIN_BODY_WIDTH:
-            inset = drawer.width()
-        margins = self._body_layout.contentsMargins()
-        if margins.left() != inset:
-            self._body_layout.setContentsMargins(
-                inset, margins.top(), margins.right(), margins.bottom()
-            )
 
     def _start_new_session(self) -> None:
         """Ask the agent for another session — and never do it silently.
@@ -1594,6 +1608,7 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_settings_changed(self) -> None:
         self._settings = settings_mod.load()
+        _apply_network_settings(self._settings)
         info = shared_client(self._agent_id).agent_info()
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_agent_chip_menu()

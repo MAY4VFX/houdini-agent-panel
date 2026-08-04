@@ -596,35 +596,43 @@ def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     widget.shutdown()
 
 
-def test_open_drawer_moves_the_conversation_aside_instead_of_covering_it(qapp):
-    """An open drawer must not sit on top of what the artist is reading.
+def test_open_drawer_overlays_the_conversation_without_moving_it(qapp):
+    """An open drawer must not move the feed or the composer sideways.
 
-    It used to overlay the whole panel from x=0: the feed, the composer and
-    the header's own sidebar toggle all disappeared under it.
+    This used to reserve the drawer's width as `_body_layout`'s left
+    margin, which pushed the feed/composer aside — smoothly or not, that
+    is still a horizontal jump the owner explicitly does not want. The
+    drawer draws OVER the conversation now, at any panel width, and
+    `_body_layout`'s margin never changes.
     """
     widget = _make_panel(qapp)
     widget.resize(1000, 700)
     widget.show()
     qapp.processEvents()
 
+    body_x_before = widget._body.mapTo(widget, widget._body.rect().topLeft()).x()
+
     widget._conversations.open_drawer()
     qapp.processEvents()
 
     drawer = widget._conversations
-    assert widget._body_layout.contentsMargins().left() == drawer.width()
+    assert widget._body_layout.contentsMargins().left() == 0
+    assert widget._body.mapTo(widget, widget._body.rect().topLeft()).x() == body_x_before
     # The header keeps its full width, so the toggle that closes the drawer
-    # stays where it was.
+    # stays where it was — and the drawer starts below the header, so it
+    # can never end up on top of that toggle either.
     assert widget._header.x() == 0
     assert drawer.y() >= widget._header.height()
 
     widget._conversations.close_drawer()
     qapp.processEvents()
     assert widget._body_layout.contentsMargins().left() == 0
+    assert widget._body.mapTo(widget, widget._body.rect().topLeft()).x() == body_x_before
 
     widget.shutdown()
 
 
-def test_narrow_panel_lets_the_drawer_overlay_instead_of_squeezing_the_feed(qapp):
+def test_narrow_panel_also_overlays_not_squeezes_the_feed(qapp):
     widget = _make_panel(qapp)
     widget.resize(320, 700)
     widget.show()

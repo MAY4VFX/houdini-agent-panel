@@ -33,8 +33,6 @@ class AvailableCommand:
 @dataclass
 class Usage:
     total_tokens: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
 
 
 @dataclass

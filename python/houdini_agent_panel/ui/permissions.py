@@ -130,9 +130,13 @@ class PermissionRow(QtWidgets.QWidget):
     def apply_view(self, view: PermissionView) -> None:
         """Refresh the row from a fresh `PermissionView` (e.g. `answered` arrived elsewhere).
 
-        Used by `ui/transcript.py` to patch the existing row in place rather
-        than recreate the widget — that way the buttons' order and state
-        don't jump around.
+        NOT used by `ui/panel.py` today — `_sync_permission_popover` always
+        destroys and rebuilds the popover instead of patching it in place
+        (`ui/transcript.py` doesn't touch `PermissionRow` at all; it only
+        filters `entry.kind == "permission"` out of the drawn feed). This
+        method exists for a caller that DOES want to update one in place —
+        currently just the tests — and does the right thing if one shows
+        up; it just isn't wired to anything in production right now.
         """
         self._view = view
         if view.answered is not None and self._answered is None:
