@@ -1096,3 +1096,35 @@ def test_announcement_button_still_opens_its_link_not_an_update_path(qapp):
     assert "a1" in widget._settings.seen_announcements
 
     widget.shutdown()
+
+
+def test_the_banner_does_not_offer_a_version_already_installed(qapp, monkeypatch):
+    """Update results are cached for a day; the manifest changes the moment
+    an agent is launched or installed. So the banner could go on offering
+    0.64.2 to somebody already running 0.64.2 — and pressing it does nothing
+    observable, because installing a version that is already there is a
+    no-op. A button that cannot act is indistinguishable from a broken one,
+    which is exactly how this arrived."""
+    from houdini_agent_panel.ui import panel as panel_module
+
+    class _Update:
+        kind = "agent"
+        target = "claude-acp"
+        latest = "0.64.2"
+        current = "0.64.1"
+        label = "Claude Agent 0.64.2"
+
+    monkeypatch.setattr(
+        panel_module.runtime if hasattr(panel_module, "runtime") else panel_module,
+        "installed_version",
+        lambda _id: "0.64.2",
+        raising=False,
+    )
+    from houdini_agent_panel import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "installed_version", lambda _id: "0.64.2")
+
+    assert panel_module._update_is_stale(_Update()) is True
+
+    monkeypatch.setattr(runtime_module, "installed_version", lambda _id: "0.64.1")
+    assert panel_module._update_is_stale(_Update()) is False

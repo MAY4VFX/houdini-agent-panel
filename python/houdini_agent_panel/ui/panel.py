@@ -75,6 +75,25 @@ def reset_shared_state_for_tests() -> None:
     sessions.reset_pool_for_tests()
 
 
+def _update_is_stale(update: Any) -> bool:
+    """Is this cached update already installed?
+
+    Only agents are judged here: the panel's and fx's own versions come from
+    the running process, not from a manifest, so they cannot go stale the
+    same way.
+    """
+    if getattr(update, "kind", "") != "agent":
+        return False
+    try:
+        from .. import runtime
+        from ..updates import is_newer
+
+        current = runtime.installed_version(getattr(update, "target", ""))
+    except Exception:  # noqa: BLE001 - a banner is never worth an exception
+        return False
+    return current is not None and not is_newer(getattr(update, "latest", ""), current)
+
+
 class _RefreshWorker(Worker):
     """One network round trip for everything the panel needs, off the main thread.
 
@@ -1214,6 +1233,16 @@ class AgentPanel(QtWidgets.QWidget):
             self._notice.show_notice(announcement)
             return
         for update in getattr(result, "updates", []):
+            # Checked against what is on disk right now, the same guard the
+            # agent rows use. Update results are cached for a day and the
+            # manifest changes the moment an agent is launched or installed,
+            # so a banner could go on offering 0.64.2 to someone already
+            # running 0.64.2. Pressing it then does nothing observable —
+            # installing an existing version is a no-op — and a button that
+            # cannot act is indistinguishable from a broken one, which is
+            # exactly how this was reported.
+            if _update_is_stale(update):
+                continue
             self._active_update = update
             self._notice.show_update(update)
             return
