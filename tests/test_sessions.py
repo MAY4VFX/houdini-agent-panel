@@ -73,11 +73,12 @@ def test_remove_unknown_id_is_a_noop(qapp):
     assert pool.all() != []
 
 
-def test_pool_singleton_returns_same_instance(qapp):
+def test_pool_singleton_returns_same_instance_per_agent_id(qapp):
     sessions.reset_pool_for_tests()
     try:
-        first = sessions.pool()
-        second = sessions.pool()
+        first = sessions.pool("claude-acp")
+        second = sessions.pool("claude-acp")
         assert first is second
+        assert sessions.pool("gemini") is not first
     finally:
         sessions.reset_pool_for_tests()

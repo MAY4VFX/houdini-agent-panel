@@ -113,7 +113,7 @@ def test_the_transcript_moves_onto_the_live_session(qapp, monkeypatch):
     live = sessions.SessionState(
         session_id="live-1", title="New conversation", cwd="/tmp", created_at=0.0
     )
-    panel_mod.shared_client().session_started.emit("live-1", live)
+    panel_mod.shared_client(widget._agent_id).session_started.emit("live-1", live)
     qapp.processEvents()
 
     texts = [e.text for e in widget._model("live-1").entries()]

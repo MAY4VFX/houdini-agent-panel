@@ -1,9 +1,11 @@
-"""Session pool on top of a single ACP connection.
+"""Session pool on top of an ACP connection.
 
-One `SessionPool` per Houdini process (the module-level singleton `pool()`)
-— a second panel tab must see the same session list and the same live agent
-process: two tabs, one `AcpClient`, one agent process, different `current`
-(see docs/architecture.md §7).
+One `SessionPool` per agent id (the module-level `pool(agent_id)`), not one
+for the whole Houdini process — a second panel tab on the SAME agent must
+see the same session list and the same live agent process, but a tab on a
+DIFFERENT agent gets its own: two tabs on one agent, one `AcpClient`, one
+process, different `current` (see docs/architecture.md §7 and
+`ui/panel.py::AgentPanel._agent_id`).
 """
 
 from __future__ import annotations
@@ -137,22 +139,26 @@ class SessionPool(QtCore.QObject):
             self.changed.emit(session_id)
 
 
-_pool: SessionPool | None = None
+#: One pool per agent id, not one for the whole Houdini process. Two tabs
+#: both talking to Claude share a session list and a process; a tab that
+#: switches to Gemini gets Gemini's own list, not Claude's wiped out from
+#: under a sibling tab still using it — the bug this replaced (see
+#: `ui/panel.py`'s own docstring and `AgentPanel._agent_id`).
+_pools: dict[str, SessionPool] = {}
 
 
-def pool() -> SessionPool:
-    """Singleton per Houdini process.
+def pool(agent_id: str) -> SessionPool:
+    """The session pool for this one agent id, process-wide.
 
     Deliberately not thread-safe: `SessionPool` is a `QObject`, created and
     living on the main thread, like the rest of the panel's UI code.
     """
-    global _pool
-    if _pool is None:
-        _pool = SessionPool()
-    return _pool
+    if agent_id not in _pools:
+        _pools[agent_id] = SessionPool()
+    return _pools[agent_id]
 
 
 def reset_pool_for_tests() -> None:
-    """Tests only: the singleton would otherwise survive between tests."""
-    global _pool
-    _pool = None
+    """Tests only: the singletons would otherwise survive between tests."""
+    global _pools
+    _pools = {}

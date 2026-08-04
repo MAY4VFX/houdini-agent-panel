@@ -36,7 +36,7 @@ def _state(session_id: str) -> sessions.SessionState:
 def test_disconnect_clears_busy_on_every_session(qapp):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     for name in ("a", "b"):
         client.session_started.emit(name, _state(name))
@@ -55,7 +55,7 @@ def test_disconnect_clears_busy_on_every_session(qapp):
 def test_new_session_is_never_born_busy(qapp):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     stale = _state("fresh")
     stale.busy = True

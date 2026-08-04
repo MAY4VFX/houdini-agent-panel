@@ -2,10 +2,14 @@
 
 Three decisions here shape everything else.
 
-**One agent per Houdini process, many sessions.** The agent process and its
-connection live in the module, not the widget: a second panel tab must see
-the same conversation, not spin up a second process. Widgets come and go,
-the connection outlives them.
+**One agent process per agent id, many sessions.** The agent process and its
+connection live in the module, not the widget: a second panel tab ON THE
+SAME AGENT must see the same conversation, not spin up a second process.
+Widgets come and go, the connection outlives them — but a tab on a
+DIFFERENT agent gets its own process, not the same one repurposed (see
+`AgentPanel._agent_id` — this used to be one shared connection for the
+whole Houdini process, and switching one tab's agent silently pulled every
+other tab's conversation and connection down with it).
 
 **No network call and no long operation ever runs on the main thread.**
 Houdini paints its UI on the same thread as the viewport; a second spent
@@ -37,20 +41,32 @@ from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
 from .worker import Worker
 
-#: Connection to the agent for the whole Houdini process. Not a widget
-#: attribute — otherwise closing one tab would take the conversation open in
-#: another tab down with it.
-_shared_client: acp_client.AcpClient | None = None
+#: One connection per agent id, not one for the whole Houdini process. Two
+#: tabs both talking to Claude share the same process; a tab that switches
+#: to Gemini gets Gemini's own connection, and switching it again must not
+#: disturb a sibling tab still using Claude — see `AgentPanel._agent_id`.
+#: Not a widget attribute — otherwise closing one tab would take the
+#: conversation open in another tab (using the same agent) down with it.
+_shared_clients: dict[str, acp_client.AcpClient] = {}
 
-#: Live panels. Weak references: Qt deletes the widgets itself, and holding a
-#: strong reference here would just stop them from ever dying.
-_live_panels: "weakref.WeakSet[AgentPanel]" = weakref.WeakSet()
+#: Live panels, per agent id — weak references, since Qt deletes the widgets
+#: itself and holding a strong reference here would just stop them from ever
+#: dying. Which set a panel belongs to changes when it switches agents (see
+#: `AgentPanel._rejoin_agent`); a panel closing only stops ITS agent's
+#: client once no other tab using that SAME agent is left.
+_live_panels_by_agent: dict[str, "weakref.WeakSet[AgentPanel]"] = {}
 
 
-def shared_client() -> acp_client.AcpClient:
-    global _shared_client
-    if _shared_client is None:
-        _shared_client = acp_client.AcpClient()
+def _live_panels_for(agent_id: str) -> "weakref.WeakSet[AgentPanel]":
+    return _live_panels_by_agent.setdefault(agent_id, weakref.WeakSet())
+
+
+def shared_client(agent_id: str) -> acp_client.AcpClient:
+    """The connection for this one agent id, process-wide."""
+    client = _shared_clients.get(agent_id)
+    if client is None:
+        client = acp_client.AcpClient()
+        _shared_clients[agent_id] = client
         # Everything the client reports goes to the on-disk log. Without this
         # the panel is undiagnosable on someone else's machine: the log file
         # existed but held only the startup header, never a word about the
@@ -59,19 +75,19 @@ def shared_client() -> acp_client.AcpClient:
             from .. import logbook
 
             logbook.setup()
-            logbook.attach_client(_shared_client)
+            logbook.attach_client(client)
         except Exception:  # noqa: BLE001 - a log has no right to break the panel
             pass
-    return _shared_client
+    return client
 
 
 def reset_shared_state_for_tests() -> None:
     """Reset process-wide singletons. Tests only."""
-    global _shared_client
-    if _shared_client is not None:
-        _shared_client.stop()
-    _shared_client = None
-    _live_panels.clear()
+    global _shared_clients, _live_panels_by_agent
+    for client in _shared_clients.values():
+        client.stop()
+    _shared_clients = {}
+    _live_panels_by_agent = {}
     sessions.reset_pool_for_tests()
 
 
@@ -250,11 +266,29 @@ class AgentPanel(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._settings = settings_mod.load()
-        self._pool = sessions.pool()
-        #: Which session THIS tab has on screen — the pool is shared
-        #: (same session list, same agent process, per its own docstring),
-        #: but this is not: two tabs must be able to look at two different
-        #: conversations at once (issue #21). See `_current_session`/
+        #: Which agent id THIS tab is attached to — its own connection
+        #: (`shared_client(self._agent_id)`) and its own session list
+        #: (`self._pool`). NOT the same fact as `self._settings.default_agent`,
+        #: which is what a BRAND NEW tab opens with — this is what THIS one
+        #: actually has right now, and the two can differ the moment this
+        #: tab switches agents (this fixes that they used to be conflated:
+        #: switching one tab's agent used to stop the ONE shared client and
+        #: clear the ONE shared session pool, for every tab, regardless of
+        #: which agent it was actually using).
+        #:
+        #: Switching agents in a tab DOES update `default_agent` too (see
+        #: `_on_agent_chosen`) — deliberately: the last agent someone
+        #: actually picked is the reasonable thing for the next new tab to
+        #: open with, the same way switching a terminal's shell updates
+        #: which one a new terminal in that same session starts with.
+        #: `""` means no agent chosen yet (a fresh tab before `_boot()` has
+        #: run, or one that landed on "Manage agents").
+        self._agent_id: str = ""
+        #: Which session THIS tab has on screen — the pool is shared (same
+        #: session list, same agent process) among every tab on the SAME
+        #: agent, but this is not: two tabs must be able to look at two
+        #: different conversations at once (issue #21), including two tabs
+        #: both on the same agent. See `_current_session`/
         #: `_set_current_session`.
         self._current_session_id: str | None = None
         self._models: dict[str, TranscriptModel] = {}
@@ -286,10 +320,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._closed = False
 
         self._build()
+        # Wired to the "" (no agent yet) client/pool for now — `_boot()`
+        # calls `_rejoin_agent` to move onto the real one the moment it
+        # knows which that is, before touching anything that depends on it.
         self._wire_client()
         self._wire_pool()
 
-        _live_panels.add(self)
+        _live_panels_for(self._agent_id).add(self)
 
         # Boot is deferred to the next event loop pass: Houdini waits for the
         # widget to return from onCreateInterface, and anything done before
@@ -383,10 +420,12 @@ class AgentPanel(QtWidgets.QWidget):
 
         view = AuthView(self)
         self._auth_view = view
-        # Through its own methods, not straight into shared_client().authenticate:
+        # Through its own methods, not straight into shared_client(...).authenticate:
         # a direct subscription would permanently capture whichever client
-        # instance existed when the widget was built. The client gets
-        # recreated on an agent switch, and the login buttons would silently
+        # instance existed when the widget was built. Switching THIS tab's
+        # agent means talking to a different client object entirely (one
+        # per agent id, not one for the whole process — see
+        # `AgentPanel._agent_id`), and the login buttons would silently
         # start talking to a corpse.
         view.method_chosen.connect(self._on_auth_method_chosen)
         view.logout_requested.connect(self._on_logout_requested)
@@ -417,6 +456,15 @@ class AgentPanel(QtWidgets.QWidget):
     # --------------------------------------------------------------- boot
 
     def _boot(self) -> None:
+        agent_id = self._settings.default_agent
+        # Which agent THIS tab is attached to must be settled before
+        # anything below touches `self._pool` or `shared_client(...)` —
+        # `_restore_conversations` in particular needs a real `self._agent_id`
+        # to add restored placeholders into the right pool, not whatever
+        # the "" (no agent) one happened to hold.
+        if agent_id:
+            self._rejoin_agent(agent_id)
+
         self._restore_conversations()
         self._header.set_cwd(scene.hip_dir())
         self._refresh_agent_chip_menu()
@@ -425,16 +473,17 @@ class AgentPanel(QtWidgets.QWidget):
         self._refresh_worker.start()
         self._ask_telemetry_consent_once()
 
-        client = shared_client()
-        if client.is_running():
-            # We're a second tab: the connection is already up, show what's there.
-            self._adopt_running_client()
-            return
-
-        agent_id = self._settings.default_agent
         if not agent_id:
             self._open_agent_management()
             return
+
+        client = shared_client(agent_id)
+        if client.is_running():
+            # Another tab already has this SAME agent's connection up —
+            # join it rather than starting a second process for it.
+            self._adopt_running_client()
+            return
+
         # The chip says which agent is chosen, and that is known from
         # settings before anything is launched. Only `_start_agent` used to
         # set it, so with autostart off the panel opened with a bare dot and
@@ -448,19 +497,14 @@ class AgentPanel(QtWidgets.QWidget):
         self._start_agent(agent_id)
 
     def _adopt_running_client(self) -> None:
-        info = shared_client().agent_info()
+        info = shared_client(self._agent_id).agent_info()
         if info is not None:
             # The artist's name for it, not the npm package from `initialize`.
             # This path skips `_start_agent`, so nothing had set the pending
             # label and the chip fell back to "@agentclientprotocol/…".
-            self._pending_agent_label = self._display_label(self._settings.default_agent or "")
-            self._header.set_agent(
-                self._pending_agent_label
-                or self._display_label(self._settings.default_agent or "")
-                or info.name,
-                None,
-            )
-            self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
+            self._pending_agent_label = self._display_label(self._agent_id)
+            self._header.set_agent(self._pending_agent_label or info.name, None)
+            self._settings_view.set_current_agent_auth(self._agent_id, bool(info.auth_methods))
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
         current = self._current_session()
@@ -508,7 +552,7 @@ class AgentPanel(QtWidgets.QWidget):
         if label:
             self._pending_agent_label = label
         self._note(f"Launching {self._pending_agent_label}…")
-        shared_client().start(spec, cwd=scene.hip_dir())
+        shared_client(self._agent_id).start(spec, cwd=scene.hip_dir())
 
     def _on_launch_prep_failed(self, message: str) -> None:
         self._launch_worker = None
@@ -560,19 +604,26 @@ class AgentPanel(QtWidgets.QWidget):
                 ids.append(entry.id)
         ids += [c.id for c in self._settings.custom_agents]
         items = [(agent_id, self._display_label(agent_id)) for agent_id in ids]
-        self._header.set_agent_menu(items, self._settings.default_agent)
+        # The checked entry is THIS tab's own agent, not the process-wide
+        # default — a sibling tab on a different agent must not show up as
+        # "selected" here just because it is what a NEW tab would open with.
+        self._header.set_agent_menu(items, self._agent_id)
 
     # ------------------------------------------------------------- client
 
     def _wire_client(self) -> None:
-        """Subscribe to the shared client, remembering EVERY signal-slot pair.
+        """Subscribe to `self._agent_id`'s client, remembering EVERY
+        signal-slot pair.
 
         We remember pairs specifically because the client is shared across
-        tabs: a bare ``signal.disconnect()`` when one tab closes would also
-        disconnect its neighbor, which would stop getting the agent's
-        replies while still looking alive.
+        every tab using the SAME agent id: a bare ``signal.disconnect()``
+        when one tab closes, or switches to a different agent, would also
+        disconnect a sibling tab still on this one — which would stop
+        getting the agent's replies while still looking alive. Call
+        `_unwire_client()` first if this tab was already wired to a
+        (possibly different) agent's client — `_rejoin_agent` does.
         """
-        client = shared_client()
+        client = shared_client(self._agent_id)
         wiring = (
             (client.connected, self._on_connected),
             (client.disconnected, self._on_disconnected),
@@ -598,11 +649,19 @@ class AgentPanel(QtWidgets.QWidget):
             signal.connect(slot)
         self._client_wiring = wiring
 
+    def _unwire_client(self) -> None:
+        for signal, slot in getattr(self, "_client_wiring", ()):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._client_wiring = ()
+
     def _on_connected(self, info: Any) -> None:
         # The chip shows the name the artist picked, not the npm package
         # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
-        self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
+        self._settings_view.set_current_agent_auth(self._agent_id, bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         # What a CLI prints when it starts, and the thing that was missing
         # from a five-second gap: "Preparing…", "Launching…", then silence
@@ -655,7 +714,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._open_agent_management()
 
     def _on_auth_required(self, methods: list) -> None:
-        info = shared_client().agent_info()
+        info = shared_client(self._agent_id).agent_info()
         self._auth_view.set_methods(
             methods, can_logout=bool(info and info.supports_logout)
         )
@@ -744,7 +803,7 @@ class AgentPanel(QtWidgets.QWidget):
                 for option in current.config_options
             ]
             self._pool.mark_changed(current.session_id)
-            shared_client().set_config_option(current.session_id, config_id, value)
+            shared_client(self._agent_id).set_config_option(current.session_id, config_id, value)
 
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
         entry = self._model(session_id).apply_chunk(message_id, text)
@@ -826,7 +885,7 @@ class AgentPanel(QtWidgets.QWidget):
         session_id = self._pending_permissions.pop(request_key, "")
         self._permission_views.pop(request_key, None)
         self._hide_permission_popover()
-        shared_client().answer_permission(request_key, option_id or None)
+        shared_client(self._agent_id).answer_permission(request_key, option_id or None)
         if session_id:
             entry = self._model(session_id).resolve_permission(request_key, option_id or None)
             if entry is not None:
@@ -836,15 +895,18 @@ class AgentPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------ sessions
 
     def _wire_pool(self) -> None:
-        """Subscribe to the session pool, and REMEMBER the subscriptions.
+        """Subscribe to `self._agent_id`'s session pool, and REMEMBER the
+        subscriptions.
 
-        The pool is a process-wide singleton, so a connection into it
-        outlives the tab that made it. These were fire-and-forget, and a
-        lambda holding `self` kept every panel ever opened alive with its
-        whole widget tree — closing a tab freed nothing. On a desktop where
-        panels get opened and closed through the day that shows up as
-        hundreds of stray empty windows, which is exactly how it was
-        reported.
+        The pool is process-wide PER AGENT ID, so a connection into it
+        outlives the tab that made it and is shared with every other tab on
+        the SAME agent. These were fire-and-forget, and a lambda holding
+        `self` kept every panel ever opened alive with its whole widget tree
+        — closing a tab freed nothing. On a desktop where panels get opened
+        and closed through the day that shows up as hundreds of stray empty
+        windows, which is exactly how it was reported. Call
+        `_unwire_pool()` first if this tab was already wired to a
+        (possibly different) agent's pool — `_rejoin_agent` does.
         """
         refresh = lambda _sid: self._refresh_sessions()  # noqa: E731 - one slot, three signals
         self._pool_wiring = (
@@ -855,6 +917,40 @@ class AgentPanel(QtWidgets.QWidget):
         )
         for signal, slot in self._pool_wiring:
             signal.connect(slot)
+
+    def _unwire_pool(self) -> None:
+        for signal, slot in getattr(self, "_pool_wiring", ()):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._pool_wiring = ()
+
+    def _rejoin_agent(self, agent_id: str) -> None:
+        """Make `agent_id` the one THIS tab is attached to: its connection
+        (`shared_client`), its session list (`self._pool`), and its place
+        in the per-agent live-tab count that decides when that agent's
+        client actually stops (see `shutdown`). Safe to call at boot (moving
+        off the initial `""`) and on every later switch — unwires whatever
+        this tab was attached to before, so nothing here ever double-fires
+        on an agent this tab has already left.
+
+        Does not itself start or stop anything: the caller decides that
+        (`_boot`, `_on_agent_chosen`). This only moves which agent's
+        objects THIS tab is listening to.
+        """
+        self._unwire_client()
+        self._unwire_pool()
+        _live_panels_for(self._agent_id).discard(self)
+        self._agent_id = agent_id
+        _live_panels_for(agent_id).add(self)
+        self._wire_client()
+        self._wire_pool()
+
+    @property
+    def _pool(self) -> sessions.SessionPool:
+        """THIS tab's own agent's session list — see `self._agent_id`."""
+        return sessions.pool(self._agent_id)
 
     def _current_session(self) -> sessions.SessionState | None:
         """Whichever session THIS tab has open — see `_current_session_id`."""
@@ -1031,11 +1127,13 @@ class AgentPanel(QtWidgets.QWidget):
         conclusion is that the button is broken. So the request is announced
         when it goes out and chased up if the answer never comes.
         """
-        client = shared_client()
+        client = shared_client(self._agent_id)
         if not client.is_running():
-            agent_id = self._settings.default_agent
-            if agent_id:
-                self._start_agent(agent_id)
+            # THIS tab's own agent, not necessarily the process-wide
+            # default — if this tab never had one (a fresh "" agent id),
+            # there is nothing here for "+" to restart.
+            if self._agent_id:
+                self._start_agent(self._agent_id)
             else:
                 self._open_agent_management()
             return
@@ -1080,16 +1178,19 @@ class AgentPanel(QtWidgets.QWidget):
         if self._current_session() is None:
             self._start_new_session()
 
-    def _release_session(self, session_id: str) -> None:
+    def _release_session(self, session_id: str, *, agent_id: str | None = None) -> None:
         """Give a session back to the agent, if it is a real one.
 
         Restored conversations carry OUR id, not the agent's — there is
         nothing on the far side to close, and asking would be a lie about
-        what exists.
+        what exists. `agent_id` defaults to THIS tab's own
+        (`self._agent_id`); an explicit one is for releasing a session that
+        belonged to an agent this tab just switched AWAY from — see
+        `_on_agent_chosen`.
         """
         if not session_id or session_id.startswith(_RESTORED_PREFIX):
             return
-        shared_client().close_session(session_id)
+        shared_client(agent_id if agent_id is not None else self._agent_id).close_session(session_id)
 
     def _model(self, session_id: str) -> TranscriptModel:
         return self._models.setdefault(session_id, TranscriptModel())
@@ -1159,7 +1260,7 @@ class AgentPanel(QtWidgets.QWidget):
         activity = self._model(current.session_id).start_activity()
         self._touch(current.session_id, activity.id)
         self._composer.trigger_buddy()
-        shared_client().prompt(current.session_id, blocks)
+        shared_client(self._agent_id).prompt(current.session_id, blocks)
 
     def _finish_activity(self, session_id: str) -> None:
         activity = self._model(session_id).finish_activity()
@@ -1179,7 +1280,7 @@ class AgentPanel(QtWidgets.QWidget):
         if current is None:
             self._composer.set_busy(False)
             return
-        shared_client().cancel(current.session_id)
+        shared_client(self._agent_id).cancel(current.session_id)
         session_id = current.session_id
         QtCore.QTimer.singleShot(
             _CANCEL_GRACE_MS, lambda: self._release_if_still_busy(session_id)
@@ -1214,7 +1315,7 @@ class AgentPanel(QtWidgets.QWidget):
         if current is not None:
             current.current_mode_id = mode_id
             self._pool.mark_changed(current.session_id)
-            shared_client().set_mode(current.session_id, mode_id)
+            shared_client(self._agent_id).set_mode(current.session_id, mode_id)
 
     def _on_buddy_selected(self, buddy: str) -> None:
         self._settings.buddy = buddy
@@ -1307,37 +1408,50 @@ class AgentPanel(QtWidgets.QWidget):
     def _before_agent_install(self, agent_id: str) -> None:
         """About to overwrite `agent_id`'s files on disk (install OR update,
         from the settings row or from the notice banner — this fires either
-        way, see `AgentsView.__init__`). If it's the agent currently
-        running, its files are what the live process is reading from RIGHT
-        NOW — swapping them under it is not something this panel does
-        silently. Stopping it here, not just asking the artist to: they
-        already said "update" once, and a second manual step for something
-        the panel can safely do itself is the friction this project's UI
-        rule exists to cut. `_on_agent_install_succeeded` brings it back up.
+        way, see `AgentsView.__init__`). If it's running, its files are what
+        the live process is reading from RIGHT NOW — swapping them under it
+        is not something this panel does silently. Stopping it here, not
+        just asking the artist to: they already said "update" once, and a
+        second manual step for something the panel can safely do itself is
+        the friction this project's UI rule exists to cut.
+        `_on_agent_install_succeeded` brings it back up.
+
+        Only restarts it if `agent_id` is THIS tab's own agent
+        (`self._agent_id`) — restarting an agent some OTHER, unrelated tab
+        happens to be using isn't this tab's call to make; that tab is still
+        wired to the same `shared_client(agent_id)` and will see it die,
+        same as any other disconnect. A tab updating an agent it is not
+        itself using at all still stops it (the files are about to change
+        regardless of who notices), it just does not track bringing it back
+        up — there is currently no owner for that restart in this case, a
+        gap worth a dedicated look rather than a guess here.
         """
-        client = shared_client()
-        if client.is_running() and self._settings.default_agent == agent_id:
+        client = shared_client(agent_id)
+        if not client.is_running():
+            return
+        self._note(
+            f"Stopping {self._display_label(agent_id)} to update it"
+            + (" — it restarts automatically once the update finishes." if agent_id == self._agent_id else ".")
+        )
+        if agent_id == self._agent_id:
             self._restart_after_update = agent_id
-            self._note(
-                f"Stopping {self._display_label(agent_id)} to update it — "
-                "it restarts automatically once the update finishes."
-            )
-            client.stop()
+        client.stop()
 
     def _before_agent_uninstall(self, agent_id: str) -> None:
         """About to delete `agent_id`'s files entirely (Remove). Same hazard
         as `_before_agent_install`, without the "brings it back up" half —
         Remove means the artist wants it gone, not restarted, so unlike an
         update this never sets `_restart_after_update`. The header is reset
-        to blank rather than left naming a process that is both stopped and
-        no longer installed — the same blank state a fresh panel starts in,
-        before any agent has been chosen.
+        to blank only if THIS tab was the one showing `agent_id` — a sibling
+        tab using some OTHER agent must not have its own header touched by
+        a Remove click that has nothing to do with it.
         """
-        client = shared_client()
-        if client.is_running() and self._settings.default_agent == agent_id:
+        client = shared_client(agent_id)
+        if client.is_running():
             self._note(f"Stopping {self._display_label(agent_id)} to remove it.")
             client.stop()
-            self._header.set_agent("", None)
+            if agent_id == self._agent_id:
+                self._header.set_agent("", None)
 
     def _on_agent_install_succeeded(self, agent_id: str) -> None:
         if self._active_update is not None and self._active_update.target == agent_id:
@@ -1405,7 +1519,7 @@ class AgentPanel(QtWidgets.QWidget):
         known from `initialize` either way, so signing in never has to depend
         on the agent asking first.
         """
-        info = shared_client().agent_info()
+        info = shared_client(self._agent_id).agent_info()
         if info is None or not info.auth_methods:
             return
         if self._pages.currentIndex() == self.PAGE_AUTH:
@@ -1418,7 +1532,7 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._last_auth_method = method_id
         self._note(f"Signing in with {method_id}… finish it in the browser if it opens.")
-        shared_client().authenticate(method_id)
+        shared_client(self._agent_id).authenticate(method_id)
 
     def _on_authenticated(self, method_id: str) -> None:
         """Sign-in worked — get out of the way and open a conversation.
@@ -1441,7 +1555,7 @@ class AgentPanel(QtWidgets.QWidget):
         couldn't log out, an `error` arrives instead and the human stays
         put: silently pretending the logout happened isn't an option.
         """
-        shared_client().logout()
+        shared_client(self._agent_id).logout()
 
     def _ask_telemetry_consent_once(self) -> None:
         """Ask about telemetry exactly once, ever.
@@ -1467,12 +1581,12 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_settings_changed(self) -> None:
         self._settings = settings_mod.load()
-        info = shared_client().agent_info()
+        info = shared_client(self._agent_id).agent_info()
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_agent_chip_menu()
 
     def _on_agent_chosen(self, agent_id: str) -> None:
-        """Switch the running agent — called from the header chip's menu.
+        """Switch THIS tab's agent — called from the header chip's menu.
 
         Reload from disk BEFORE writing — mandatory. self._settings is a
         snapshot from when the panel opened, and the agents section writes a
@@ -1481,29 +1595,58 @@ class AgentPanel(QtWidgets.QWidget):
         pick it right away" failed with "agent isn't in the registry or
         among custom agents" (found only by testing live, in both Houdini
         versions).
+
+        Also updates `default_agent`: the last agent someone actually
+        picked is the reasonable thing for the next NEW tab to open with —
+        the same way switching a terminal's shell changes what a new
+        terminal in that session starts with. It is not the same fact as
+        `self._agent_id` (see where that is declared); this tab's own
+        connection and session list follow `self._agent_id` only.
+
+        A per-agent connection/pool now: only the agent THIS tab is
+        leaving is affected, and only if no OTHER tab is still attached to
+        it — a sibling tab on that same agent keeps working untouched, and
+        one already on a third agent was never in scope at all. Old
+        behaviour (single shared client/pool, stopped and cleared on every
+        switch by every tab) is exactly the bug this replaced: switching
+        one tab's agent used to silently drop a sibling tab's own
+        conversation and connection.
         """
+        if agent_id == self._agent_id:
+            return  # already this one
+        old_agent_id = self._agent_id
+
         self._settings = settings_mod.load()
         self._settings.default_agent = agent_id
         settings_mod.save(self._settings)
-        self._refresh_agent_chip_menu()
-        client = shared_client()
-        if client.is_running():
-            client.stop()
-        # A session id belongs to the process that issued it, so the binding
-        # to the old agent must go. The CONVERSATION does not: it is what the
-        # artist wrote and read, and wiping it on every agent switch was the
-        # bug, not the feature. Transcripts are written to disk first, the
-        # pool is emptied of dead ids, and the drawer keeps showing the same
-        # list.
-        #
-        # Continuing with a different agent does not carry the model's memory
-        # across — no protocol can do that. The transcript stays readable and
-        # the new agent starts from what it is told.
+
+        # The CONVERSATION is not the session id: it is what the artist
+        # wrote and read, and wiping it on every agent switch was the bug,
+        # not the feature. Written to disk before anything about the old
+        # agent is touched.
         self._persist_conversations()
-        for state in self._pool.all():
-            self._release_session(state.session_id)
-        self._pool.clear()
+        self._current_session_id = None
         self._pending_permissions.clear()
+
+        # Detach from the old agent's live-panel count BEFORE deciding
+        # whether it was the last tab there — `_rejoin_agent` does the
+        # detaching, this reads the result right after.
+        self._rejoin_agent(agent_id)
+
+        if not _live_panels_for(old_agent_id):
+            # Nobody else is attached to the agent this tab just left —
+            # its process and session list can go. A session id belongs to
+            # the process that issued it, so the binding must go with it;
+            # a sibling tab still using this same agent would keep both.
+            old_client = shared_client(old_agent_id)
+            old_pool = sessions.pool(old_agent_id)
+            for state in old_pool.all():
+                self._release_session(state.session_id, agent_id=old_agent_id)
+            if old_client.is_running():
+                old_client.stop()
+            old_pool.clear()
+
+        self._refresh_agent_chip_menu()
         # A message queued for the old agent has nowhere to land yet: the new
         # one has not opened a session. It is kept and sent once it does.
         self._start_agent(agent_id)
@@ -1635,7 +1778,7 @@ class AgentPanel(QtWidgets.QWidget):
             return
         self._closed = True
         self._persist_conversations()
-        _live_panels.discard(self)
+        _live_panels_for(self._agent_id).discard(self)
 
         # Background threads are asked to stop, but a thread in the middle of
         # a network round trip does not stop on request — it stops when the
@@ -1675,8 +1818,16 @@ class AgentPanel(QtWidgets.QWidget):
         self._client_wiring = ()
         self._pool_wiring = ()
 
-        if not _live_panels:
-            global _shared_client
-            if _shared_client is not None:
-                _shared_client.stop()
-                _shared_client = None
+        # THIS tab's agent's connection only, and only if no OTHER tab is
+        # still attached to it — closing one of two tabs sharing the same
+        # agent must not take the other one's conversation down with it.
+        # A sibling tab on a DIFFERENT agent was never affected either way.
+        if not _live_panels_for(self._agent_id):
+            client = _shared_clients.pop(self._agent_id, None)
+            if client is not None:
+                client.stop()
+            # Same reasoning as `_on_agent_chosen`'s own cleanup: a session
+            # id belongs to the process that just died, and leaving it in
+            # the pool would greet whichever tab opens this SAME agent
+            # next with session ids from a process that no longer exists.
+            sessions.pool(self._agent_id).clear()

@@ -30,7 +30,7 @@ def isolated(qapp, monkeypatch):
 def test_successful_sign_in_leaves_the_sign_in_screen(qapp, monkeypatch):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     from houdini_agent_panel.client import AuthMethod
 
@@ -52,7 +52,7 @@ def test_successful_sign_in_leaves_the_sign_in_screen(qapp, monkeypatch):
 def test_sign_in_does_not_reopen_a_conversation_that_already_exists(qapp, monkeypatch):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     state = sessions.SessionState(
         session_id="live", title="New conversation", cwd="/tmp", created_at=0.0
@@ -75,7 +75,7 @@ def test_choosing_a_method_tells_the_artist_to_check_the_browser(qapp, monkeypat
     like a button that did nothing."""
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    monkeypatch.setattr(panel_mod.shared_client(), "authenticate", lambda _m: None)
+    monkeypatch.setattr(panel_mod.shared_client(widget._agent_id), "authenticate", lambda _m: None)
 
     notes: list[str] = []
     monkeypatch.setattr(widget, "_note", notes.append)

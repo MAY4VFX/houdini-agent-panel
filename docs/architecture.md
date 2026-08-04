@@ -444,15 +444,27 @@ class SessionPool(QtCore.QObject):
     def remove(self, session_id: str) -> None
 ```
 
-One `SessionPool` per Houdini process (the module-level singleton
-`pool()`), because a second panel tab must see the same session list and
-the same live agent process. Two tabs — one `AcpClient`, one process,
-different `current`: the pool has no notion of "current" at all — that's a
-fact about a tab, not about the shared list, and lives on `AgentPanel`
-itself (`_current_session_id`/`_set_current_session`/`_current_session()`).
-It used to live here as one shared field, which meant picking a different
+One `SessionPool` per agent id (`sessions.pool(agent_id)`), not one for the
+whole Houdini process, because a second panel tab on the SAME agent must
+see the same session list and the same live agent process — but a tab on a
+DIFFERENT agent gets its own list and its own `AcpClient`
+(`ui/panel.py::shared_client(agent_id)`), not the one shared object every
+tab used to reach for regardless of which agent it was actually talking
+to. Which agent a tab is attached to at all is `AgentPanel._agent_id`, and
+it is not the same fact as `settings.default_agent` (what a brand NEW tab
+opens with) — see that attribute's own docstring.
+
+Two tabs on the same agent — one `AcpClient`, one process, different
+`current`: the pool has no notion of "current" at all — that's a fact
+about a tab, not about the shared list, and lives on `AgentPanel` itself
+(`_current_session_id`/`_set_current_session`/`_current_session()`). It
+used to live here as one shared field, which meant picking a different
 conversation in one tab silently moved every other open tab too (issue
-#21) — exactly the opposite of "different current" above.
+#21) — exactly the opposite of "different current" above. The pool itself
+was also a single process-wide object until the same class of bug showed
+up one layer up: switching one tab's agent stopped and cleared the ONE
+shared client/pool, which was every tab's, regardless of which agent it
+was actually using.
 
 ---
 

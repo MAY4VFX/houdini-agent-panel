@@ -38,17 +38,17 @@ def _panel_with_session(qapp, session_id: str = "live-1"):
     return widget
 
 
-def _record_closes(monkeypatch) -> list[str]:
+def _record_closes(monkeypatch, agent_id: str) -> list[str]:
     closed: list[str] = []
     monkeypatch.setattr(
-        panel_mod.shared_client(), "close_session", closed.append, raising=False
+        panel_mod.shared_client(agent_id), "close_session", closed.append, raising=False
     )
     return closed
 
 
 def test_deleting_a_conversation_gives_its_session_back(qapp, monkeypatch):
     widget = _panel_with_session(qapp)
-    closed = _record_closes(monkeypatch)
+    closed = _record_closes(monkeypatch, widget._agent_id)
 
     widget._on_session_removed("live-1")
 
@@ -63,7 +63,7 @@ def test_switching_agents_gives_every_session_back(qapp, monkeypatch):
     widget._pool.add(
         sessions.SessionState(session_id="live-2", title="Other", cwd="/tmp", created_at=1.0)
     )
-    closed = _record_closes(monkeypatch)
+    closed = _record_closes(monkeypatch, widget._agent_id)
     monkeypatch.setattr(widget, "_start_agent", lambda _id: None)
 
     widget._on_agent_chosen("codex-acp")
@@ -76,7 +76,7 @@ def test_a_restored_conversation_has_nothing_to_close(qapp, monkeypatch):
     """Its id is ours, not the agent's. Asking the agent to close a session
     it never opened would be a lie about what exists."""
     widget = _panel_with_session(qapp, panel_mod._RESTORED_PREFIX + "abc")
-    closed = _record_closes(monkeypatch)
+    closed = _record_closes(monkeypatch, widget._agent_id)
 
     widget._on_session_removed(panel_mod._RESTORED_PREFIX + "abc")
 

@@ -145,7 +145,7 @@ class Harness:
         settings_mod.save(current)
 
         self.panel = panel_mod.AgentPanel()
-        client = panel_mod.shared_client()
+        client = panel_mod.shared_client(self.agent_id)
         e = self.events
         client.connected.connect(lambda info: e.__setitem__("connected", info))
         client.failed.connect(lambda m: e.__setitem__("failed", m))
@@ -375,7 +375,7 @@ def check_two_panels_share_one_agent(agent_id: str) -> str:
         try:
             if second._pool is not h.panel._pool:
                 raise Failure("the second panel got its own session pool")
-            if panel_mod.shared_client() is not panel_mod.shared_client():
+            if panel_mod.shared_client(agent_id) is not panel_mod.shared_client(second._agent_id):
                 raise Failure("the second panel started its own agent")
             return "one agent, two panels"
         finally:
@@ -398,7 +398,7 @@ def check_two_tabs_independent_current(agent_id: str) -> str:
         session_a = h.open_session()
 
         second_events: dict = {}
-        panel_mod.shared_client().session_started.connect(
+        panel_mod.shared_client(agent_id).session_started.connect(
             lambda sid, _s: second_events.setdefault("session", sid)
         )
         second = panel_mod.AgentPanel()

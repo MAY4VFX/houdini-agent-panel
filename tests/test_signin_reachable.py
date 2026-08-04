@@ -41,7 +41,7 @@ def _info(**overrides) -> AgentInfo:
 def test_authorization_error_on_stderr_opens_the_sign_in_screen(qapp, monkeypatch):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "agent_info", lambda: _info())
 
     client.log_line.emit(
@@ -63,7 +63,7 @@ def test_sign_in_is_reachable_from_the_settings_agents_row(qapp, monkeypatch):
     """
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "agent_info", lambda: _info())
 
     widget._settings_view.sign_in_requested.emit()
@@ -93,7 +93,7 @@ def test_agent_without_auth_methods_gets_no_sign_in(qapp, monkeypatch):
     """The rule holds: the agent doesn't offer it, the control isn't drawn."""
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "agent_info", lambda: _info(auth_methods=()))
 
     widget._offer_sign_in()
@@ -109,7 +109,7 @@ def test_ordinary_stderr_noise_is_not_shouted_at_the_artist(qapp):
     notes: list[str] = []
     widget._note = notes.append
 
-    panel_mod.shared_client().log_line.emit("ExperimentalWarning: Importing JSON modules")
+    panel_mod.shared_client(widget._agent_id).log_line.emit("ExperimentalWarning: Importing JSON modules")
     qapp.processEvents()
 
     assert notes == []

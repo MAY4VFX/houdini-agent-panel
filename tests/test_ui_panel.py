@@ -58,14 +58,24 @@ def test_without_default_agent_panel_opens_on_agents_settings(qapp):
     widget.shutdown()
 
 
-def test_two_panels_share_one_client_and_one_pool(qapp):
-    """Two tabs, one agent process. A direct design.md requirement:
-    "one agent, many sessions"."""
+def test_two_panels_on_the_same_agent_share_one_client_and_one_pool(qapp):
+    """Two tabs on the SAME agent, one process. A direct design.md
+    requirement: "one agent, many sessions" — per agent id, not per
+    Houdini process (see `AgentPanel._agent_id`): a tab on a DIFFERENT
+    agent gets its own, covered by
+    `test_agent_switch.py::test_switching_one_tabs_agent_does_not_disturb_another_tabs_agent`.
+    """
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
     first = _make_panel(qapp)
     second = _make_panel(qapp)
+    assert first._agent_id == second._agent_id == "claude-acp"
 
     assert first._pool is second._pool
-    assert panel_mod.shared_client() is panel_mod.shared_client()
+    assert panel_mod.shared_client(first._agent_id) is panel_mod.shared_client(second._agent_id)
 
     first.shutdown()
     second.shutdown()
@@ -93,8 +103,9 @@ def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
     """
     first = _make_panel(qapp)
     second = _make_panel(qapp)
+    assert first._agent_id == second._agent_id  # both "" — same client either way
 
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(first._agent_id)
     state = _session()
     client.session_started.emit(state.session_id, state)
     qapp.processEvents()
@@ -123,7 +134,7 @@ def test_switching_conversation_in_one_tab_does_not_move_the_other(qapp):
     first = _make_panel(qapp)
     second = _make_panel(qapp)
 
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(first._agent_id)
     state_a = _session("a")
     state_b = _session("b")
     client.session_started.emit(state_a.session_id, state_a)
@@ -156,7 +167,7 @@ def test_deleting_a_conversation_from_one_tab_only_falls_back_in_that_tab(qapp):
     first = _make_panel(qapp)
     second = _make_panel(qapp)
 
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(first._agent_id)
     for sid in ("a", "b", "c"):
         client.session_started.emit(sid, _session(sid))
         qapp.processEvents()
@@ -177,16 +188,64 @@ def test_deleting_a_conversation_from_one_tab_only_falls_back_in_that_tab(qapp):
 
 
 def test_last_tab_closing_stops_the_agent(qapp):
-    """While one tab is alive the conversation goes on; once the last one is
-    closed there is nothing left to keep the agent process for."""
+    """While one tab is alive the conversation goes on; once the last tab
+    ON THAT AGENT is closed there is nothing left to keep its process for.
+
+    The dangerous spot team-lead called out for this exact refactor: get
+    the ref-count wrong one way and closing a sibling tab kills an agent
+    someone else is still using; get it wrong the other way and the
+    process outlives every tab that ever asked for it. Both directions
+    checked here, with a real agent id shared by two tabs — not the empty
+    "no agent chosen" placeholder, which would pass this test either way.
+    """
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
     first = _make_panel(qapp)
     second = _make_panel(qapp)
+    assert first._agent_id == second._agent_id == "claude-acp"
 
     first.shutdown()
-    assert panel_mod._shared_client is not None
+    assert "claude-acp" in panel_mod._shared_clients, (
+        "closing one of two tabs on the same agent must not stop it — the other tab still needs it"
+    )
 
     second.shutdown()
-    assert panel_mod._shared_client is None
+    assert "claude-acp" not in panel_mod._shared_clients, (
+        "closing the last tab on an agent must actually stop it"
+    )
+
+
+def test_last_tab_closing_also_clears_that_agents_dead_sessions(qapp):
+    """A session id belongs to the process that issued it — leaving it in
+    the pool after that process is stopped would greet the next tab that
+    picks this SAME agent with session ids from a process that no longer
+    exists (the exact bug `_on_agent_chosen`'s own cleanup already guards
+    against for a mid-tab switch; closing the last tab is the other way
+    an agent's connection ends, and needs the same guard).
+    """
+    from houdini_agent_panel import sessions
+
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    client.session_started.emit("s1", sessions.SessionState(
+        session_id="s1", title="New conversation", cwd="/tmp", created_at=0.0
+    ))
+    qapp.processEvents()
+    assert sessions.pool("claude-acp").all() != []
+
+    widget.shutdown()
+
+    assert sessions.pool("claude-acp").all() == [], (
+        "a dead session id survived for the next tab on this same agent to trip over"
+    )
 
 
 def test_shutdown_is_idempotent(qapp):
@@ -202,7 +261,7 @@ def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monke
     widget.resize(900, 700)
     widget.show()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     state = _session()
     client.session_started.emit(state.session_id, state)
@@ -284,7 +343,7 @@ def test_chunk_for_background_session_does_not_touch_the_visible_transcript(qapp
     """Streaming into an invisible session must not touch the widgets of the
     one the human is reading."""
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     visible = _session("visible")
     background = _session("background")
@@ -471,7 +530,7 @@ def test_consent_strip_does_not_block_input(qapp):
 
 def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch):
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     state = _session()
     client.session_started.emit(state.session_id, state)
     monkeypatch.setattr(client, "prompt", lambda _session_id, _blocks: None)
@@ -508,22 +567,22 @@ def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch)
 def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     """The sign-in buttons must not talk to a corpse.
 
-    The client is shared and gets recreated on an agent switch. Subscribing
-    directly with `view.method_chosen.connect(shared_client().authenticate)`
-    would permanently capture whichever instance existed when the widget was
+    Each agent id has its own client (`shared_client(agent_id)` — see
+    `AgentPanel._agent_id`), so switching THIS tab's agent means talking to
+    a genuinely different object, not a rebuilt worker inside the same one.
+    Subscribing directly with
+    `view.method_chosen.connect(shared_client(...).authenticate)` would
+    permanently capture whichever instance existed when the widget was
     built.
     """
     widget = _make_panel(qapp)
+    old = panel_mod.shared_client(widget._agent_id)
 
-    # Imitate what an agent switch does: the old client is stopped and a new
-    # one created. Stopped, not dropped — otherwise its worker thread keeps
-    # spinning with no owner and Qt rightly complains "QThread: Destroyed
-    # while thread is still running". In Houdini such an orphaned thread
-    # outlives the closing of the panel.
-    old = panel_mod.shared_client()
-    old.stop()
-    panel_mod._shared_client = None
-    fresh = panel_mod.shared_client()
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: None)
+    widget._on_agent_chosen("some-other-agent")
+    assert widget._agent_id == "some-other-agent"
+    fresh = panel_mod.shared_client(widget._agent_id)
+    assert fresh is not old
 
     seen: list = []
     monkeypatch.setattr(fresh, "authenticate", lambda mid: seen.append(("auth", mid)))
@@ -604,7 +663,7 @@ def test_config_options_from_the_agent_become_composer_chips(qapp):
     from houdini_agent_panel.client import ConfigChoice, ConfigOption
 
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     state = _session()
     client.session_started.emit(state.session_id, state)
     qapp.processEvents()
@@ -627,7 +686,7 @@ def test_config_options_from_the_agent_become_composer_chips(qapp):
     assert widget._pool.get(state.session_id).config_options == [option]
 
     chosen: list[tuple[str, str, str]] = []
-    panel_mod.shared_client().set_config_option = lambda sid, cid, value: chosen.append(
+    panel_mod.shared_client(widget._agent_id).set_config_option = lambda sid, cid, value: chosen.append(
         (sid, cid, value)
     )
     chips[0]._choose(0)
@@ -638,7 +697,7 @@ def test_config_options_from_the_agent_become_composer_chips(qapp):
 
 def test_agent_offering_no_config_options_gets_no_chips(qapp):
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     state = _session()
     client.session_started.emit(state.session_id, state)
     qapp.processEvents()
@@ -655,7 +714,7 @@ def test_mode_selection_survives_switching_away_and_back(qapp, monkeypatch):
     from houdini_agent_panel.sessions import SessionMode
 
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "set_mode", lambda _sid, _mode_id: None)
 
     first = _session("s1")
@@ -687,7 +746,7 @@ def test_config_option_selection_survives_switching_away_and_back(qapp, monkeypa
     from houdini_agent_panel.client import ConfigChoice, ConfigOption
 
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "set_config_option", lambda _sid, _cid, _value: None)
 
     first = _session("s1")
@@ -722,7 +781,7 @@ def test_config_option_selection_survives_switching_away_and_back(qapp, monkeypa
 
 def test_background_session_gets_unread_dot_current_session_does_not(qapp):
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     first = _session("s1")
     client.session_started.emit(first.session_id, first)
@@ -750,7 +809,7 @@ def test_text_typed_before_any_session_is_not_thrown_away(qapp, monkeypatch):
     was handed — otherwise the first message after opening the panel vanished
     without a trace."""
     widget = _make_panel(qapp)
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     started: list[bool] = []
     monkeypatch.setattr(widget, "_start_new_session", lambda: started.append(True))
@@ -774,7 +833,7 @@ def test_permission_popover_does_not_float_over_the_settings_screen(qapp):
     widget.resize(900, 700)
     widget.show()
     qapp.processEvents()
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(widget._agent_id)
 
     state = _session()
     client.session_started.emit(state.session_id, state)
@@ -914,8 +973,12 @@ def test_update_stops_the_running_agent_first_and_restarts_it_after(qapp, monkey
     update = _agent_update_setup(widget, qapp, monkeypatch, fetcher)
     widget._settings.default_agent = update.target
     settings_mod.save(widget._settings)
+    # THIS tab has to actually be on the agent being updated for the
+    # stop-then-restart tracking to apply to it (`_before_agent_install`
+    # only restarts an agent this tab itself is attached to).
+    widget._rejoin_agent(update.target)
 
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(update.target)
     monkeypatch.setattr(client, "is_running", lambda: True)
     stopped = []
     monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
@@ -959,10 +1022,11 @@ def test_removing_the_running_default_agent_stops_it_first_and_resets_the_header
     current.default_agent = agent_id
     settings_mod.save(current)
     widget._settings.default_agent = agent_id
+    widget._rejoin_agent(agent_id)  # this tab is the one showing the agent being removed
     widget._settings_view.set_agents([entry])
     widget._header.set_agent("Claude Agent", None)
 
-    client = panel_mod.shared_client()
+    client = panel_mod.shared_client(agent_id)
     monkeypatch.setattr(client, "is_running", lambda: True)
     stopped = []
     monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
@@ -985,9 +1049,16 @@ def test_removing_the_running_default_agent_stops_it_first_and_resets_the_header
     widget.shutdown()
 
 
-def test_removing_an_agent_that_is_not_the_running_default_touches_nothing_live(qapp, monkeypatch):
-    """Removing a background agent — installed, but not the one currently
-    running — must not stop or disturb the live connection at all."""
+def test_removing_an_agent_that_is_not_running_touches_nothing_live(qapp, monkeypatch):
+    """Removing a background agent — installed, but never actually
+    started — must not stop or disturb some OTHER, genuinely live
+    connection at all. `other_agent`'s own client is a separate object
+    from `live_agent`'s (one client per agent id, see `AgentPanel._agent_id`)
+    and was never started, so a real (non-mocked) `is_running()` on it is
+    already False — the assertion that matters is that `live_agent`'s own
+    client, which THIS tab is actually attached to, is never touched by an
+    unrelated Remove click.
+    """
     from houdini_agent_panel import runtime
     from houdini_agent_panel.registry import AgentEntry
 
@@ -1002,16 +1073,16 @@ def test_removing_an_agent_that_is_not_the_running_default_touches_nothing_live(
     current.default_agent = live_agent
     settings_mod.save(current)
     widget._settings.default_agent = live_agent
+    widget._rejoin_agent(live_agent)  # this tab is the one actually on live_agent
     widget._settings_view.set_agents([entry])
 
-    client = panel_mod.shared_client()
-    monkeypatch.setattr(client, "is_running", lambda: True)
-    stopped = []
-    monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
+    live_client = panel_mod.shared_client(live_agent)
+    live_stopped = []
+    monkeypatch.setattr(live_client, "stop", lambda: live_stopped.append(True))
 
     widget._settings_view._agents_view._uninstall(other_agent)
 
-    assert stopped == [], "removing a background agent must not stop the live one"
+    assert live_stopped == [], "removing a background agent must not stop the live one"
     assert settings_mod.load().default_agent == live_agent, "the real default_agent must be untouched"
 
     widget.shutdown()
