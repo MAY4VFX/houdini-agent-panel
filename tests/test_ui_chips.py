@@ -64,17 +64,24 @@ def test_choice_button_tooltip_falls_back_when_no_description(qapp):
     assert choice._button.toolTip() == ""
 
 
-def test_choice_popup_shows_a_description_as_a_second_line(qapp):
-    choice = ChoiceButton()
-    choice.addItem("Default (recommended)", "default", "Opus 5 with 1M context")
-    choice.addItem("Sonnet", "sonnet")  # no description — plain row, unchanged
-    choice._toggle_popup()
+def test_choice_popup_is_one_line_per_choice(qapp):
+    """Names only. The agent's description is real and lands in the tooltip,
+    but a picker with a paragraph under every entry is a document — the
+    artist asked for what Claude Code shows: four model names, no prose.
+    Built it the other way twice; both were worse."""
+    combo = ChoiceButton()
+    combo.addItem("Opus (1M context)", "opus[1m]", "Opus 5 with 1M context · Best for everyday tasks")
+    combo.addItem("Sonnet", "sonnet", "Sonnet 5 · Efficient for routine tasks")
+    popup = combo._ensure_popup()
+    combo._rebuild_popup()
+    qapp.processEvents()
 
-    labels = choice._popup.findChildren(QtWidgets.QLabel)
-    assert any(label.text() == "Opus 5 with 1M context" for label in labels)
-
-    buttons = choice._popup.findChildren(QtWidgets.QPushButton)
-    assert {b.text() for b in buttons} == {"Default (recommended)", "Sonnet"}
+    buttons = popup.findChildren(QtWidgets.QPushButton)
+    assert [b.text() for b in buttons] == ["Opus (1M context)", "Sonnet"]
+    assert not popup.findChildren(QtWidgets.QLabel), "no second line may be drawn"
+    assert buttons[0].toolTip().startswith("Opus 5 with 1M context"), (
+        "the description is kept, just not printed under the name"
+    )
 
 
 def test_set_cwd_sets_label_text(qapp):

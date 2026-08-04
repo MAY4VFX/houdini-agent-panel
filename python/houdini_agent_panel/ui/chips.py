@@ -238,33 +238,18 @@ class ChoiceButton(QtWidgets.QWidget):
         # Straight from the live palette, same reasoning as `sidebar_icon`
         # and `theme.popup_background` — not `theme.color()`'s `hou.qt`-
         # first path.
-        muted = theme.to_hex(theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
-        for index, (label, _data, description) in enumerate(self._items):
-            # A plain button when there's nothing more to say about this
-            # choice — unchanged from before descriptions existed. One with
-            # a description gets a second, muted line underneath, in a
-            # wrapper so the button itself (its click handling, its
-            # `checkedChoice` styling) stays exactly what it was.
-            if not description:
-                button = QtWidgets.QPushButton(label, self._popup)
-                button.setProperty("checkedChoice", index == self._current_index)
-                button.clicked.connect(lambda _checked=False, i=index: self._choose(i))
-                self._popup_layout.addWidget(button)
-                continue
-            row = QtWidgets.QWidget(self._popup)
-            row_layout = QtWidgets.QVBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(0)
-            button = QtWidgets.QPushButton(label, row)
+        # One line per choice: its name, nothing else. The agent's
+        # `description` is real and useful, but it belongs in the tooltip,
+        # not under every entry — a picker with a paragraph beneath each item
+        # is a document, and the artist asked for the list Claude Code shows:
+        # four model names and no prose. Tried the other way and it was
+        # worse, twice.
+        for index, (label, _data, _description) in enumerate(self._items):
+            button = QtWidgets.QPushButton(label, self._popup)
             button.setProperty("checkedChoice", index == self._current_index)
+            button.setToolTip(_description)
             button.clicked.connect(lambda _checked=False, i=index: self._choose(i))
-            row_layout.addWidget(button)
-            caption = QtWidgets.QLabel(description, row)
-            caption.setWordWrap(True)
-            caption.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-            caption.setStyleSheet(f"color: {muted}; background: transparent; padding: 0 10px 6px 10px;")
-            row_layout.addWidget(caption)
-            self._popup_layout.addWidget(row)
+            self._popup_layout.addWidget(button)
 
     def _choose(self, index: int) -> None:
         self.setCurrentIndex(index)
