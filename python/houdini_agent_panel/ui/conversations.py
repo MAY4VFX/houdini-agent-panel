@@ -58,50 +58,60 @@ def sidebar_icon() -> QtGui.QIcon:
 
 
 def compose_icon(size: int = 16) -> QtGui.QIcon:
-    """The pencil-over-a-page glyph every chat application uses for "new
-    chat", drawn rather than shipped.
+    """A speech bubble with a pencil crossing its top-right corner — the
+    "new chat" glyph, drawn rather than shipped.
 
-    A bare "+" is the generic "add something" of every toolbar in Houdini,
-    and next to a conversation list it reads as "add a row", not "start
-    talking". This shape is the one an artist already knows from every other
-    assistant they use, which is the whole argument for it.
+    The bubble is what makes it read as a conversation. A first attempt used
+    a plain rounded rectangle with its corner left open for the pencil, and
+    without the tail it read as "open in a new window" — the artist said so
+    on sight, and they were right: that outline is the external-link glyph
+    in every icon set there is. The tail is not decoration, it is the whole
+    difference between "chat" and "link".
 
-    Drawn with the palette's own pen for the same reason as `sidebar_icon`:
-    an image file would need a light and a dark copy and would still be
-    wrong under a theme preset.
+    Drawn from the palette for the same reason as `sidebar_icon`: an image
+    would need a light copy and a dark copy and would still be wrong under a
+    Houdini theme preset.
     """
     pixmap = QtGui.QPixmap(size, size)
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)
     try:
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        scale = size / 16.0
-        pen = QtGui.QPen(theme.palette().color(QtGui.QPalette.Text), 1.3 * scale)
+        u = size / 16.0
+        pen = QtGui.QPen(theme.palette().color(QtGui.QPalette.Text), 1.35 * u)
         pen.setJoinStyle(QtCore.Qt.RoundJoin)
         pen.setCapStyle(QtCore.Qt.RoundCap)
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.NoBrush)
-        # The page, open at its top-right corner so the pencil can sit there.
-        page = QtGui.QPainterPath()
-        page.moveTo(9.6 * scale, 2.4 * scale)
-        page.lineTo(3.2 * scale, 2.4 * scale)
-        page.quadTo(2.0 * scale, 2.4 * scale, 2.0 * scale, 3.6 * scale)
-        page.lineTo(2.0 * scale, 12.4 * scale)
-        page.quadTo(2.0 * scale, 13.6 * scale, 3.2 * scale, 13.6 * scale)
-        page.lineTo(12.0 * scale, 13.6 * scale)
-        page.quadTo(13.2 * scale, 13.6 * scale, 13.2 * scale, 12.4 * scale)
-        page.lineTo(13.2 * scale, 6.4 * scale)
-        painter.drawPath(page)
-        # The pencil, crossing that corner.
-        painter.drawLine(
-            QtCore.QPointF(8.4 * scale, 8.0 * scale), QtCore.QPointF(13.6 * scale, 2.8 * scale)
-        )
-        painter.drawLine(
-            QtCore.QPointF(11.9 * scale, 1.6 * scale), QtCore.QPointF(14.4 * scale, 4.1 * scale)
-        )
-        painter.drawLine(
-            QtCore.QPointF(8.4 * scale, 8.0 * scale), QtCore.QPointF(7.6 * scale, 8.8 * scale)
-        )
+
+        # The bubble, open at its top-right corner so the pencil can cross
+        # it, and with the tail hanging off the bottom edge.
+        bubble = QtGui.QPainterPath()
+        bubble.moveTo(9.2 * u, 2.1 * u)          # top edge, stopping short of the corner
+        bubble.lineTo(4.0 * u, 2.1 * u)
+        bubble.quadTo(1.9 * u, 2.1 * u, 1.9 * u, 4.2 * u)   # top-left corner
+        bubble.lineTo(1.9 * u, 9.6 * u)
+        bubble.quadTo(1.9 * u, 11.7 * u, 4.0 * u, 11.7 * u)  # bottom-left corner
+        bubble.lineTo(6.3 * u, 11.7 * u)
+        bubble.lineTo(7.9 * u, 14.1 * u)          # the tail
+        bubble.lineTo(9.5 * u, 11.7 * u)
+        bubble.lineTo(12.0 * u, 11.7 * u)
+        bubble.quadTo(14.1 * u, 11.7 * u, 14.1 * u, 9.6 * u)  # bottom-right corner
+        bubble.lineTo(14.1 * u, 7.0 * u)          # right edge, stopping short of the corner
+        painter.drawPath(bubble)
+
+        # The pencil: an outlined body with a nib, not a stroked diagonal.
+        # Two strokes crossing at the top read as a crossbar at any size
+        # above about 24px — the reference is a closed shape, so this is one.
+        pencil = QtGui.QPainterPath()
+        pencil.moveTo(7.6 * u, 9.1 * u)           # the nib, pointing back into the bubble
+        pencil.lineTo(8.4 * u, 8.8 * u)           # one flank of the body
+        pencil.lineTo(14.4 * u, 2.8 * u)
+        pencil.quadTo(15.1 * u, 2.1 * u, 14.4 * u, 1.4 * u)   # the rounded butt end
+        pencil.quadTo(13.7 * u, 0.7 * u, 13.0 * u, 1.4 * u)
+        pencil.lineTo(7.0 * u, 7.4 * u)           # the other flank
+        pencil.closeSubpath()                      # back to the nib
+        painter.drawPath(pencil)
     finally:
         painter.end()
     return QtGui.QIcon(pixmap)
