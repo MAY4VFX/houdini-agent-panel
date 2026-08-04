@@ -203,6 +203,14 @@ def _safe_member_path(dest: Path, member_name: str) -> Path:
     "the result lives inside dest" after `resolve()` catches both `..`
     traversal and absolute member paths with the same piece of code.
     """
+    # BOTH sides resolved, or the comparison is between a real path and a
+    # possibly-symlinked one and rejects perfectly safe archives. macOS makes
+    # this easy to hit: anything under /var is really /private/var, so a
+    # member named plainly "opencode" failed the containment check and no
+    # binary agent could install at all. Found by running a first-install on
+    # a simulated fresh machine — the guard was right about traversal and
+    # wrong about the ground it stood on.
+    dest = dest.resolve()
     member_path = (dest / member_name).resolve()
     if member_path != dest and dest not in member_path.parents:
         raise InstallError(f"archive contains an unsafe path: {member_name!r}")

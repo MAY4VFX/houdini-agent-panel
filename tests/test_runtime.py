@@ -421,3 +421,28 @@ def test_install_agent_npx_fresh_install_carries_the_proxy(monkeypatch):
 
     assert spec.env["HTTPS_PROXY"] == "http://studio:8080"
     assert spec.env["FOO"] == "bar"  # the distribution's own env survives alongside it
+
+
+def test_extraction_works_when_the_destination_path_has_a_symlink(tmp_path):
+    """The Zip Slip guard compared a resolved member against an unresolved
+    destination. On macOS everything under /var is really /private/var, so a
+    member named plainly "opencode" was judged to escape its own directory —
+    and no binary agent could be installed at all. Caught by running a first
+    install on a simulated fresh machine, not by reading the check.
+    """
+    import tarfile
+
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    payload = tmp_path / "opencode"
+    payload.write_text("#!/bin/sh\necho hi\n")
+    archive = tmp_path / "agent.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(payload, arcname="opencode")
+
+    runtime.extract_archive(archive, link)
+
+    assert (real / "opencode").is_file(), "a safe archive was rejected via a symlinked path"
