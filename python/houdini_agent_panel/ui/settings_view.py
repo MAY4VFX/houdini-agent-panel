@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Callable
 from .. import paths
 from .. import settings as settings_module
 from .agents import AgentsView
-from .chips import ChoiceButton
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
@@ -40,7 +39,7 @@ _MIN_RAIL_WIDTH = 180
 #
 # Reported as "a staircase": section headers, agent rows, "Custom agent",
 # checkboxes and field labels each started at their own X, and values
-# ("Default agent", "Whisper endpoint", agent status) landed wherever the
+# ("Whisper endpoint", "Data folder", agent status) landed wherever the
 # label in front of them happened to end. `_Section` used to hand each
 # instance its own `QFormLayout`, which computes its label column from
 # ONLY that section's own rows — four sections, four independent column
@@ -57,7 +56,7 @@ _MIN_RAIL_WIDTH = 180
 # fixed px" — otherwise the grid computed today quietly comes apart the
 # day someone runs Houdini with a larger UI font scale, which is exactly
 # the kind of drift this rewrite exists to stop.
-_ROW_LABELS = ("Default agent", "Whisper endpoint", "Data folder")
+_ROW_LABELS = ("Whisper endpoint", "Data folder", "Proxy", "No proxy", "CA bundle")
 
 
 @dataclass(frozen=True)
@@ -82,14 +81,13 @@ class _GridMetrics:
     - `label_value_gap` = the width of two spaces in the running text —
       enough for a label and its value to read as two columns, not one
       run-on line.
-    - `label_width` = the widest `QLabel.sizeHint()` among `_ROW_LABELS`
-      ("Default agent" / "Whisper endpoint" / "Data folder"), measured
-      directly rather than estimated. At this codebase's default font
-      that's 104px ("Whisper endpoint"). Below `_MIN_RAIL_WIDTH` (180px)
-      that leaves the value column under 50px — cramped, but not broken:
-      `ChoiceButton` already elides its text to whatever width it's given
-      (`chips.py::ChoiceButton.paintEvent`), `QLineEdit` scrolls instead
-      of truncating, and the data-folder path label already wraps
+    - `label_width` = the widest `QLabel.sizeHint()` among `_ROW_LABELS`,
+      measured directly rather than estimated. At this codebase's default
+      font that's 104px ("Whisper endpoint" — still the widest after
+      "Default agent" was removed as a row entirely, issue owner's call).
+      Below `_MIN_RAIL_WIDTH` (180px) that leaves the value column under
+      50px — cramped, but not broken: `QLineEdit` scrolls instead of
+      truncating, and the data-folder path label already wraps
       (`setWordWrap(True)`). No new narrow-width behaviour was added
       here — the existing widgets already degrade gracefully, this grid
       just stopped fighting them for space.
@@ -316,9 +314,6 @@ class SettingsView(QtWidgets.QWidget):
         self._agents_view.install_failed.connect(self.install_failed.emit)
         self._agents_view.sign_in_requested.connect(self.sign_in_requested.emit)
 
-        self._default_agent_combo = ChoiceButton(self)
-        self._default_agent_combo.currentIndexChanged.connect(self._on_field_changed)
-
         self._autostart_checkbox = QtWidgets.QCheckBox("Autostart agent when the panel opens")
         self._autostart_checkbox.toggled.connect(self._on_field_changed)
 
@@ -396,7 +391,8 @@ class SettingsView(QtWidgets.QWidget):
             "Blank fields fall back to whatever the machine already exports. "
             "A password typed into the proxy URL is written to settings.json "
             "as plain text — prefer a proxy with no login, or one restricted "
-            "by IP. localhost is never sent through the proxy."
+            "by IP. localhost is never sent through the proxy. HTTP/HTTPS "
+            "only — SOCKS is not supported."
         )
         self._network_caption.setWordWrap(True)
         # Muted, same idiom `agents.py` already uses for secondary text
@@ -438,8 +434,14 @@ class SettingsView(QtWidgets.QWidget):
         agents_section = _Section("Agents", self, expanded=True, grid=grid_metrics)
         agents_section.add_widget(self._agents_view)
 
+        # No "Default agent" field here any more (owner's call, seeing it
+        # live: "непонятно, какая модель дефолта выбрана, в меню этого не
+        # нужно" — a second control for a fact the header chip already
+        # decides). `settings.default_agent` still exists and still works
+        # exactly as before — the last agent actually picked from the
+        # header chip's menu (`AgentPanel._on_agent_chosen`) — this screen
+        # just no longer shows or lets you set it directly.
         behaviour_section = _Section("Behaviour", self, expanded=True, grid=grid_metrics)
-        behaviour_section.add_row("Default agent", self._default_agent_combo)
         behaviour_section.add_checkbox(self._autostart_checkbox)
 
         updates_section = _Section(
@@ -509,8 +511,18 @@ class SettingsView(QtWidgets.QWidget):
         content = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setAlignment(QtCore.Qt.AlignHCenter)
-        content_layout.addWidget(rail, 0, QtCore.Qt.AlignHCenter)
+        # NOT `AlignHCenter` — see `resizeEvent`. Centering here would center
+        # within `content`'s own width, which is the scroll viewport's width:
+        # a few pixels narrower than `self.width()` the moment the page is
+        # tall enough to need a scrollbar. `_header_rail` sits OUTSIDE the
+        # scroll area and has no such scrollbar, so it kept centering a few
+        # pixels further right than `rail` did — everything inside settings
+        # read as sticking out past the back button. `resizeEvent` sets an
+        # explicit left margin computed from `self.width()` instead, the
+        # same reference `_header_rail` centers against, so the two always
+        # agree regardless of whether a scrollbar happens to be showing.
+        content_layout.addWidget(rail, 0, QtCore.Qt.AlignLeft)
+        self._content_layout = content_layout
 
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setStyleSheet(theme.scrollbar_stylesheet())
@@ -545,6 +557,19 @@ class SettingsView(QtWidgets.QWidget):
         width = max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 28))
         self._rail.setFixedWidth(width)
         self._header_rail.setFixedWidth(width)
+        # Both rails get the same WIDTH above, but that alone doesn't put
+        # them at the same X — `_header_rail` centers within `self.width()`
+        # (it lives directly in the top-level layout), while `_rail` lives
+        # inside a `QScrollArea` and would center within the VIEWPORT's
+        # width if left to its own `AlignHCenter` (see where `content_
+        # layout` is built) — a scrollbar reduces that by its own width the
+        # moment the page is tall enough to need one, which the header
+        # never loses. Centering `_rail` against `self.width()` explicitly,
+        # same reference as the header, keeps both rails' left edges
+        # together whether or not a scrollbar happens to be showing right
+        # now — nothing here depends on the scrollbar's current state.
+        margin = max(0, (self.width() - width) // 2)
+        self._content_layout.setContentsMargins(margin, 0, 0, 0)
 
     # --- public -----------------------------------------------------
 
@@ -573,7 +598,6 @@ class SettingsView(QtWidgets.QWidget):
         self._loading = True
         try:
             current = settings_module.load()
-            self._populate_default_agent_options(current)
             self._autostart_checkbox.setChecked(current.autostart_agent)
             self._check_updates_checkbox.setChecked(current.check_updates)
             self._show_announcements_checkbox.setChecked(current.show_announcements)
@@ -593,17 +617,6 @@ class SettingsView(QtWidgets.QWidget):
 
     # --- internal ------------------------------------------------------
 
-    def _populate_default_agent_options(self, current: "settings_module.Settings") -> None:
-        self._default_agent_combo.blockSignals(True)
-        self._default_agent_combo.clear()
-        self._default_agent_combo.addItem("—", None)
-        agent_ids = sorted(set(current.installed_agents) | {a.id for a in current.custom_agents})
-        for agent_id in agent_ids:
-            self._default_agent_combo.addItem(agent_id, agent_id)
-        index = self._default_agent_combo.findData(current.default_agent)
-        self._default_agent_combo.setCurrentIndex(index if index >= 0 else 0)
-        self._default_agent_combo.blockSignals(False)
-
     def _save_from_fields(self) -> "settings_module.Settings":
         """Read every field on the screen into a freshly-loaded `Settings`
         and save it. The one place that knows the full field list, shared
@@ -611,7 +624,9 @@ class SettingsView(QtWidgets.QWidget):
         differ only in what they do AFTER saving (the latter also shows the
         restart banner and fires `proxy_changed`), not in what gets saved."""
         current = settings_module.load()
-        current.default_agent = self._default_agent_combo.currentData()
+        # `default_agent` is deliberately NOT set from anything on this
+        # screen — see the comment where `behaviour_section` is built.
+        # Loaded above and saved back below unchanged.
         current.autostart_agent = self._autostart_checkbox.isChecked()
         current.check_updates = self._check_updates_checkbox.isChecked()
         current.show_announcements = self._show_announcements_checkbox.isChecked()

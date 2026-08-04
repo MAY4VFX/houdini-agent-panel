@@ -314,12 +314,25 @@ class AgentsView(QtWidgets.QWidget):
         custom_form.addWidget(self._custom_args)
         custom_form.addWidget(add_custom_btn)
 
+        # Hidden, not removed — the owner's call after seeing it live:
+        # "давай это поле пока скроем, я пока даже не понимаю, что это за
+        # функционал." The feature works (add/remove, `_on_add_custom`,
+        # `settings.custom_agents`, every test below still exercises it
+        # directly) — it just has no explained audience yet. Comes back
+        # once someone can say who needs it; until then the code stays put
+        # so that day doesn't mean rewriting it.
+        self._custom_section = QtWidgets.QWidget()
+        custom_section_layout = QtWidgets.QVBoxLayout(self._custom_section)
+        custom_section_layout.setContentsMargins(0, 0, 0, 0)
+        custom_section_layout.addWidget(QtWidgets.QLabel("Custom agent"))
+        custom_section_layout.addLayout(self._custom_rows_layout)
+        custom_section_layout.addLayout(custom_form)
+        self._custom_section.setVisible(False)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._rows_layout)
-        layout.addWidget(QtWidgets.QLabel("Custom agent"))
-        layout.addLayout(self._custom_rows_layout)
-        layout.addLayout(custom_form)
+        layout.addWidget(self._custom_section)
 
         self._load_custom_agents()
 

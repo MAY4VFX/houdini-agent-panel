@@ -53,6 +53,17 @@ def test_network_section_starts_collapsed(qapp):
     assert view._network_section._toggle.isChecked() is False
 
 
+def test_network_caption_states_the_socks_limit(qapp):
+    """The owner asked what proxy TYPE is supported. Answer lives in the
+    same caption as the other honest facts, not a new label — a real
+    warning from the owner's own studio notes backs this: "НЕ ставить
+    ALL_PROXY=socks5 — ломает urllib OAuth."."""
+    view = SettingsView()
+    text = view._network_caption.text()
+    assert "HTTP" in text
+    assert "SOCKS" in text and "not supported" in text
+
+
 def test_network_fields_persist(qapp):
     view = SettingsView()
     view._proxy_edit.setText("http://proxy.studio.local:8080")
@@ -214,22 +225,6 @@ def test_collapsing_network_with_no_pending_restart_does_nothing_odd(qapp):
     assert view._restart_banner.isVisible() is False
 
 
-def test_default_agent_combo_lists_installed_and_custom(qapp):
-    current = settings_module.load()
-    current.installed_agents["claude-acp"] = settings_module.InstalledAgent(
-        agent_id="claude-acp", version="1.0", kind="npx", installed_at="now"
-    )
-    current.custom_agents.append(
-        settings_module.CustomAgent(id="custom:x", name="X", command="/bin/x")
-    )
-    settings_module.save(current)
-
-    view = SettingsView()
-    options = {view._default_agent_combo.itemData(i) for i in range(view._default_agent_combo.count())}
-    assert "claude-acp" in options
-    assert "custom:x" in options
-
-
 def test_settings_has_no_native_combobox(qapp):
     from PySide6 import QtWidgets
 
@@ -237,16 +232,29 @@ def test_settings_has_no_native_combobox(qapp):
     assert view.findChildren(QtWidgets.QComboBox) == []
 
 
-def test_default_agent_selection_persists(qapp):
+def test_no_default_agent_control_on_the_settings_screen(qapp):
+    """Removed per the owner's call, seen live: "непонятно, какая модель
+    дефолта выбрана, в меню этого не нужно" — a second control for a fact
+    the header chip's own menu already decides. `settings.default_agent`
+    itself is untouched (`test_saving_other_fields_does_not_touch_default_
+    agent` below) — only this screen's control is gone. "Behaviour" now
+    has exactly one row: the autostart checkbox, occupying row 0."""
+    view = SettingsView()
+    assert not hasattr(view, "_default_agent_combo")
+    assert view._behaviour_section.widget_at(0, 0) is view._autostart_checkbox
+
+
+def test_saving_other_fields_does_not_touch_default_agent(qapp):
+    """`default_agent` is set exactly one way now: picking an agent from
+    the header chip (`AgentPanel._on_agent_chosen`). Editing anything on
+    this screen must leave it exactly as it was on disk."""
     current = settings_module.load()
-    current.installed_agents["claude-acp"] = settings_module.InstalledAgent(
-        agent_id="claude-acp", version="1.0", kind="npx", installed_at="now"
-    )
+    current.default_agent = "claude-acp"
     settings_module.save(current)
 
     view = SettingsView()
-    index = view._default_agent_combo.findData("claude-acp")
-    view._default_agent_combo.setCurrentIndex(index)
+    view._whisper_edit.setText("http://127.0.0.1:9000")
+    view._autostart_checkbox.setChecked(False)
 
     assert settings_module.load().default_agent == "claude-acp"
 
@@ -312,11 +320,12 @@ def test_set_agents_forwards_to_embedded_view(qapp, monkeypatch):
     assert view._agents_view._entries == [entry]
 
 
-def test_installing_agent_refreshes_default_agent_combo_without_recreating_panel(qapp, monkeypatch):
+def test_installing_agent_refreshes_the_panel_without_recreating_it(qapp, monkeypatch):
     """"Install an agent from settings and it shows up in the chip menu with
-    no panel restart" — here we check the SettingsView-side half of
-    that: the default-agent combo (and `changed`, which the panel listens to
-    for the chip menu) update from the same `installed_changed` signal."""
+    no panel restart" — here we check the SettingsView-side half of that:
+    `changed` (which the panel listens to, to rebuild the header chip's
+    menu) fires from the same `installed_changed` signal `AgentsView`
+    emits after an install."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     view = SettingsView()
 
@@ -330,8 +339,6 @@ def test_installing_agent_refreshes_default_agent_combo_without_recreating_panel
     settings_module.save(current)
     view._agents_view.installed_changed.emit()
 
-    options = {view._default_agent_combo.itemData(i) for i in range(view._default_agent_combo.count())}
-    assert "agent-a" in options
     assert changed == [True]
 
 

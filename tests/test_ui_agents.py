@@ -262,6 +262,20 @@ def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):
     assert "Update" in buttons
 
 
+def test_custom_agent_section_is_hidden_but_still_works(qapp):
+    """Hidden per the owner's call, seen live: "давай это поле пока
+    скроем, я пока даже не понимаю, что это за функционал" — not removed.
+    The section is invisible; the feature underneath (`test_custom_agent_
+    add_and_remove` below) is untouched. `.show()` matters here: an
+    unshown top-level widget reports every child as not-visible regardless
+    of its OWN explicit state, which would make this pass even without the
+    fix — showing the view is what makes `isVisible()` mean anything."""
+    view = AgentsView()
+    view.show()
+    qapp.processEvents()
+    assert view._custom_section.isVisible() is False
+
+
 def test_custom_agent_add_and_remove(qapp):
     view = AgentsView()
 
