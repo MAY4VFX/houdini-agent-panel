@@ -478,12 +478,18 @@ def test_text_edit_grows_with_more_lines_then_caps(qapp):
 def _option(option_id="model", current="a", choices=(("a", "A"), ("b", "B")), description=""):
     from types import SimpleNamespace
 
+    def _choice(spec):
+        # (value, name) or (value, name, description) — most tests don't
+        # care about a choice's own description, so it stays optional here.
+        value, name, *rest = spec
+        return SimpleNamespace(value=value, name=name, description=rest[0] if rest else "")
+
     return SimpleNamespace(
         id=option_id,
         name=option_id.title(),
         description=description,
         current_value=current,
-        choices=tuple(SimpleNamespace(value=v, name=n) for v, n in choices),
+        choices=tuple(_choice(c) for c in choices),
     )
 
 
@@ -526,6 +532,65 @@ def test_choosing_a_config_value_reports_id_and_value(qapp):
     composer._config_chips[0]._choose(1)
 
     assert received == [("effort", "b")]
+
+
+def test_chip_tooltip_is_the_current_choices_own_description(qapp):
+    """"Default (recommended)" names nothing on its own — the agent's own
+    description of that choice ("Opus 5 with 1M context…") is what actually
+    answers "what model is this", and it must not be replaced with our own
+    words."""
+    composer = Composer()
+    composer.show()
+    composer.set_config_options(
+        [
+            _option(
+                current="default",
+                choices=(
+                    ("default", "Default (recommended)", "Opus 5 with 1M context"),
+                    ("sonnet", "Sonnet", "Efficient for routine tasks"),
+                ),
+                description="AI model to use",
+            )
+        ]
+    )
+    chip = composer._config_chips[0]
+    assert chip._button.toolTip() == "Opus 5 with 1M context"
+
+
+def test_chip_tooltip_falls_back_to_the_options_own_description(qapp):
+    """A choice with no description of its own (Claude's effort levels, for
+    instance) still needs SOME tooltip — the option's, same as before this
+    was per-choice."""
+    composer = Composer()
+    composer.show()
+    composer.set_config_options(
+        [_option(option_id="effort", current="a", description="Available effort levels")]
+    )
+    chip = composer._config_chips[0]
+    assert chip._button.toolTip() == "Available effort levels"
+
+
+def test_popup_shows_each_choices_description_as_a_second_line(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_config_options(
+        [
+            _option(
+                option_id="model",
+                current="default",
+                description="AI model to use",
+                choices=(
+                    ("default", "Default (recommended)", "Opus 5 with 1M context"),
+                    ("sonnet", "Sonnet", ""),
+                ),
+            )
+        ]
+    )
+    chip = composer._config_chips[0]
+    assert chip._items[0] == ("Default (recommended)", "default", "Opus 5 with 1M context")
+    # No description of its own — falls back to the OPTION's description,
+    # same chain `set_config_options` uses for the chip's own tooltip.
+    assert chip._items[1] == ("Sonnet", "sonnet", "AI model to use")
 
 
 def test_hiding_the_composer_takes_the_slash_palette_with_it(qapp):

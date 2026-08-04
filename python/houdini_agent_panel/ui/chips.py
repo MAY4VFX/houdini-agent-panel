@@ -36,7 +36,7 @@ class ChoiceButton(QtWidgets.QWidget):
 
     def __init__(self, parent=None, *, accent: bool = False, show_caret: bool = True) -> None:
         super().__init__(parent)
-        self._items: list[tuple[str, object]] = []
+        self._items: list[tuple[str, object, str]] = []  # text, data, description
         self._current_index = -1
         self._accent = accent
         self._show_caret = show_caret
@@ -142,8 +142,15 @@ class ChoiceButton(QtWidgets.QWidget):
         self._rebuild_popup()
         self._sync_text()
 
-    def addItem(self, text: str, data: object = None) -> None:  # noqa: N802 - Qt-like API
-        self._items.append((text, data))
+    def addItem(self, text: str, data: object = None, description: str = "") -> None:  # noqa: N802 - Qt-like API
+        """`description` is the AGENT's own word on what this choice is —
+        e.g. a model choice named "Default (recommended)" by the agent,
+        with no description, names nothing; with one, it says "Opus 5 with
+        1M context · Best for everyday, complex tasks". Shown as the
+        trigger's tooltip when this is the current choice (`_sync_text`)
+        and as a second line under its name in the popup (`_rebuild_popup`)
+        — never invented here, only carried through from the caller."""
+        self._items.append((text, data, description))
         if self._current_index < 0:
             self._current_index = 0
         self._rebuild_popup()
@@ -159,7 +166,9 @@ class ChoiceButton(QtWidgets.QWidget):
         return self.itemData(self._current_index)
 
     def findData(self, data: object) -> int:  # noqa: N802 - Qt-like API
-        return next((i for i, (_text, value) in enumerate(self._items) if value == data), -1)
+        return next(
+            (i for i, (_text, value, _description) in enumerate(self._items) if value == data), -1
+        )
 
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt-like API
         if not 0 <= index < len(self._items) or index == self._current_index:
@@ -176,8 +185,16 @@ class ChoiceButton(QtWidgets.QWidget):
         Abliterated" is a real one — and a chip that grows to fit pushed the
         whole row past the panel edge, where there is nothing to scroll it
         back with. The full name stays in the tooltip and in the popup.
+
+        The tooltip itself prefers the current choice's own `description`
+        over the elided-name fallback: a name like "Default (recommended)"
+        never got any clearer by repeating it in full, but the agent's own
+        description of what that choice actually is ("Opus 5 with 1M
+        context…") does.
         """
-        label = self._items[self._current_index][0] if self._current_index >= 0 else ""
+        label, _data, description = (
+            self._items[self._current_index] if self._current_index >= 0 else ("", None, "")
+        )
         if not label:
             self._button.setText("")
             self._button.setToolTip("")
@@ -185,7 +202,7 @@ class ChoiceButton(QtWidgets.QWidget):
         metrics = QtGui.QFontMetrics(self._button.font())
         shown = metrics.elidedText(label, QtCore.Qt.ElideMiddle, _MAX_CHOICE_LABEL_PX)
         self._button.setText(f"{shown}  ⌄" if self._show_caret else shown)
-        self._button.setToolTip(label if shown != label else "")
+        self._button.setToolTip(description or (label if shown != label else ""))
 
     def _toggle_popup(self) -> None:
         popup = self._ensure_popup()
@@ -218,11 +235,36 @@ class ChoiceButton(QtWidgets.QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        for index, (label, _data) in enumerate(self._items):
-            button = QtWidgets.QPushButton(label, self._popup)
+        # Straight from the live palette, same reasoning as `sidebar_icon`
+        # and `theme.popup_background` — not `theme.color()`'s `hou.qt`-
+        # first path.
+        muted = theme.to_hex(theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
+        for index, (label, _data, description) in enumerate(self._items):
+            # A plain button when there's nothing more to say about this
+            # choice — unchanged from before descriptions existed. One with
+            # a description gets a second, muted line underneath, in a
+            # wrapper so the button itself (its click handling, its
+            # `checkedChoice` styling) stays exactly what it was.
+            if not description:
+                button = QtWidgets.QPushButton(label, self._popup)
+                button.setProperty("checkedChoice", index == self._current_index)
+                button.clicked.connect(lambda _checked=False, i=index: self._choose(i))
+                self._popup_layout.addWidget(button)
+                continue
+            row = QtWidgets.QWidget(self._popup)
+            row_layout = QtWidgets.QVBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(0)
+            button = QtWidgets.QPushButton(label, row)
             button.setProperty("checkedChoice", index == self._current_index)
             button.clicked.connect(lambda _checked=False, i=index: self._choose(i))
-            self._popup_layout.addWidget(button)
+            row_layout.addWidget(button)
+            caption = QtWidgets.QLabel(description, row)
+            caption.setWordWrap(True)
+            caption.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            caption.setStyleSheet(f"color: {muted}; background: transparent; padding: 0 10px 6px 10px;")
+            row_layout.addWidget(caption)
+            self._popup_layout.addWidget(row)
 
     def _choose(self, index: int) -> None:
         self.setCurrentIndex(index)

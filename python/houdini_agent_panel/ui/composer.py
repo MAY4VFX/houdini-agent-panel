@@ -511,25 +511,32 @@ class Composer(QtWidgets.QWidget):
         self.mode_chip.set_modes(modes, current_id)
 
     def set_config_options(self, options: list) -> None:
-        """Draw one chip per agent-side setting, and only for what it sent.
+        """Draw one chip per agent-side setting that earns the composer bar.
 
         This is where the model picker lives. ACP has no separate "model"
         method: an agent publishes model, reasoning effort and fast mode as
         session config options, each with its own choices and current value.
-        Everything visible here — labels, order, which options exist at all —
-        is the agent's, so an agent with no options simply gets no chips.
+        The chips shown here, their labels and order, are the agent's word —
+        an agent with no options simply gets no chips.
 
         Each element is duck-typed: `id`, `name`, `current_value` and
-        `choices` of `value`/`name`. That keeps this widget from importing
-        `client.py`, exactly like the rest of `ui/`.
+        `choices` of `value`/`name`/`description`. That keeps this widget
+        from importing `client.py`, exactly like the rest of `ui/`.
 
-        Not every option earns a chip. Agents publish a lot of them — Codex
-        alone sends approval, collaboration mode, model, reasoning effort and
-        fast mode — and a row of five dropdowns under the input turns the
-        thing an artist looks at most into a control panel. Only what gets
-        touched mid-conversation stays on the bar; the rest is still offered,
-        just not competing for the same space. Nothing is dropped: an option
-        the agent sent is always reachable.
+        Not every option earns a chip, and this is a DELIBERATE, standing
+        product choice, not a gap: Codex alone sends approval, collaboration
+        mode, model, reasoning effort and fast mode, and a row of five
+        dropdowns under the input turns the thing an artist looks at most
+        into a control panel. `_is_bar_option` keeps only what an artist
+        actually reaches for mid-conversation (model, effort) on the bar.
+        Everything else an agent offers as a config option — permission
+        mode, fast mode, whatever else a future agent adds — is
+        INTENTIONALLY not drawn anywhere by this widget; the artist reaches
+        those through the agent's own slash commands instead, same as any
+        other ACP client. This was previously mis-described as "nothing is
+        dropped, everything stays reachable" with a computed-but-unused
+        `_overflow_options` list backing that claim — neither was true, and
+        both are gone.
         """
         # Chips are REUSED, never torn down and rebuilt. Measured inside a
         # live Houdini: realising a top-level window costs one native window
@@ -555,21 +562,26 @@ class Composer(QtWidgets.QWidget):
             self._config_layout.addWidget(chip)
             self._config_chips.append(chip)
 
-        self._overflow_options = [
-            o for o in options if not _is_bar_option(o) and len(getattr(o, "choices", ()) or ()) >= 2
-        ]
         for chip, option in zip(self._config_chips, wanted):
             choices = list(getattr(option, "choices", ()) or ())
+            option_description = getattr(option, "description", "") or getattr(option, "name", "") or ""
             chip.clear()
-            chip.setToolTip(
-                getattr(option, "description", "") or getattr(option, "name", "") or ""
-            )
             chip.blockSignals(True)
             try:
                 for choice in choices:
+                    # A choice's OWN description — the agent's word on what
+                    # this specific value actually is ("Opus 5 with 1M
+                    # context · Best for everyday, complex tasks" for a
+                    # model option's "Default (recommended)" choice, which
+                    # otherwise names nothing) — beats the option's generic
+                    # one. Falls back to it when a choice has none of its
+                    # own (Claude's effort choices, for instance), rather
+                    # than showing nothing at all.
+                    tooltip = str(getattr(choice, "description", "") or "") or option_description
                     chip.addItem(
                         str(getattr(choice, "name", "") or getattr(choice, "value", "")),
                         str(getattr(choice, "value", "")),
+                        tooltip,
                     )
                 index = chip.findData(str(getattr(option, "current_value", "") or ""))
                 if index >= 0:

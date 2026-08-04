@@ -49,6 +49,34 @@ def test_closed_native_popups_are_destroyed_not_left_as_hidden_windows(qapp):
     assert header._agent_popup is None
 
 
+def test_choice_button_tooltip_prefers_the_items_own_description(qapp):
+    """A model choice named "Default (recommended)" names nothing on its
+    own — the agent's description of what it actually is must win over the
+    old "repeat the elided name" fallback."""
+    choice = ChoiceButton()
+    choice.addItem("Default (recommended)", "default", "Opus 5 with 1M context")
+    assert choice._button.toolTip() == "Opus 5 with 1M context"
+
+
+def test_choice_button_tooltip_falls_back_when_no_description(qapp):
+    choice = ChoiceButton()
+    choice.addItem("Short", "short")
+    assert choice._button.toolTip() == ""
+
+
+def test_choice_popup_shows_a_description_as_a_second_line(qapp):
+    choice = ChoiceButton()
+    choice.addItem("Default (recommended)", "default", "Opus 5 with 1M context")
+    choice.addItem("Sonnet", "sonnet")  # no description — plain row, unchanged
+    choice._toggle_popup()
+
+    labels = choice._popup.findChildren(QtWidgets.QLabel)
+    assert any(label.text() == "Opus 5 with 1M context" for label in labels)
+
+    buttons = choice._popup.findChildren(QtWidgets.QPushButton)
+    assert {b.text() for b in buttons} == {"Default (recommended)", "Sonnet"}
+
+
 def test_set_cwd_sets_label_text(qapp):
     header = HeaderBar()
     header.set_cwd("/Users/artist/shot010")

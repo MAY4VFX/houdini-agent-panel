@@ -68,6 +68,15 @@ class Settings:
     custom_agents: list[CustomAgent] = field(default_factory=list)
     installed_agents: dict[str, InstalledAgent] = field(default_factory=dict)
     seen_announcements: list[str] = field(default_factory=list)
+    #: The artist's last pick for each agent's own `configOptions` (model,
+    #: reasoning effort, …) — `{agent_id: {config_id: value}}`. Per AGENT,
+    #: not per conversation: a conversation survives switching agents, but
+    #: `configOptions` are the CURRENT agent's own vocabulary, so a value
+    #: chosen for one agent has no meaning carried into another. ACP scopes
+    #: `configOptions` to a live session, which dies with the process — this
+    #: is what makes the pick survive a Houdini restart anyway, reapplied
+    #: onto the next `session/new` (`AgentPanel._reapply_remembered_config`).
+    config_options_by_agent: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # --- serialization
 
@@ -118,6 +127,15 @@ class Settings:
                         installed_at=str(item.get("installed_at", "")),
                     )
                 settings.installed_agents = installed
+            elif name == "config_options_by_agent":
+                by_agent: dict[str, dict[str, str]] = {}
+                for agent_id, mapping in (value or {}).items():
+                    if not isinstance(mapping, dict):
+                        continue
+                    by_agent[str(agent_id)] = {
+                        str(config_id): str(v) for config_id, v in mapping.items()
+                    }
+                settings.config_options_by_agent = by_agent
             elif name == "default_agent":
                 settings.default_agent = str(value) if value else None
             elif spec.type == "bool" or isinstance(getattr(settings, name), bool):

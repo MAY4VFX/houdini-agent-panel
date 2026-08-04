@@ -30,6 +30,12 @@ def isolated_panel_state(qapp, monkeypatch):
         lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": []}],
     )
     monkeypatch.setattr(panel_mod._RefreshWorker, "start", lambda self: None)
+    # `_boot` also kicks off an orphan sweep (may-hub task, 2026-08-04) —
+    # same reasoning as `_RefreshWorker` above: no real background thread
+    # started as a side effect of every test in this file booting a panel.
+    # Tests that actually exercise the sweep wiring restore the real
+    # `start` themselves.
+    monkeypatch.setattr(panel_mod._OrphanSweepWorker, "start", lambda self: None)
     panel_mod.reset_shared_state_for_tests()
     yield
     panel_mod.reset_shared_state_for_tests()
@@ -80,6 +86,63 @@ def test_two_panels_on_the_same_agent_share_one_client_and_one_pool(qapp):
 
     first.shutdown()
     second.shutdown()
+
+
+def test_shared_client_carries_its_own_agent_id(qapp):
+    """`orphans.record_started` (client.py) needs to know which agent a
+    process belongs to, and the only place that fact exists is here —
+    `shared_client` builds each `AcpClient` for a specific agent id and
+    never reuses one across ids."""
+    client = panel_mod.shared_client("claude-acp")
+    assert client._agent_id == "claude-acp"
+
+
+def test_boot_sweeps_orphans_exactly_once_per_process_not_per_tab(qapp, monkeypatch):
+    """Two tabs opening together must not both read-modify-write
+    `orphans.py`'s JSON file at once — and there's nothing left to find
+    after the first tab's sweep anyway (may-hub task, 2026-08-04)."""
+    starts = []
+    monkeypatch.setattr(panel_mod._OrphanSweepWorker, "start", lambda self: starts.append(self))
+
+    first = _make_panel(qapp)
+    second = _make_panel(qapp)
+
+    assert len(starts) == 1
+    first.shutdown()
+    second.shutdown()
+
+
+def test_orphans_swept_reports_cleaned_agents_in_the_feed(qapp):
+    """A silent cleanup is indistinguishable from nothing having been
+    wrong — the artist should know a past crash left something running."""
+    from houdini_agent_panel import orphans
+
+    widget = _make_panel(qapp)
+    widget._boot()
+
+    widget._on_orphans_swept([orphans.SweptAgent(agent_id="claude-acp", pid=4242)])
+
+    # `_note` appends an error-styled entry to whatever session is
+    # currently showing; simplest reliable check is that SOME entry
+    # mentions the cleaned agent.
+    current = widget._current_session()
+    session_id = current.session_id if current else "__idle__"
+    records = widget._model(session_id).to_records()
+    assert any("claude-acp" in r.get("text", "") or "Claude Agent" in r.get("text", "") for r in records), records
+    widget.shutdown()
+
+
+def test_nothing_swept_says_nothing_in_the_feed(qapp):
+    widget = _make_panel(qapp)
+    widget._boot()
+    session_id = widget._current_session().session_id if widget._current_session() else "__idle__"
+    before = list(widget._model(session_id).to_records())
+
+    widget._on_orphans_swept([])
+
+    after = list(widget._model(session_id).to_records())
+    assert after == before
+    widget.shutdown()
 
 
 def test_buddy_selection_is_saved_and_restored(qapp):
@@ -928,6 +991,135 @@ def test_config_option_selection_survives_switching_away_and_back(qapp, monkeypa
 
     assert widget._pool.get("s1").config_options[0].current_value == "opus"
     assert widget._composer._config_chips[0].currentData() == "opus"
+    widget.shutdown()
+
+
+def test_choosing_a_config_option_remembers_it_per_agent(qapp, monkeypatch):
+    """The owner asked specifically because they expected the pick to
+    survive a restart — `settings.config_options_by_agent` is where it's
+    kept (`_reapply_remembered_config` is what puts it back)."""
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "set_config_option", lambda _sid, _cid, _value: None)
+
+    state = _session("s1")
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    option = ConfigOption(
+        id="model",
+        name="Model",
+        current_value="sonnet",
+        choices=(ConfigChoice(value="sonnet", name="Sonnet"), ConfigChoice(value="opus", name="Opus")),
+    )
+    client.config_options_changed.emit(state.session_id, [option])
+    qapp.processEvents()
+
+    widget._on_config_option_selected("model", "opus")
+
+    remembered = settings_mod.load().config_options_by_agent
+    assert remembered[widget._agent_id]["model"] == "opus"
+    widget.shutdown()
+
+
+def test_remembered_config_choice_is_reapplied_on_a_fresh_session(qapp):
+    """A brand-new `session/new` starts the agent back on ITS OWN default
+    (ACP has no persistence of its own) — the panel must put the artist's
+    remembered pick back, not silently accept the agent's default."""
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    current = settings_mod.load()
+    current.config_options_by_agent[widget._agent_id] = {"model": "opus"}
+    settings_mod.save(current)
+
+    client = panel_mod.shared_client(widget._agent_id)
+    applied: list[tuple[str, str, str]] = []
+    client.set_config_option = lambda sid, cid, value: applied.append((sid, cid, value))
+
+    state = _session("s1")
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    option = ConfigOption(
+        id="model",
+        name="Model",
+        current_value="sonnet",  # the agent's own default — NOT what was remembered
+        choices=(ConfigChoice(value="sonnet", name="Sonnet"), ConfigChoice(value="opus", name="Opus")),
+    )
+    client.config_options_changed.emit(state.session_id, [option])
+    qapp.processEvents()
+
+    assert applied == [(state.session_id, "model", "opus")]
+    widget.shutdown()
+
+
+def test_reapply_does_not_repeat_on_a_later_config_option_update(qapp):
+    """Only the FIRST `configOptions` a session ever reports gets
+    reconciled against the remembered pick — a later `config_option_update`
+    is a live change (the artist's own next click, or the agent's), and
+    forcing the remembered value back onto it would fight that click."""
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    current = settings_mod.load()
+    current.config_options_by_agent[widget._agent_id] = {"model": "opus"}
+    settings_mod.save(current)
+
+    client = panel_mod.shared_client(widget._agent_id)
+    applied: list[tuple[str, str, str]] = []
+    client.set_config_option = lambda sid, cid, value: applied.append((sid, cid, value))
+
+    state = _session("s1")
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    choices = (ConfigChoice(value="sonnet", name="Sonnet"), ConfigChoice(value="opus", name="Opus"))
+    client.config_options_changed.emit(
+        state.session_id, [ConfigOption(id="model", name="Model", current_value="sonnet", choices=choices)]
+    )
+    qapp.processEvents()
+    assert applied == [(state.session_id, "model", "opus")]
+
+    # The agent (or a live artist pick) moves it to "sonnet" again — a
+    # SECOND configOptions report for the SAME session.
+    client.config_options_changed.emit(
+        state.session_id, [ConfigOption(id="model", name="Model", current_value="sonnet", choices=choices)]
+    )
+    qapp.processEvents()
+
+    assert applied == [(state.session_id, "model", "opus")]  # not called again
+    widget.shutdown()
+
+
+def test_stale_remembered_config_choice_is_silently_ignored(qapp):
+    """A remembered model the agent no longer offers (retired, renamed after
+    an update) must not be forced onto a choice list that doesn't contain
+    it — the agent's own default is accepted, quietly."""
+    from houdini_agent_panel.client import ConfigChoice, ConfigOption
+
+    widget = _make_panel(qapp)
+    current = settings_mod.load()
+    current.config_options_by_agent[widget._agent_id] = {"model": "a-model-that-no-longer-exists"}
+    settings_mod.save(current)
+
+    client = panel_mod.shared_client(widget._agent_id)
+    applied: list[tuple[str, str, str]] = []
+    client.set_config_option = lambda sid, cid, value: applied.append((sid, cid, value))
+
+    state = _session("s1")
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    option = ConfigOption(
+        id="model",
+        name="Model",
+        current_value="sonnet",
+        choices=(ConfigChoice(value="sonnet", name="Sonnet"), ConfigChoice(value="opus", name="Opus")),
+    )
+    client.config_options_changed.emit(state.session_id, [option])
+    qapp.processEvents()
+
+    assert applied == []
+    assert widget._composer._config_chips[0].currentData() == "sonnet"
     widget.shutdown()
 
 

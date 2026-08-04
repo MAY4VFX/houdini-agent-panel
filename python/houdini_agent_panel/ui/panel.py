@@ -61,11 +61,19 @@ def _live_panels_for(agent_id: str) -> "weakref.WeakSet[AgentPanel]":
     return _live_panels_by_agent.setdefault(agent_id, weakref.WeakSet())
 
 
+#: Whether some tab in THIS Houdini process has already swept
+#: `orphans.py`'s leftover-agent file. `_boot()` runs once per TAB — two
+#: panels opening together must not both read-modify-write the same JSON
+#: file at once, and there is nothing left to find after the first sweep
+#: anyway (see `_maybe_sweep_orphans`).
+_orphans_swept = False
+
+
 def shared_client(agent_id: str) -> acp_client.AcpClient:
     """The connection for this one agent id, process-wide."""
     client = _shared_clients.get(agent_id)
     if client is None:
-        client = acp_client.AcpClient()
+        client = acp_client.AcpClient(agent_id=agent_id)
         _shared_clients[agent_id] = client
         # Everything the client reports goes to the on-disk log. Without this
         # the panel is undiagnosable on someone else's machine: the log file
@@ -83,11 +91,12 @@ def shared_client(agent_id: str) -> acp_client.AcpClient:
 
 def reset_shared_state_for_tests() -> None:
     """Reset process-wide singletons. Tests only."""
-    global _shared_clients, _live_panels_by_agent
+    global _shared_clients, _live_panels_by_agent, _orphans_swept
     for client in _shared_clients.values():
         client.stop()
     _shared_clients = {}
     _live_panels_by_agent = {}
+    _orphans_swept = False
     sessions.reset_pool_for_tests()
 
 
@@ -175,6 +184,24 @@ class _RefreshWorker(Worker):
             result = None
 
         self.done.emit(result, entries)
+
+
+class _OrphanSweepWorker(Worker):
+    """Runs `orphans.sweep()` off the main thread, once per Houdini process.
+
+    Reading the leftover-agent file and checking each candidate PID
+    (`ps`/`lsof` on macOS, a couple of subprocess calls each) is cheap but
+    not instant, and opening the panel must never wait on it — see
+    `orphans.sweep`'s own docstring for what this is cleaning up and why
+    it only happens here, at boot, rather than continuously.
+    """
+
+    done = Signal(list)  # list[orphans.SweptAgent]
+
+    def work(self) -> None:
+        from .. import orphans
+
+        self.done.emit(orphans.sweep())
 
 
 #: How long to wait for the agent to acknowledge a stop before releasing the
@@ -328,6 +355,11 @@ class AgentPanel(QtWidgets.QWidget):
         #: Our own conversation id per live agent session. The agent's id
         #: dies with its process; this one is what survives.
         self._conversation_ids: dict[str, str] = {}
+        #: Session ids already checked against `settings.config_options_by_
+        #: agent` — see `_reapply_remembered_config`. Once per session: a
+        #: later `config_option_update` reflects a live choice (the
+        #: artist's own, or the agent's), not something to overwrite again.
+        self._reapplied_config_sessions: set[str] = set()
         self._restored: list = []
         self._adopting_restored: str | None = None
         self._last_auth_method: str = ""
@@ -518,6 +550,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._refresh_worker.done.connect(self._on_refresh_done)
         self._refresh_worker.start()
         self._ask_telemetry_consent_once()
+        self._maybe_sweep_orphans()
 
         if not agent_id:
             self._open_agent_management()
@@ -834,6 +867,41 @@ class AgentPanel(QtWidgets.QWidget):
             self._pool.mark_changed(session_id)
         if self._is_current(session_id):
             self._composer.set_config_options(list(options))
+        self._reapply_remembered_config(session_id, options)
+
+    def _reapply_remembered_config(self, session_id: str, options: list) -> None:
+        """Put back whatever the artist last picked for THIS agent.
+
+        ACP scopes `configOptions` to a live session — there is no protocol
+        concept of a saved preference, so a Houdini restart used to reset
+        every session back to the agent's own defaults, silently undoing a
+        choice the artist made on purpose. `settings.config_options_by_
+        agent` is where `_on_config_option_selected` remembers it; this is
+        where it gets reapplied, onto the FIRST `configOptions` a fresh
+        `session/new` ever reports for this session id — not every later
+        `config_option_update`, which reflects a live choice (the artist's
+        own next click, or the agent's) that this must not fight.
+
+        A remembered value that no longer exists among the agent's current
+        choices (a model retired, an option renamed after an update) is
+        left alone, silently: the agent's own default is a perfectly good
+        answer, and logging a warning for a stale preference nobody asked
+        about would just be noise.
+        """
+        if session_id in self._reapplied_config_sessions:
+            return
+        self._reapplied_config_sessions.add(session_id)
+        remembered = settings_mod.load().config_options_by_agent.get(self._agent_id)
+        if not remembered:
+            return
+        client = shared_client(self._agent_id)
+        for option in options:
+            value = remembered.get(option.id)
+            if value is None or value == option.current_value:
+                continue
+            if value not in {choice.value for choice in option.choices}:
+                continue
+            client.set_config_option(session_id, option.id, value)
 
     def _on_config_option_selected(self, config_id: str, value: str) -> None:
         """Record the pick right away — same reasoning as `_on_mode_selected`.
@@ -841,6 +909,10 @@ class AgentPanel(QtWidgets.QWidget):
         `state.config_options` otherwise only moves when the agent sends its
         own `config_option_update`, which coming back to this session later
         would overwrite with whatever the value was before the pick.
+
+        Also remembered per-agent in `settings.json` (`config_options_by_
+        agent`), so the same pick survives a restart — see
+        `_reapply_remembered_config`.
         """
         current = self._current_session()
         if current is not None:
@@ -850,6 +922,10 @@ class AgentPanel(QtWidgets.QWidget):
             ]
             self._pool.mark_changed(current.session_id)
             shared_client(self._agent_id).set_config_option(current.session_id, config_id, value)
+
+            remembered = settings_mod.load()
+            remembered.config_options_by_agent.setdefault(self._agent_id, {})[config_id] = value
+            settings_mod.save(remembered)
 
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
         entry = self._model(session_id).apply_chunk(message_id, text)
@@ -1626,6 +1702,38 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings.telemetry = bool(allowed)
         self._settings.telemetry_consent_asked = True
         settings_mod.save(self._settings)
+
+    def _maybe_sweep_orphans(self) -> None:
+        """Once per Houdini process (`_orphans_swept`, module-wide — every
+        tab calls this from its own `_boot`), look for agent processes a
+        PAST session never got to stop and clean them up. See `orphans.py`
+        for the whole story; this is only the wiring: off the main thread
+        (`_OrphanSweepWorker`), so a machine with a few stale entries never
+        delays this tab opening.
+        """
+        global _orphans_swept
+        if _orphans_swept:
+            return
+        _orphans_swept = True
+        worker = _OrphanSweepWorker(self)
+        worker.done.connect(self._on_orphans_swept)
+        self._orphan_sweep_worker = worker
+        worker.start()
+
+    def _on_orphans_swept(self, cleaned: list) -> None:
+        """Say so, once, in the feed — a silent cleanup is indistinguishable
+        from nothing having been wrong in the first place, and the artist
+        should know a past crash left something running (may-hub task,
+        2026-08-04)."""
+        if not cleaned:
+            return
+        names = ", ".join(sorted({self._display_label(agent.agent_id) or agent.agent_id for agent in cleaned}))
+        count = len(cleaned)
+        noun = "process" if count == 1 else "processes"
+        self._note(
+            f"Cleaned up {count} leftover agent {noun} from a previous Houdini "
+            f"session that didn't shut down cleanly: {names}."
+        )
 
     def _on_settings_changed(self) -> None:
         self._settings = settings_mod.load()
