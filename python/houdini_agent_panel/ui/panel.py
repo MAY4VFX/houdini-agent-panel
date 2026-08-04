@@ -291,6 +291,10 @@ class AgentPanel(QtWidgets.QWidget):
         #: both on the same agent. See `_current_session`/
         #: `_set_current_session`.
         self._current_session_id: str | None = None
+        #: Said once per tab, not once per agent switch — `_restore_conversations`
+        #: runs on every rejoin now, and repeating the same notice each time an
+        #: agent changes turns a useful sentence into noise.
+        self._said_about_older_conversations = False
         self._models: dict[str, TranscriptModel] = {}
         self._pending_permissions: dict[str, str] = {}
         self._permission_views: dict[str, PermissionView] = {}
@@ -946,6 +950,15 @@ class AgentPanel(QtWidgets.QWidget):
         _live_panels_for(agent_id).add(self)
         self._wire_client()
         self._wire_pool()
+        # And bring that agent's own history back onto its list. Leaving an
+        # agent writes its conversations to disk and, once the last tab is
+        # gone, empties its session pool — correctly, since those ids belong
+        # to a process that has stopped. Nothing put them back: reading the
+        # store happened only when a panel opened. So going Claude -> Codex
+        # -> Claude showed an empty drawer, and the conversations looked
+        # lost when they were sitting on disk the whole time. Idempotent, so
+        # a tab joining an agent another tab is already using adds nothing.
+        self._restore_conversations()
 
     @property
     def _pool(self) -> sessions.SessionPool:
@@ -1724,7 +1737,8 @@ class AgentPanel(QtWidgets.QWidget):
             # already read "N conversations aren't tied to a scene" does not
             # need the same sentence again about agents right next to it.
             older = store.unscoped_count()
-            if older:
+            if older and not self._said_about_older_conversations:
+                self._said_about_older_conversations = True
                 self._note(
                     f"{older} conversation(s) from before this version tied conversations "
                     f"to a scene and an agent aren't shown here. They are still in "

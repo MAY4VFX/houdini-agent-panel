@@ -243,3 +243,61 @@ def test_stop_without_a_session_still_unlocks(qapp):
 
     assert not widget._composer._busy
     widget.shutdown()
+
+
+def test_switching_away_and_back_brings_the_conversations_back(qapp, monkeypatch):
+    """Claude -> Codex -> Claude showed an empty drawer.
+
+    Leaving an agent persists its conversations and, once no tab is left on
+    it, empties its session pool — correctly, since those ids belong to a
+    process that has stopped. But nothing put them back: the store was only
+    ever read when a panel opened. So the conversations looked lost while
+    sitting on disk the whole time.
+    """
+    from houdini_agent_panel import conversations_store as store
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    monkeypatch.setattr(widget, "_start_agent", lambda _id: None)
+    widget._rejoin_agent("claude-acp")
+
+    # A conversation had with Claude, of the kind `_persist_conversations`
+    # writes when the tab moves on.
+    conversation = store.StoredConversation.new(title="Rotor pyro", agent_id="claude-acp")
+    conversation.cwd = panel_mod.scene.hip_dir()
+    conversation.entries = [{"kind": "user", "id": "e1", "text": "make dust"}]
+    store.save([conversation])
+
+    widget._rejoin_agent("codex-acp")
+    assert not [s for s in widget._pool.all()], "Codex must not show Claude's conversations"
+
+    widget._rejoin_agent("claude-acp")
+    titles = [s.title for s in widget._pool.all()]
+    assert titles == ["Rotor pyro"], f"coming back to an agent lost its history: {titles}"
+    widget.shutdown()
+
+
+def test_the_older_conversations_notice_is_said_once_per_tab(qapp, monkeypatch):
+    """`_restore_conversations` now runs on every rejoin. Repeating the same
+    sentence on each agent switch turns a useful notice into noise."""
+    from houdini_agent_panel import conversations_store as store
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    legacy = store.StoredConversation.new(title="Ancient")
+    legacy.cwd = ""
+    legacy.agent_id = ""
+    legacy.entries = [{"kind": "user", "id": "e1", "text": "hello"}]
+    store.save([legacy])
+
+    widget = panel_mod.AgentPanel()
+    monkeypatch.setattr(widget, "_start_agent", lambda _id: None)
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._rejoin_agent("claude-acp")
+    widget._rejoin_agent("codex-acp")
+    widget._rejoin_agent("claude-acp")
+
+    said = [n for n in notes if "aren't shown here" in n]
+    assert len(said) == 1, f"the same notice was repeated {len(said)} times"
+    widget.shutdown()
