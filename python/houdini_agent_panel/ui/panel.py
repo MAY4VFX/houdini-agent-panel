@@ -1683,7 +1683,15 @@ class AgentPanel(QtWidgets.QWidget):
                     # after the artist opens a different scene doesn't drag
                     # the previous scene's conversations along with it.
                     conversation.cwd = state.cwd or scene.hip_dir()
-                conversation.agent_id = self._settings.default_agent or ""
+                # THIS tab's own agent at the moment of persisting, not
+                # `self._settings.default_agent`: `_on_agent_chosen` already
+                # updates that to the NEW agent before persisting the OLD
+                # agent's conversation — tagging it with `default_agent`
+                # there would mislabel it as belonging to an agent it was
+                # never actually had with, and `store.load`'s new per-agent
+                # filter (see `conversations_store.py`) would then never
+                # find it again under the agent it really happened with.
+                conversation.agent_id = self._agent_id or ""
                 conversation.entries = records
                 conversation.updated_at = time.time()
                 existing[conversation_id] = conversation
@@ -1705,17 +1713,22 @@ class AgentPanel(QtWidgets.QWidget):
             from .. import conversations_store as store
 
             here = scene.hip_dir()
-            stored = store.load(here)
+            stored = store.load(here, self._agent_id)
             active_id = store.load_active_id()
-            # Anything written before conversations were tied to a scene has
-            # no scene to belong to, so it is not shown here. Saying so once
-            # is the difference between "scoped" and "the panel ate my
-            # history" — the file is untouched and still holds all of it.
+            # Anything written before conversations were tied to a scene
+            # and/or an agent has none to belong to, so it is not shown
+            # here. Saying so once is the difference between "scoped" and
+            # "the panel ate my history" — the file is untouched and still
+            # holds all of it. One combined note for both fields
+            # (`unscoped_count`), not two near-identical ones: an artist who
+            # already read "N conversations aren't tied to a scene" does not
+            # need the same sentence again about agents right next to it.
             older = store.unscoped_count()
             if older:
                 self._note(
-                    f"{older} conversation(s) from before this version aren't tied to a "
-                    f"scene and are hidden here. They are still in {store.store_path()}."
+                    f"{older} conversation(s) from before this version tied conversations "
+                    f"to a scene and an agent aren't shown here. They are still in "
+                    f"{store.store_path()}."
                 )
         except Exception:  # noqa: BLE001
             return

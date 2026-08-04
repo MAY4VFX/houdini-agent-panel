@@ -114,22 +114,26 @@ def store_path() -> Path:
     return paths.data_dir() / STORE_FILE_NAME
 
 
-def load(cwd: str | None = None) -> list[StoredConversation]:
+def load(cwd: str | None = None, agent_id: str | None = None) -> list[StoredConversation]:
     """Read the conversations. A broken file costs history, never the panel.
 
     Same discipline as `settings.load`: the file moves aside and the artist
     gets an empty list instead of a stack trace on open.
 
-    `cwd` narrows the result to one scene directory. Everything is kept in
-    one file — the scoping is a filter, not a separate store — so `save`
-    can still write the whole set back without needing to know about the
-    conversations belonging to scenes that aren't open.
+    `cwd` narrows the result to one scene directory, `agent_id` to one
+    agent — a conversation had with Claude has nothing to do with Gemini's
+    own list, the same way it has nothing to do with a different scene's.
+    Everything is kept in one file — the scoping is a filter, not a
+    separate store — so `save` can still write the whole set back without
+    needing to know about the conversations belonging to a scene or agent
+    that isn't the current one.
 
-    Conversations written before `cwd` existed have none, and are left out
-    of every scoped result rather than shown in all of them: showing them
-    everywhere is exactly the behaviour being fixed. They stay in the file,
-    and `unscoped_count` says how many, so the panel can tell an artist
-    where their old history went instead of appearing to have eaten it.
+    Conversations written before a field existed have it empty, and are
+    left out of every scoped result rather than shown in all of them:
+    showing them everywhere is exactly the behaviour being fixed. They stay
+    in the file, and `unscoped_count` says how many, so the panel can tell
+    an artist where their old history went instead of appearing to have
+    eaten it.
     """
     payload = _read_payload()
     if payload is None:
@@ -140,12 +144,22 @@ def load(cwd: str | None = None) -> list[StoredConversation]:
     result = [c for c in (StoredConversation.from_dict(item) for item in raw) if c is not None]
     if cwd is not None:
         result = [c for c in result if c.cwd == cwd]
+    if agent_id is not None:
+        result = [c for c in result if c.agent_id == agent_id]
     return _ordered(result)
 
 
 def unscoped_count() -> int:
-    """How many stored conversations predate scene scoping (no `cwd`)."""
-    return sum(1 for c in load() if not c.cwd)
+    """How many stored conversations predate scene and/or agent scoping
+    (missing `cwd` and/or `agent_id`).
+
+    Combined into one count on purpose, for one combined message
+    (`ui/panel.py::_restore_conversations`) — an artist who already saw
+    "N conversations aren't tied to a scene" does not need a near-identical
+    second note about agents right next to it; that reads as the same bug
+    twice, not as two separate facts.
+    """
+    return sum(1 for c in load() if not c.cwd or not c.agent_id)
 
 
 def load_active_id() -> str | None:

@@ -13,6 +13,7 @@ import pytest
 from houdini_agent_panel import client as client_mod
 from houdini_agent_panel import conversations_store as store
 from houdini_agent_panel import sessions
+from houdini_agent_panel import settings as settings_mod
 from houdini_agent_panel.ui import panel as panel_mod
 
 
@@ -191,4 +192,107 @@ def test_the_scene_a_conversation_belongs_to_is_written_down(qapp, monkeypatch):
     assert written["conv-9"].cwd == "/shots/rotor"
     assert not store.load("/tmp"), "it must not show up under a different scene"
     assert [c.title for c in store.load("/shots/rotor")] == ["Rotor pyro"]
+    widget.shutdown()
+
+
+def test_only_this_agents_conversations_come_back(qapp):
+    """A conversation had with Claude has nothing to do with Gemini's own
+    list — the same scoping as scene, one level down."""
+    claude = _stored("With Claude", "about the shot")
+    claude.agent_id = "claude-acp"
+    gemini = _stored("With Gemini", "about the shot")
+    gemini.agent_id = "gemini"
+    store.save([claude, gemini])
+
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    assert widget._agent_id == "claude-acp"
+
+    titles = [s.title for s in widget._pool.all()]
+    assert titles == ["With Claude"], f"Gemini's conversation leaked in: {titles}"
+    widget.shutdown()
+
+
+def test_the_agent_a_conversation_belongs_to_is_written_down(qapp):
+    """Saving stamps THIS tab's own agent, not the process-wide default —
+    see `AgentPanel._agent_id`."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    assert widget._agent_id == "claude-acp"
+    state = sessions.SessionState(
+        session_id="live-9", title="Rotor pyro", cwd="/tmp", created_at=0.0
+    )
+    widget._pool.add(state)
+    widget._conversation_ids["live-9"] = "conv-9"
+    widget._model("live-9").append_user("make dust")
+
+    widget._persist_conversations()
+
+    written = {c.id: c for c in store.load()}
+    assert written["conv-9"].agent_id == "claude-acp"
+    widget.shutdown()
+
+
+def test_switching_agents_persists_under_the_agent_it_was_actually_had_with(qapp, monkeypatch):
+    """A real bug, found while adding agent scoping: `_on_agent_chosen`
+    updates `settings.default_agent` to the NEW agent before persisting the
+    conversation that belongs to the OLD one. Tagging it with
+    `default_agent` at that point would mislabel it — and with the new
+    per-agent filter in `conversations_store.load`, that conversation would
+    then never be found again under the agent it was actually had with.
+    """
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    assert widget._agent_id == "claude-acp"
+
+    client = panel_mod.shared_client("claude-acp")
+    client.session_started.emit("live-1", sessions.SessionState(
+        session_id="live-1", title="With Claude", cwd="/tmp", created_at=0.0
+    ))
+    qapp.processEvents()
+    widget._model("live-1").append_user("make dust")
+
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: None)
+    widget._on_agent_chosen("gemini")
+
+    written = [c for c in store.load(agent_id="claude-acp") if c.title == "With Claude"]
+    assert written, "the conversation vanished from claude-acp's own history on switching away"
+    assert not store.load(agent_id="gemini"), "it must not have been mislabelled as gemini's"
+    widget.shutdown()
+
+
+def test_the_note_about_old_history_combines_scene_and_agent_into_one_line(qapp, monkeypatch):
+    """One note for both historical gaps, not two near-identical ones right
+    next to each other (see `conversations_store.unscoped_count`)."""
+    no_cwd = store.StoredConversation.new(title="no cwd", agent_id="claude-acp")
+    no_agent = _stored("no agent", "text")  # has this fixture's default cwd, no agent_id
+    store.save([no_cwd, no_agent])
+
+    notes: list[str] = []
+    widget = panel_mod.AgentPanel()
+    widget._note = notes.append
+    # Not `qapp.processEvents()` afterwards: `_boot()` is still queued
+    # (deferred via `QTimer.singleShot`) and would call
+    # `_restore_conversations()` a second time on its own, double-counting
+    # the note this test is checking for exactly once.
+    widget._restore_conversations()
+
+    matching = [n for n in notes if "2 conversation" in n]
+    assert len(matching) == 1, f"expected exactly one combined note, got: {notes}"
+    assert "scene" in matching[0] and "agent" in matching[0]
     widget.shutdown()
