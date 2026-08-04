@@ -30,6 +30,54 @@ Your own or remote models plug in as a model inside OpenCode: ACP only
 works over stdio, so the agent is always local, while the model's endpoint
 can be anywhere.
 
+### What the panel installs, and what it doesn't
+
+Two different things arrive under the same six names. Claude Agent and Codex
+are ACP *adapters* — `@agentclientprotocol/claude-agent-acp` and
+`codex-acp`, published by the protocol project, not by us — which speak ACP
+outward and drive the vendor's own SDK inward. You do not need the Claude
+Code CLI installed for the first one to work. The other four are the CLIs
+themselves, which have an ACP mode built in: Gemini CLI and Grok Build come
+over `npx`, Kimi and OpenCode as binaries.
+
+The panel downloads whichever you pick, plus a portable Node if your machine
+has none, into its own data folder. It writes nothing to system directories
+and installs nothing globally.
+
+**It does not configure the agent, and that is deliberate.** Providers, API
+keys, and MCP servers are the agent's own files — `~/.config/opencode` for
+OpenCode, `~/.claude` for Claude, and so on. The panel never reads or edits
+them. Zed draws the same line for the same reason: "Claude Agent owns its own
+authentication and billing." An agent you already use in a terminal will work
+in the panel with no further setup, because it is the same configuration.
+
+### Signing in
+
+Agents authenticate themselves, and they do it in the conversation:
+
+1. Open the panel and pick an agent. It installs and connects.
+2. If it needs credentials, type `/login` and follow it. Most agents put you
+   through a browser and come back signed in.
+3. That's it — the panel stores nothing and asks for nothing.
+
+Some agents advertise their sign-in methods over the protocol, and the panel
+then shows a sign-in screen with buttons instead. Some — measured on a
+machine where nothing had ever been configured — advertise none at all, and
+simply go quiet. When that happens the panel says so and offers `/login`
+rather than pretending the agent is merely busy.
+
+OpenCode is the exception worth knowing about: it has no login flow. It
+reads a provider and a key from `~/.config/opencode/opencode.json`, and until
+that file names one, it will connect and answer nothing. Its own
+documentation covers the format.
+
+### MCP servers
+
+The panel gives every agent one MCP server it does not have to configure:
+the bridge to the running Houdini, which is the whole point. The agent may
+also load its own — from its native config, exactly as it does in a
+terminal. If a tool you expect is missing, check both.
+
 ## Install
 
 One command, the same on macOS, Linux, and Windows:

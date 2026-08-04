@@ -1268,10 +1268,38 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _report_stalled_new_session(self, before: set) -> None:
+        """Say what is actually wrong, which is usually "it isn't signed in".
+
+        On a machine where the agent has never been configured, it connects
+        happily, advertises NO auth methods at all, and then never answers
+        `session/new` — measured on all six of them with an empty HOME. The
+        panel had nothing to show (its sign-in screen is drawn FROM those
+        auth methods) and said "it may be busy or stuck, try switching
+        agents", sending a new artist round a loop that cannot end: every
+        other agent does the same thing.
+
+        The agents all take the same way out, the one Zed's own docs give:
+        run their `/login` inside the session. So offer that instead of a
+        diagnosis we know is wrong — and put the command in the composer, so
+        it costs a keystroke rather than knowing it exists.
+        """
         if self._closed:
             return
         if {state.session_id for state in self._pool.all()} - before:
             return  # the agent answered, nothing to complain about
+
+        client = shared_client(self._agent_id)
+        info = client.agent_info()
+        if info is not None and not info.auth_methods:
+            label = self._pending_agent_label or info.name
+            self._note(
+                f"{label} connected but hasn't opened a conversation, and it "
+                f"offers no sign-in method — which usually means it isn't set "
+                f"up yet. Most agents are signed in with their own /login "
+                f"command; it's ready in the input box below."
+            )
+            self._composer.set_text("/login")
+            return
         self._note(
             "The agent hasn't opened a new conversation. It may be busy or "
             "stuck — try switching agents in the header, or restart it from "

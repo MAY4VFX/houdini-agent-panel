@@ -813,3 +813,42 @@ distinguishing marker on either, and isolating a clean account/`$HOME` to test w
 their own login) — same caveat, `input` presence on either could not be attributed with
 confidence. `kimi-cli`'s `available_commands` are entirely unknown: it requires an interactive
 `login` (`auth_required: ['login']`) that a headless probe can't complete.
+
+
+## 9. What a never-configured agent does — measured, not assumed
+
+Six agents installed onto a genuinely empty `HOME` (a temp dir set before
+importing the package, so no credential of the developer's was readable),
+each asked to open a session, 150s ceiling. Measured 2026-08-04.
+
+**All six connect and then say nothing.** `initialize` succeeds and reports
+the agent's real name and version — and, on the fresh machine,
+`authMethods: []`. No `session/new` answer, no error, no auth request. The
+panel's sign-in screen is built from those auth methods, so with an empty
+list there is literally nothing to draw.
+
+This is the shape of the trap: an agent that connects looks working, and the
+artist has no way to learn that it needs `/login` — the very command that
+would fix it lives inside a session the agent will not open.
+
+Zed documents the same division and the same escape hatch: "Claude Agent
+owns its own authentication and billing… open a Claude Agent thread, run
+`/login`, and authenticate." So the fix is not to invent a login flow but to
+say what is wrong and offer that command.
+
+**Not established**: whether the silence is refusal or an unbounded wait —
+150s is long enough to be a bad experience either way, and the panel's own
+`_NEW_SESSION_GRACE_MS` fires long before it.
+
+## 10. MCP servers: ours AND the agent's own
+
+Zed's docs state both routes are live — "Zed-configured MCP servers may be
+forwarded to External Agents over ACP. External Agents may also read their
+own native MCP configuration" — and confirmed here for `claude-acp`:
+handing it a single `fxhoudini` entry in `session/new` opens a session
+normally on a machine whose agent config already carries servers of its own.
+Nothing has to be merged or suppressed on our side.
+
+Consequence for support: a missing tool has two possible homes. Ours goes
+out on every `session/new` (`scene.mcp_servers`); the agent's live in its
+own config file, which the panel never reads or writes.

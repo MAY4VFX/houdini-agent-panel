@@ -816,6 +816,25 @@ class Composer(QtWidgets.QWidget):
         self._send_button.setText("■" if busy else "↑")
         self._send_button.setToolTip("Stop" if busy else "Send")
 
+    def set_text(self, text: str) -> None:
+        """Put something in the input box for the artist to send, or edit.
+
+        Deliberately does NOT send it: offering a command is help, sending it
+        for them is deciding. Refuses to overwrite anything already typed —
+        losing a half-written prompt to a helpful suggestion would be worse
+        than the suggestion is useful.
+        """
+        if self._text_edit.toPlainText().strip():
+            return
+        self._text_edit.setPlainText(text)
+        # `QTextCursor.End`, not `cursor.End`: PySide6 moved these onto the
+        # enum, and reaching through the instance raises there while working
+        # on PySide2 — the panel has to run on both.
+        cursor = self._text_edit.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        self._text_edit.setTextCursor(cursor)
+        self._text_edit.setFocus()
+
     def set_commands(self, commands: list["AvailableCommand"]) -> None:
         self._all_commands = list(commands)
         if self._popup.isVisible():

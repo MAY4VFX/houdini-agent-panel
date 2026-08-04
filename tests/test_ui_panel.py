@@ -1543,3 +1543,53 @@ def test_the_banner_does_not_offer_a_version_already_installed(qapp, monkeypatch
 
     monkeypatch.setattr(runtime_module, "installed_version", lambda _id: "0.64.1")
     assert panel_module._update_is_stale(_Update()) is False
+
+
+def test_an_unconfigured_agent_is_told_apart_from_a_stuck_one(qapp, monkeypatch):
+    """Measured on all six agents with an empty HOME: a never-configured
+    agent connects, advertises NO auth methods, and then never answers
+    `session/new`. The panel's sign-in screen is drawn FROM those auth
+    methods, so it had nothing to show and said "it may be busy or stuck, try
+    switching agents" — a loop with no exit, since every other agent behaves
+    the same way on that machine.
+    """
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id),
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="claude", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(),  # the fresh-machine case
+        ),
+        raising=False,
+    )
+
+    widget._report_stalled_new_session(set())
+
+    assert notes, "the artist was told nothing at all"
+    assert "/login" in notes[-1], f"the way out was not named: {notes[-1]!r}"
+    assert "switching agents" not in notes[-1], "still sending them round the loop"
+    assert widget._composer._text_edit.toPlainText() == "/login", (
+        "the command should be ready to send, not merely mentioned"
+    )
+    widget.shutdown()
+
+
+def test_a_half_written_prompt_is_never_overwritten(qapp):
+    """Offering a command is help; losing what someone was typing to make
+    room for it is not."""
+    from houdini_agent_panel.ui.composer import Composer
+
+    composer = Composer()
+    composer._text_edit.setPlainText("make the rotor emit dust when")
+    composer.set_text("/login")
+    assert composer._text_edit.toPlainText() == "make the rotor emit dust when"
+    composer.deleteLater()
