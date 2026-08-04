@@ -457,7 +457,58 @@ def test_stop_is_clean_and_reports_running_false(qapp, make_client, tmp_path):
     assert disconnected.calls and disconnected.calls[0] == ("",)
 
 
-# --- regression: Houdini swaps out the asyncio policy with its own `haio` -------------
+# --- orphans.py wiring (may-hub task, 2026-08-04) ---------------------------
+#
+# `AcpClient.stop()` is what runs on `aboutToQuit`/`atexit` — neither fires
+# on a SIGKILLed or crashed Houdini, so the process `do_start` spawns can
+# outlive it. `orphans.record_started`/`record_stopped` are the record half
+# of the fix (see orphans.py for the sweep half); these two tests check
+# that `client.py` actually calls them, with a real fake-agent subprocess,
+# not a mock standing in for the whole launch.
+
+
+def test_starting_an_agent_records_it_for_orphans_and_stopping_removes_it(qapp, tmp_path):
+    from houdini_agent_panel import orphans
+
+    client = AcpClient(agent_id="test-agent")
+    try:
+        _connect(qapp, client, "stream", tmp_path)
+
+        records = orphans._load()
+        assert len(records) == 1
+        record = next(iter(records.values()))
+        assert record.agent_id == "test-agent"
+        assert record.command == sys.executable
+        assert record.args == [str(FAKE_AGENT)]
+        assert record.cwd == str(tmp_path)
+        assert record.started_at
+
+        client.stop()
+
+        assert orphans._load() == {}
+    finally:
+        client.stop()
+
+
+def test_a_launch_that_fails_to_come_up_does_not_leave_an_orphans_record(qapp, tmp_path):
+    """`_cleanup()` (the rollback path for a launch that never reached
+    `connected`) calls `_terminate_process()` too — same `_forget_process`
+    call, so a failed launch doesn't leave a phantom entry for the next
+    boot to puzzle over. A process that dies instantly (same shape as
+    `test_client_dead_agent.py`), not the fake agent — the point here is
+    the rollback path, not a real handshake."""
+    from houdini_agent_panel import orphans
+
+    client = AcpClient(agent_id="test-agent")
+    try:
+        failed = _Recorder(client.failed)
+        spec = _Spec(command=sys.executable, args=["-c", "import sys; sys.exit(1)"])
+        client.start(spec, cwd=str(tmp_path))
+        _pump_until(qapp, lambda: failed.calls, "the agent to fail to start")
+
+        assert orphans._load() == {}
+    finally:
+        client.stop()
 #
 # docs/facts/houdini.md §9: inside Houdini, `asyncio.new_event_loop()`
 # (through the active policy) returns `haio.HoudiniEventLoop`, whose

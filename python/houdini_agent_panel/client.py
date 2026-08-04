@@ -326,8 +326,13 @@ class AcpWorker(QtCore.QThread):
     permission_requested = Signal(str, str, object, list)
     # request_key, session_id, ToolCallUpdate, list[PermissionOption]
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, agent_id: str = "", parent=None) -> None:
         super().__init__(parent)
+        #: Which agent this worker's process belongs to — needed only to
+        #: label the record `orphans.record_started` writes in `do_start`,
+        #: so a stale entry left by a crash says which agent it was, not
+        #: just a bare PID (see `orphans.py`).
+        self._agent_id = agent_id
         # The loop is created here (on AcpWorker's owning thread, i.e. still
         # the main thread — before start()), not in run(): submit() may be
         # needed before the thread has actually started, and the loop
@@ -537,6 +542,24 @@ class AcpWorker(QtCore.QThread):
                 cwd=cwd,
             )
             self._process = process
+            # From this line on, a Houdini that dies without warning
+            # (SIGKILL, a hard crash — neither `aboutToQuit` nor `atexit`
+            # fire for those, see `orphans.py`) leaves this exact process
+            # running with nobody left to stop it. Recorded so the NEXT
+            # boot can find and clean it up; removed again the moment this
+            # worker stops it normally (`_terminate_process`, every exit
+            # path). Never allowed to break a launch — a tracking write is
+            # not a reason to fail one.
+            with contextlib.suppress(Exception):
+                from . import orphans
+
+                orphans.record_started(
+                    agent_id=self._agent_id,
+                    pid=process.pid,
+                    command=spec.command,
+                    args=list(spec.args),
+                    cwd=cwd,
+                )
 
             reader = asyncio.StreamReader(limit=_STDIO_BUFFER_LIMIT, loop=self.loop)
             reader_protocol = asyncio.StreamReaderProtocol(reader, loop=self.loop)
@@ -973,18 +996,32 @@ class AcpWorker(QtCore.QThread):
             return
         try:
             await asyncio.wait_for(self._await_process(process), timeout=2.0)
+            self._forget_process(process)
             return
         except asyncio.TimeoutError:
             pass
         process.terminate()
         try:
             await asyncio.wait_for(self._await_process(process), timeout=2.0)
+            self._forget_process(process)
             return
         except asyncio.TimeoutError:
             pass
         process.kill()
         with contextlib.suppress(Exception):
             await self._await_process(process)
+        self._forget_process(process)
+
+    def _forget_process(self, process: subprocess.Popen) -> None:
+        """The other half of `do_start`'s `orphans.record_started`: however
+        this process just ended (replied to `wait()`, took a `terminate()`,
+        or needed `kill()`), it is no longer this worker's business to
+        track for a future `sweep()` — that's for processes nobody got the
+        chance to stop, and this one just was."""
+        with contextlib.suppress(Exception):
+            from . import orphans
+
+            orphans.record_stopped(process.pid)
 
     async def _cleanup(self) -> None:
         """Roll back a partially started launch — the same thing as
@@ -1060,8 +1097,11 @@ class AcpClient(QtCore.QObject):
 
     permission_requested = Signal(str, str, object, list)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, agent_id: str = "", parent=None) -> None:
         super().__init__(parent)
+        #: Passed straight through to every worker this client spawns
+        #: (`_spawn_worker`) — see `AcpWorker._agent_id` for why.
+        self._agent_id = agent_id
         self._worker: AcpWorker | None = None
         #: Workers that have already been stopped. Kept alive only so Qt
         #: never sees a `QThread` freed out from under it; nothing is ever
@@ -1100,7 +1140,7 @@ class AcpClient(QtCore.QObject):
         and nothing else ever happened again, in that panel, until Houdini
         was restarted.
         """
-        worker = AcpWorker()
+        worker = AcpWorker(agent_id=self._agent_id)
 
         # Connection order matters: Qt calls multiple slots of the same
         # signal in the order they were connected. Internal state

@@ -756,3 +756,60 @@ async def main():
   for a reply; you'll see the effect of the cancellation as
   `PromptResponse.stop_reason == "cancelled"` on the prompt that was cancelled, and/or as a
   `session/update` stream, if the agent managed to say something more before the cancellation.
+
+## 8. What real agents actually send (measured, not read off the schema)
+
+Everything above this section comes from reading `acp`'s own source. This section is different:
+it's what six real, installed agents actually put on the wire for `available_commands` and
+`configOptions`, measured by launching each one for real (`runtime.launch_spec` +
+`client.AcpClient`, a real `session/new`, no mocks) and logging what came back. The owner's
+"the model chip is confusing" / "slash commands don't ask for arguments" reports both turned out
+to hinge on agent-specific behavior the schema alone doesn't tell you, and a plausible guess about
+that behavior was wrong twice in the same day — this is written down so nobody has to re-run the
+probe to find out again.
+
+**`configOptions` are real and used for the model picker on both agents that publish one.**
+Claude (`claude-agent-acp` 0.64.2) sends exactly 4: `mode` (6 choices), `model` (5 choices:
+`default`/`opus[1m]`/`claude-fable-5[1m]`/`sonnet`/`haiku`), `effort` (6 choices), `fast` (2
+choices). Every model choice carries its own `description` (e.g. `default` →
+`"Opus 5 with 1M context · Best for everyday, complex tasks"`) — `effort`'s choices don't.
+**Codex has no `model` slash command at all** — it exposes model/effort/approval-mode purely
+through `configOptions`, same mechanism as Claude, and nothing under `available_commands` names
+a model.
+
+**`AvailableCommand.input` is real and populated, by the agents that build on Claude Code and
+Codex CLI, with genuinely useful hints — and the panel doesn't read it at all (`ui/composer.py`
+before this fact was written: `_slash_query` drops the popup the instant a space follows the
+command name, and `_CommandPopup.set_commands` never looks at `.input`).** Measured examples,
+verbatim: `effort` → `<low|medium|high|xhigh|max|ultracode|auto>` (Claude's own built-in),
+`model` → `<model>`, `fast` → `[on|off]`, `color` → `[red|blue|green|yellow|purple|orange|pink|
+cyan|default]`; Codex's `review`/`review-branch`/`review-commit`/`goal` similarly carry a real
+hint (`"branch name"`, `"commit sha"`, `[<objective>|clear|pause|resume]`). Not every command has
+one — Claude's own `plan`, `mcp`(as a bare list action), `status`, `logout` and Codex's `plan`,
+`mcp`, `skills`, `status`, `compact`, `logout` all report `input=None`.
+
+**Gemini CLI never populates `input`, for any of its 20 commands, including ones that plainly
+need an argument** (`extensions install <git-repo-or-path>` is `input=None` same as `help`). This
+was stable across two independent runs. Per this project's own standing rule ("the agent doesn't
+support it — the control doesn't get drawn"), an argument-hint popup for Gemini's commands has
+nothing to draw from — that is Gemini's choice, not a client gap.
+
+**`available_commands` mixes in the account's own personal skill/plugin marketplace, and this is
+account-scoped, not project-scoped.** On a machine with a personal Claude Code marketplace
+installed, `claude-acp`, `codex-acp` and `grok-build` all included that marketplace's entries
+(e.g. a personal "ab-testing" skill) as if they were the agent's own commands. Verified this is
+NOT a `cwd` artifact: re-running with `cwd` pointed at a freshly-created empty directory (instead
+of `$HOME`) produced the identical, unchanged list — the source is the artist's account, not the
+project folder. Practical consequence: on any real machine where the artist (or the studio image)
+has personal marketplace skills installed, the `/` popup will show those alongside the agent's own
+built-ins, indistinguishably in most cases. Codex is the one exception with a distinguishing,
+structural marker: marketplace-sourced entries there carry a literal `$` prefix in `name`
+(`$may-hub:sync`); Claude and Grok give no such marker — their marketplace and built-in entries
+are lexically identical in shape.
+
+**Not established, and not worth the cost of establishing:** which of `grok-build`'s and
+`opencode`'s `available_commands` are genuinely native versus marketplace-sourced (no
+distinguishing marker on either, and isolating a clean account/`$HOME` to test with would break
+their own login) — same caveat, `input` presence on either could not be attributed with
+confidence. `kimi-cli`'s `available_commands` are entirely unknown: it requires an interactive
+`login` (`auth_required: ['login']`) that a headless probe can't complete.
