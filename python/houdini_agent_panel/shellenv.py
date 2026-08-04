@@ -52,11 +52,12 @@ _SHELL_OWN = frozenset(
     }
 )
 
-#: How long to wait for the shell. A login shell is normally milliseconds
-#: (measured: 0.04s), but a profile that talks to the network can hang, and
-#: an agent that never launches because a shell stalled would be a strictly
-#: worse bug than the one this fixes.
-_TIMEOUT = 5.0
+#: How long to wait for the shell. An interactive login shell is normally
+#: well under two seconds (measured: 0.26–1.19s on a machine with a prompt
+#: framework and a version manager), but a profile that talks to the network
+#: can hang, and an agent that never launches because a shell stalled would
+#: be a strictly worse bug than the one this fixes.
+_TIMEOUT = 10.0
 
 _cache: dict[str, str] | None = None
 _lock = threading.Lock()
@@ -75,12 +76,20 @@ def _shell() -> str:
 def capture(*, force: bool = False) -> dict[str, str]:
     """Read a login shell's environment. Cached; never raises.
 
-    `-l` and not `-i`: a login shell runs the profile, which is where an
-    artist puts their keys and their studio's proxy. An interactive shell
-    also runs `~/.zshrc`, which on a real machine tends to start prompt
-    frameworks and version managers — seconds of work and output we would
-    then have to parse around, for variables that belong in the profile
-    anyway.
+    Login AND interactive (`-ilc`), which is not the obvious choice and was
+    got wrong here first. Reasoning from "keys belong in the profile" gives
+    `-lc` — and on zsh, the default shell on macOS since Catalina, `-lc`
+    reads `.zshenv` and `.zprofile` and specifically NOT `.zshrc`, because
+    that one is interactive-only. In practice `.zshrc` is where people put
+    their exports; measured on the machine that reported this, `zsh -lc`
+    from a clean environment yields 14 variables and no `GEMINI_API_KEY`,
+    while `zsh -ilc` yields 17 and finds it. The elegant-sounding version
+    would have quietly kept the bug.
+
+    It costs more: 0.3–1.2s here, against 0.04s, because an interactive
+    shell runs prompt frameworks and version managers. Paid once per
+    process, off the main thread, for the difference between an agent that
+    authenticates and one that does not.
 
     On any failure — no shell, a profile that errors, a timeout — this
     returns an empty dict and the caller proceeds with what it had. An
@@ -98,7 +107,7 @@ def capture(*, force: bool = False) -> dict[str, str]:
         # exclusion list, a multi-line key), and splitting on newlines would
         # quietly truncate them into nonsense.
         result = subprocess.run(
-            [_shell(), "-lc", "env -0"],
+            [_shell(), "-ilc", "env -0"],
             capture_output=True,
             timeout=_TIMEOUT,
             check=False,

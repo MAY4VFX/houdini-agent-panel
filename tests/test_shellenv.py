@@ -104,3 +104,29 @@ def test_the_shell_is_only_asked_once(monkeypatch):
     shellenv.capture()
     shellenv.capture()
     assert len(calls) == 1
+
+
+def test_the_shell_is_asked_interactively(monkeypatch):
+    """Not a style choice, and got wrong here first.
+
+    zsh — macOS's default shell since Catalina — reads `.zshenv` and
+    `.zprofile` for a login shell and `.zshrc` only for an interactive one.
+    Exports live in `.zshrc` on most real machines. Measured from a clean
+    environment on the machine that reported this: `zsh -lc` yields 14
+    variables and no `GEMINI_API_KEY`; `zsh -ilc` yields 17 and finds it.
+    Reasoning from "credentials belong in the profile" produces the elegant
+    flag and keeps the bug.
+    """
+    seen: list[list[str]] = []
+
+    def _record(argv, **_kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"A=1\0", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", _record)
+    shellenv.capture()
+
+    assert seen, "the shell was never asked"
+    flags = seen[0][1]
+    assert "i" in flags, f"a non-interactive shell misses ~/.zshrc entirely: {flags!r}"
+    assert "l" in flags, f"a non-login shell misses ~/.zprofile: {flags!r}"
