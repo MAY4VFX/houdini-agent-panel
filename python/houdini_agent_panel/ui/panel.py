@@ -435,6 +435,13 @@ class AgentPanel(QtWidgets.QWidget):
         if not agent_id:
             self._open_agent_management()
             return
+        # The chip says which agent is chosen, and that is known from
+        # settings before anything is launched. Only `_start_agent` used to
+        # set it, so with autostart off the panel opened with a bare dot and
+        # no name — while the menu behind it correctly showed that agent as
+        # selected. Two controls, one fact, disagreeing.
+        self._pending_agent_label = self._display_label(agent_id)
+        self._header.set_agent(self._pending_agent_label, None)
         if not self._settings.autostart_agent:
             self._note('No agent running. Press "+" to start a conversation.')
             return

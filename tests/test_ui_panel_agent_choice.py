@@ -129,3 +129,31 @@ def test_remember_seen_does_not_clobber_concurrent_settings_writes(qapp):
     assert [a.id for a in on_disk.custom_agents] == ["custom:other"]
 
     widget.shutdown()
+
+
+def test_the_chip_names_the_chosen_agent_even_before_it_runs(qapp, monkeypatch):
+    """Opening with autostart off showed a bare dot and no name, while the
+    menu behind that same chip correctly showed the agent as selected. The
+    chip answers "which agent is chosen", and settings know that before
+    anything is launched.
+    """
+    from houdini_agent_panel import settings as settings_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    current = settings_mod.load()
+    current.default_agent = "gemini"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = panel_mod.AgentPanel()
+    started: list[str] = []
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started.append(agent_id))
+    widget._boot()
+    qapp.processEvents()
+
+    assert not started, "autostart is off — nothing may be launched"
+    assert widget._header._agent_button.text() == "Gemini CLI", (
+        f"the chip is blank while the menu shows Gemini selected: "
+        f"{widget._header._agent_button.text()!r}"
+    )
+    widget.shutdown()
