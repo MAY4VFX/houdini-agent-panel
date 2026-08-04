@@ -226,6 +226,10 @@ def _read_cache(now: datetime) -> list[Update] | None:
         return None
     if now - checked_at >= _MAX_AGE:
         return None
+    if payload.get("panel_version") != (_current_panel_version() or ""):
+        # A different build wrote this. Its answers are about a version that
+        # is no longer running, so they are not worth a day of trust.
+        return None
     raw_updates = payload.get("updates")
     if not isinstance(raw_updates, list):
         return None
@@ -251,7 +255,16 @@ def _read_cache(now: datetime) -> list[Update] | None:
 def _write_cache(now: datetime, updates: list[Update]) -> None:
     path = _cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"checked_at": now.isoformat(), "updates": [asdict(u) for u in updates]}
+    payload = {
+        "checked_at": now.isoformat(),
+        # Which panel produced this answer. A day-old cache written by an
+        # older build keeps offering the update that build has since applied
+        # — reported as 0.1.7 being told to upgrade to 0.1.5, with the button
+        # leading nowhere. Recording the version lets the next start tell
+        # "checked recently" from "checked by somebody else".
+        "panel_version": _current_panel_version() or "",
+        "updates": [asdict(u) for u in updates],
+    }
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload), "utf-8")
     os.replace(tmp, path)

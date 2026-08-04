@@ -1670,3 +1670,33 @@ def test_the_panels_own_update_gives_a_command_that_works_and_stops_repeating(qa
     assert "--refresh" in notes[-1], "without --refresh uvx serves its cached copy"
     assert widget._active_update is None, "the notice stays up and repeats on the next press"
     widget.shutdown()
+
+
+def test_a_panel_update_already_installed_is_not_offered(qapp, monkeypatch):
+    """Reported from a machine running 0.1.7 while the banner offered 0.1.5,
+    with the button leading nowhere because there was nothing left to do.
+
+    An earlier guard skipped panel updates on the reasoning that their
+    version comes from the running process and so cannot go stale. Backwards:
+    update results are cached for a day and the panel updates more often than
+    anything else, so its banner goes stale first.
+    """
+    from houdini_agent_panel import __version__
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    class _Update:
+        kind = "panel"
+        target = "houdini-agent-panel"
+        current = "0.1.4"
+        label = "houdini-agent-panel"
+
+        def __init__(self, latest):
+            self.latest = latest
+
+    assert panel_mod._update_is_stale(_Update(__version__)) is True, (
+        "an update to the version already running was still offered"
+    )
+    assert panel_mod._update_is_stale(_Update("0.0.1")) is True
+    assert panel_mod._update_is_stale(_Update("99.0.0")) is False, (
+        "a genuinely newer version must still be offered"
+    )

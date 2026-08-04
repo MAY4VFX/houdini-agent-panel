@@ -126,20 +126,34 @@ def _apply_network_settings(current: settings_mod.Settings) -> None:
 def _update_is_stale(update: Any) -> bool:
     """Is this cached update already installed?
 
-    Only agents are judged here: the panel's and fx's own versions come from
-    the running process, not from a manifest, so they cannot go stale the
-    same way.
+    Judged for the panel and fx too, which an earlier version of this
+    deliberately skipped — on the reasoning that their versions come from the
+    running process rather than a manifest, and so could not go stale. That
+    was backwards. Update results are cached for a day and the panel is the
+    thing that updates most often, so its banner is the FIRST to go stale:
+    reported running 0.1.7 while being offered 0.1.5, with the button leading
+    nowhere because there was nothing left to do.
     """
-    if getattr(update, "kind", "") != "agent":
-        return False
+    latest = getattr(update, "latest", "")
+    kind = getattr(update, "kind", "")
     try:
-        from .. import runtime
         from ..updates import is_newer
 
-        current = runtime.installed_version(getattr(update, "target", ""))
+        if kind == "agent":
+            from .. import runtime
+
+            current = runtime.installed_version(getattr(update, "target", ""))
+        elif kind == "panel":
+            from .. import __version__ as current
+        elif kind == "fx":
+            from ..updates import _current_fx_version
+
+            current = _current_fx_version()
+        else:
+            return False
     except Exception:  # noqa: BLE001 - a banner is never worth an exception
         return False
-    return current is not None and not is_newer(getattr(update, "latest", ""), current)
+    return bool(current) and not is_newer(latest, current)
 
 
 class _RefreshWorker(Worker):

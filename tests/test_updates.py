@@ -249,3 +249,27 @@ def test_check_refreshes_after_a_day(fetcher):
     )
 
     assert len(fetcher.calls) > calls_after_first
+
+
+def test_the_cache_is_not_trusted_across_a_panel_upgrade(tmp_path, monkeypatch):
+    """Results are cached for a day, and the panel is the thing that updates
+    most often — so after an upgrade the old build's answer is still there,
+    telling a freshly-updated panel to upgrade to the version it just left.
+    Reported as 0.1.7 being offered 0.1.5.
+    """
+    from datetime import datetime, timezone
+
+    from houdini_agent_panel import updates
+
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(updates, "_current_panel_version", lambda: "0.1.4")
+    updates._write_cache(now, [
+        updates.Update(kind="panel", target="houdini-agent-panel",
+                       label="houdini-agent-panel 0.1.5", current="0.1.4", latest="0.1.5")
+    ])
+    assert updates._read_cache(now) is not None, "same version, same day — should be reused"
+
+    monkeypatch.setattr(updates, "_current_panel_version", lambda: "0.1.7")
+    assert updates._read_cache(now) is None, (
+        "a newer panel reused an older build's answer about itself"
+    )
