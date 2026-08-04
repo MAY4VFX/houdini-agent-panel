@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -102,15 +103,20 @@ class _CommandPopup(QtWidgets.QListWidget):
         self.setUniformItemSizes(True)
         self.setSpacing(1)
         self._commands: list[Any] = []
+        self._choice_values: list[str] = []
+        self._hint_text: str = ""
+        #: Which of the three shapes below is currently on screen — a theme
+        #: refresh (`showEvent`) has to re-render the right one, not always
+        #: `set_commands` regardless of what's actually showing.
+        self._render_kind: str = "commands"
         self._apply_theme()
         self.hide()
 
     def _apply_theme(self) -> None:
         """(Re)build every colour here from the live theme — see
         `ChoiceButton._apply_theme` for why this isn't a constant baked in
-        once. Also rebuilds the visible rows: their name/description labels
-        paint their own colour directly (`set_commands`), which a plain
-        stylesheet reapply wouldn't touch.
+        once. Also rebuilds the visible rows: their labels paint their own
+        colour directly, which a plain stylesheet reapply wouldn't touch.
         """
         bg = theme.to_hex(theme.popup_background())
         border = theme.to_hex(theme.popup_border())
@@ -125,14 +131,19 @@ class _CommandPopup(QtWidgets.QListWidget):
             "}"
             f"QListWidget#commandPalette::item:selected {{ background: {selected_bg}; }}"
         )
-        if self._commands:
+        if self._render_kind == "commands" and self._commands:
             self.set_commands(self._commands)
+        elif self._render_kind == "choices" and self._choice_values:
+            self.set_choice_rows(self._choice_values)
+        elif self._render_kind == "hint" and self._hint_text:
+            self.set_hint_only(self._hint_text)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
         self._apply_theme()
 
     def set_commands(self, commands: list[Any]) -> None:
+        self._render_kind = "commands"
         self._commands = list(commands)
         self.clear()
         # Straight from the live palette (not `theme.color()`'s `hou.qt`-first
@@ -154,6 +165,13 @@ class _CommandPopup(QtWidgets.QListWidget):
             name = QtWidgets.QLabel(f"/{cmd.name}", row)
             name.setStyleSheet(f"color: {name_color}; background: transparent;")
             row_layout.addWidget(name)
+            if _is_marketplace_command(cmd):
+                tag = QtWidgets.QLabel("plugin", row)
+                tag.setStyleSheet(
+                    f"color: {description_color}; background: transparent;"
+                    " border: 1px solid palette(mid); border-radius: 4px; padding: 0 4px;"
+                )
+                row_layout.addWidget(tag)
             row_layout.addStretch(1)
             description = QtWidgets.QLabel(cmd.description or "", row)
             description.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -162,6 +180,47 @@ class _CommandPopup(QtWidgets.QListWidget):
             self.setItemWidget(item, row)
         if self.count():
             self.setCurrentRow(0)
+
+    def set_choice_rows(self, values: list[str]) -> None:
+        """The argument the artist is typing has a conservatively-parsed
+        `<a|b|c>`/`[a|b]` hint (`_parse_enum_hint`) — one selectable row per
+        value, same keyboard model as `set_commands` (`current_name`,
+        `move_selection`), but the payload is the raw value to insert."""
+        self._render_kind = "choices"
+        self._choice_values = list(values)
+        self.clear()
+        name_color = theme.to_hex(theme.palette().color(QtGui.QPalette.Text))
+        for value in values:
+            item = QtWidgets.QListWidgetItem()
+            item.setData(QtCore.Qt.UserRole, value)
+            item.setSizeHint(QtCore.QSize(0, 34))
+            self.addItem(item)
+            label = QtWidgets.QLabel(value, self)
+            label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            label.setStyleSheet(f"color: {name_color}; background: transparent; padding: 0 10px;")
+            self.setItemWidget(item, label)
+        if self.count():
+            self.setCurrentRow(0)
+
+    def set_hint_only(self, text: str) -> None:
+        """A free-text `input.hint` that didn't parse into a selectable list
+        (`_parse_enum_hint` returned nothing) — one informational, muted,
+        UNSELECTABLE row. There is nothing here to navigate or accept:
+        `Composer` keeps `popup_active` False for this mode, so arrow keys
+        and Enter behave normally in the text field underneath."""
+        self._render_kind = "hint"
+        self._hint_text = text
+        self.clear()
+        muted_color = theme.to_hex(theme.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
+        item = QtWidgets.QListWidgetItem()
+        item.setFlags(item.flags() & ~QtCore.Qt.ItemIsSelectable)
+        item.setSizeHint(QtCore.QSize(0, 34))
+        self.addItem(item)
+        label = QtWidgets.QLabel(text, self)
+        label.setWordWrap(True)
+        label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        label.setStyleSheet(f"color: {muted_color}; background: transparent; padding: 4px 10px;")
+        self.setItemWidget(item, label)
 
     def current_name(self) -> str | None:
         item = self.currentItem()
@@ -299,6 +358,74 @@ def _is_bar_option(option) -> bool:
     return any(hint in identifier or hint in name for hint in _BAR_OPTION_HINTS)
 
 
+def _command_input_hint(command: Any) -> str:
+    """The `input.hint` an agent attached to a slash command, or "" if it
+    declared none.
+
+    Duck-typed against ACP's own shape (`docs/facts/acp-sdk.md` §8):
+    `AvailableCommand.input` is `None` or an `AvailableCommandInput`
+    (`RootModel[UnstructuredCommandInput]`), so the hint lives at
+    `command.input.root.hint`, not `command.input.hint` directly. Falls back
+    to reading `.hint` straight off `command.input` when there's no `.root`
+    at all, so a simpler test double (or a future, non-pydantic client)
+    doesn't have to fake the SDK's `RootModel` wrapping just to be readable.
+    """
+    spec = getattr(command, "input", None)
+    if spec is None:
+        return ""
+    root = getattr(spec, "root", spec)
+    return str(getattr(root, "hint", "") or "")
+
+
+def _is_marketplace_command(command: Any) -> bool:
+    """Whether this command came from the account's own personal skill/
+    plugin marketplace rather than the agent itself (`docs/facts/acp-sdk.md`
+    §8: `available_commands` mixes the two, and this is account-scoped, not
+    project-scoped — a real artist's own marketplace would show up here on
+    a real machine, not just this project's test one).
+
+    The ONLY structural marker any agent actually gives for this is Codex's
+    own `$` prefix on such a `name` (e.g. `"$may-hub:sync"`). Claude and
+    Grok mix marketplace and built-in commands with no distinguishing
+    feature at all — inventing a name-based guess for THOSE (matching
+    known skill names, say) is exactly the kind of heuristic this project
+    decided against, so they get no tag; only what's structurally provable
+    does.
+    """
+    return (getattr(command, "name", "") or "").startswith("$")
+
+
+#: Recognizes exactly `<a|b|c>` / `[a|b]` — brackets around pipe-separated
+#: alternatives. Deliberately not a general parser: see `_parse_enum_hint`.
+_ENUM_HINT_RE = re.compile(r"^([<\[])(.+)([>\]])$")
+
+
+def _parse_enum_hint(hint: str) -> list[str] | None:
+    """`hint` as a list of choices, or `None` if it isn't one.
+
+    Conservative on purpose: the WHOLE hint (after stripping whitespace)
+    must be one bracket pair around two or more `|`-separated alternatives,
+    none of which contain a space. Anything else — a lone placeholder like
+    `<model>` (no `|`, nothing to choose between), nested brackets or an
+    embedded space like `mcp`'s `[reconnect|enable|disable [<server>|all]]`,
+    a `key=value` template, or a free-text sentence like `<optional custom
+    summarization instructions>` — returns `None` and the hint is shown as
+    plain text instead. Guessing at a grammar the agent never committed to
+    is worse than not helping at all.
+    """
+    match = _ENUM_HINT_RE.match(hint.strip())
+    if match is None:
+        return None
+    opening, inner, closing = match.groups()
+    if (opening, closing) not in (("<", ">"), ("[", "]")):
+        return None
+    if "|" not in inner:
+        return None
+    parts = inner.split("|")
+    if any(not part or " " in part for part in parts):
+        return None
+    return parts
+
 
 class Composer(QtWidgets.QWidget):
     """Bottom of the panel: growing field, "+", microphone, chips, counter, send/stop."""
@@ -352,6 +479,9 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.accept_requested.connect(self._on_popup_accept)
 
         self._popup = _CommandPopup(self)
+        #: Which command's argument the popup is currently hinting at, while
+        #: `_slash_argument_command` has matched one — see `_on_popup_accept`.
+        self._popup_command_name: str | None = None
 
         # --- left-hand buttons: attachments, voice
         self._attach_button = QtWidgets.QToolButton()
@@ -952,32 +1082,99 @@ class Composer(QtWidgets.QWidget):
     # --- slash commands ---------------------------------------------------
 
     def _slash_query(self) -> str | None:
+        """The command-NAME fragment being typed — while there's no space
+        after it yet, so this is still the name-autocomplete list's
+        territory. `None` once a space appears (`_slash_argument_command`
+        takes over from there) or this isn't a slash line at all."""
         text = self._text_edit.toPlainText()
-        if not text.startswith("/"):
+        if not text.startswith("/") or "\n" in text:
             return None
         rest = text[1:]
-        if " " in rest or "\n" in rest:
+        if " " in rest:
             return None
         return rest
 
+    def _slash_argument_command(self) -> "AvailableCommand | None":
+        """The command whose ARGUMENT is being typed — once a space follows
+        a name that matches a real command exactly (case-insensitively).
+        `None` if the name before the space isn't one of `self._all_
+        commands` (nothing to hint — an unknown command is just text), or
+        this isn't a slash line with a space in it yet."""
+        text = self._text_edit.toPlainText()
+        if not text.startswith("/") or "\n" in text:
+            return None
+        rest = text[1:]
+        if " " not in rest:
+            return None
+        name = rest.split(" ", 1)[0]
+        return next((c for c in self._all_commands if c.name.lower() == name.lower()), None)
+
+    def _matching_commands(self, query: str) -> list:
+        """Commands whose name matches `query` — prefix matches first (a
+        command starting with what was typed is almost always the one
+        wanted), then anywhere-in-the-name matches after them.
+
+        Plain prefix-only matching quietly fails for a personal marketplace
+        command with a name like "$may-hub:sync" (`docs/facts/acp-sdk.md`
+        §8): nobody types a literal "$" first, so a prefix-only filter made
+        that command permanently unfindable except by scrolling — a real
+        problem once an agent's list runs past a hundred entries. This
+        doesn't rank commands by GUESSING which are "important" by name;
+        it's the same widening any search box gets, applied to the one
+        field the artist is actually typing against.
+        """
+        needle = query.lower()
+        if not needle:
+            return list(self._all_commands)
+        prefix = [c for c in self._all_commands if c.name.lower().startswith(needle)]
+        contains = [
+            c
+            for c in self._all_commands
+            if needle in c.name.lower() and not c.name.lower().startswith(needle)
+        ]
+        return prefix + contains
+
     def _update_slash_popup(self) -> None:
         query = self._slash_query()
-        if query is None or not self._all_commands:
+        if query is not None:
+            matches = self._matching_commands(query)
+            if matches:
+                self._popup.set_commands(matches)
+                self._popup_command_name = None
+                self._show_popup(interactive=True)
+                return
             self._hide_popup()
             return
-        matches = [c for c in self._all_commands if c.name.lower().startswith(query.lower())]
-        if not matches:
-            self._hide_popup()
-            return
-        self._popup.set_commands(matches)
+
+        command = self._slash_argument_command()
+        if command is not None:
+            hint = _command_input_hint(command)
+            if hint:
+                choices = _parse_enum_hint(hint)
+                self._popup_command_name = command.name
+                if choices is not None:
+                    self._popup.set_choice_rows(choices)
+                    self._show_popup(interactive=True)
+                else:
+                    self._popup.set_hint_only(hint)
+                    # Nothing to navigate or pick — a free-text hint is
+                    # read-only guidance, not a control. Keyboard focus
+                    # stays exactly where typing already has it.
+                    self._show_popup(interactive=False)
+                return
+
+        self._hide_popup()
+
+    def _show_popup(self, *, interactive: bool) -> None:
         self._position_popup()
         self._popup.show()
         self._popup.raise_()
-        self._text_edit.popup_active = True
+        self._text_edit.popup_active = interactive
 
     def _hide_popup(self) -> None:
         self._popup.hide()
         self._text_edit.popup_active = False
+        self._popup_command_name = None
 
     def _position_popup(self) -> None:
         # The palette belongs to the panel overlay rather than the short
@@ -1000,9 +1197,17 @@ class Composer(QtWidgets.QWidget):
         self._popup.move_selection(delta)
 
     def _on_popup_accept(self) -> None:
-        name = self._popup.current_name()
-        if name is not None:
-            self._text_edit.setPlainText(f"/{name} ")
+        selected = self._popup.current_name()
+        if selected is not None:
+            # `_popup_command_name` set means this was an argument-choice
+            # popup — the selected row is a VALUE for that command, not a
+            # command name of its own.
+            text = (
+                f"/{self._popup_command_name} {selected}"
+                if self._popup_command_name is not None
+                else f"/{selected} "
+            )
+            self._text_edit.setPlainText(text)
             cursor = self._text_edit.textCursor()
             cursor.movePosition(QtGui.QTextCursor.End)
             self._text_edit.setTextCursor(cursor)

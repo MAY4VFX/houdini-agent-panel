@@ -11,7 +11,12 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 from houdini_agent_panel.client import AgentInfo
 from houdini_agent_panel.sessions import AvailableCommand, SessionMode, Usage
 from houdini_agent_panel.ui import theme
-from houdini_agent_panel.ui.composer import Composer, build_attachment_block
+from houdini_agent_panel.ui.composer import (
+    Composer,
+    _is_marketplace_command,
+    _parse_enum_hint,
+    build_attachment_block,
+)
 
 
 def _info(**overrides) -> AgentInfo:
@@ -338,6 +343,42 @@ def test_set_usage_shows_used_over_size_for_the_real_acp_shape(qapp):
 # --- slash commands ---------------------------------------------------------------
 
 
+# --- _parse_enum_hint: the conservative <a|b|c> / [a|b] recognizer ----------------
+# Every real hint here is verbatim from a live agent (docs/facts/acp-sdk.md §8).
+
+
+@pytest.mark.parametrize(
+    "hint, expected",
+    [
+        ("<low|medium|high|xhigh|max|ultracode|auto>", ["low", "medium", "high", "xhigh", "max", "ultracode", "auto"]),
+        ("[on|off]", ["on", "off"]),
+        ("[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+         ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan", "default"]),
+        ("  [on|off]  ", ["on", "off"]),  # surrounding whitespace is stripped
+    ],
+)
+def test_parse_enum_hint_recognizes_bracketed_alternatives(hint, expected):
+    assert _parse_enum_hint(hint) == expected
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "<model>",  # a placeholder, not an enum — no "|" to choose between
+        "[name]",
+        "key=value",  # no brackets at all
+        "optional review instructions",
+        "<optional custom summarization instructions>",  # free text, not a grammar
+        "[reconnect|enable|disable [<server>|all]]",  # nested brackets, a space inside a segment
+        "<a| b>",  # a space inside one alternative
+        "<a|>",  # an empty alternative
+        "",
+    ],
+)
+def test_parse_enum_hint_rejects_everything_else(hint):
+    assert _parse_enum_hint(hint) is None
+
+
 def _commands() -> list[AvailableCommand]:
     return [
         AvailableCommand(name="model", description="change the model"),
@@ -355,6 +396,43 @@ def test_slash_popup_shows_and_filters(qapp):
     assert composer._popup.isVisible()
     names = [composer._popup.item(i).data(QtCore.Qt.UserRole) for i in range(composer._popup.count())]
     assert names == ["model", "mode"]
+
+
+def test_slash_popup_finds_a_marketplace_command_by_a_word_inside_its_name(qapp):
+    """A prefix-only filter can never find "$may-hub:sync" by typing "sync"
+    or "hub" — nobody types a literal "$" first. Real, measured problem at
+    ~140 commands on one account (docs/facts/acp-sdk.md §8)."""
+    composer = Composer()
+    composer.show()
+    composer.set_commands(_commands() + [AvailableCommand(name="$may-hub:sync", description="sync")])
+
+    _type_text(composer._text_edit, "/hub")
+    names = [composer._popup.item(i).data(QtCore.Qt.UserRole) for i in range(composer._popup.count())]
+    assert names == ["$may-hub:sync"]
+
+
+def test_slash_popup_ranks_prefix_matches_before_contains_matches(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_commands(
+        [
+            AvailableCommand(name="$contains-model-in-the-middle", description=""),
+            AvailableCommand(name="model", description="change the model"),
+        ]
+    )
+    _type_text(composer._text_edit, "/model")
+    names = [composer._popup.item(i).data(QtCore.Qt.UserRole) for i in range(composer._popup.count())]
+    assert names == ["model", "$contains-model-in-the-middle"]
+
+
+def test_marketplace_command_is_tagged_only_by_the_dollar_prefix():
+    """The one structural marker any agent actually gives — Codex's own
+    `$` prefix. No name-based guessing for agents that give none."""
+    from types import SimpleNamespace
+
+    assert _is_marketplace_command(SimpleNamespace(name="$may-hub:sync")) is True
+    assert _is_marketplace_command(SimpleNamespace(name="ab-testing")) is False
+    assert _is_marketplace_command(SimpleNamespace(name="model")) is False
 
 
 def test_slash_popup_follows_the_theme_accent(qapp):
@@ -400,10 +478,80 @@ def test_slash_popup_hidden_without_matching_commands(qapp):
 
 
 def test_slash_popup_hidden_after_space(qapp):
+    """True only because none of `_commands()`'s fixtures declare an
+    `input` hint — a command WITH one keeps the popup open past the space
+    to show it (`test_slash_popup_shows_the_hint_for_a_commands_argument`
+    and friends, below)."""
     composer = Composer()
     composer.show()
     composer.set_commands(_commands())
     _type_text(composer._text_edit, "/model ")
+    assert not composer._popup.isVisible()
+
+
+def _command_with_input(name: str, hint: str, description: str = ""):
+    """A duck-typed `AvailableCommand` carrying an `input.hint`, shaped like
+    ACP's real `AvailableCommandInput` (`.input.root.hint`) — not
+    `sessions.AvailableCommand`, which has no `input` field at all (see
+    `docs/facts/acp-sdk.md` §8)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name=name,
+        description=description,
+        input=SimpleNamespace(root=SimpleNamespace(hint=hint)),
+    )
+
+
+def test_slash_popup_shows_the_hint_for_a_commands_argument(qapp):
+    """A free-text hint (no `<a|b|c>` shape) is read-only guidance — shown,
+    but the popup does not become keyboard-interactive for it."""
+    composer = Composer()
+    composer.show()
+    composer.set_commands(
+        [_command_with_input("compact", "optional custom summarization instructions")]
+    )
+    _type_text(composer._text_edit, "/compact ")
+
+    assert composer._popup.isVisible()
+    assert not composer._text_edit.popup_active
+    assert composer._popup.current_name() is None  # nothing selectable
+
+
+def test_slash_popup_offers_selectable_values_for_an_enum_hint(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_commands(
+        [_command_with_input("effort", "<low|medium|high|xhigh|max|ultracode|auto>")]
+    )
+    _type_text(composer._text_edit, "/effort ")
+
+    assert composer._popup.isVisible()
+    assert composer._text_edit.popup_active
+    assert composer._popup.current_name() == "low"
+
+
+def test_accepting_an_argument_choice_inserts_it_after_the_command_name(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_commands([_command_with_input("fast", "[on|off]")])
+    _type_text(composer._text_edit, "/fast ")
+    composer._text_edit.navigate_requested.emit(1)
+    assert composer._popup.current_name() == "off"
+
+    _press_enter(composer._text_edit)
+
+    assert not composer._popup.isVisible()
+    assert composer._text_edit.toPlainText() == "/fast off"
+
+
+def test_slash_popup_hidden_for_an_unknown_command_name(qapp):
+    """A space after something that isn't a real command name is just
+    text — there is no command to hint an argument for."""
+    composer = Composer()
+    composer.show()
+    composer.set_commands([_command_with_input("effort", "<low|high>")])
+    _type_text(composer._text_edit, "/not-a-real-command ")
     assert not composer._popup.isVisible()
 
 
