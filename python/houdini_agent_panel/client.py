@@ -150,11 +150,16 @@ class AgentInfo:
     #: conversation is a local, read-only replay of the saved transcript
     #: (`ui/panel.py::AgentPanel._restore_conversations` — "these
     #: transcripts have no live session behind them"), never an actual
-    #: `session/load` call. This is where that would plug in if the panel
-    #: ever offers resuming a past conversation as a real live session again
-    #: — closer to reattaching a terminal session than replaying a log —
-    #: which is the "can I get my old session back, not just its text"
-    #: question the owner has actually asked about.
+    #: `session/load` call.
+    #:
+    #: Read but deliberately unused, and it should stay that way. The obvious
+    #: thing to build on it is listing the sessions the artist had with this
+    #: agent in a terminal and continuing one here — and that was considered
+    #: and declined by the owner (2026-08-04): "терминальные сессии агента не
+    #: надо мешать с панелью, в этом и был смысл". The panel's conversations
+    #: belong to a scene; the terminal's belong to wherever it was opened.
+    #: Merging the two lists would erase exactly the boundary the scene
+    #: scoping exists to draw.
     supports_load_session: bool
     supports_logout: bool
     auth_methods: tuple[AuthMethod, ...]
