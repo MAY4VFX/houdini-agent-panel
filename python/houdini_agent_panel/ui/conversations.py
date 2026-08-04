@@ -436,8 +436,13 @@ class ConversationDrawer(QtWidgets.QFrame):
             self.move(-self.width() if self._closing else 0, self._top)
 
     def _select_session(self, session_id: str) -> None:
+        # The drawer stays open, like the "New chat" button above it. It
+        # closed here on the reasoning that the artist asked for this one
+        # conversation and now wants to read it — which turned out to be the
+        # wrong model of the thing: this is a panel, not a menu. Reading one
+        # conversation is very often followed by reading another, and the
+        # toggle in the header is there for whoever actually wants it gone.
         self.session_selected.emit(session_id)
-        self.close_drawer()
 
     def _on_new_session(self) -> None:
         # The drawer stays open. Picking an existing conversation closes it

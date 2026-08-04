@@ -89,7 +89,12 @@ def test_pin_icon_color_follows_the_theme_accent(qapp):
     assert theme.to_hex(QtGui.QColor("#ff33aa")) in host.styleSheet()
 
 
-def test_selecting_conversation_emits_id_and_closes_drawer(qapp):
+def test_selecting_a_conversation_leaves_the_drawer_open(qapp):
+    """It used to close, on the reasoning that the artist asked for this one
+    conversation and now wants to read it. Wrong model of the thing: this is
+    a panel, not a menu, and reading one conversation is very often followed
+    by reading another. The toggle in the header is there for whoever wants
+    it gone."""
     from PySide6 import QtWidgets
 
     parent = QtWidgets.QWidget()
@@ -105,7 +110,7 @@ def test_selecting_conversation_emits_id_and_closes_drawer(qapp):
     drawer._buttons["s1"].click()
 
     assert selected == ["s1"]
-    assert drawer._closing is True
+    assert drawer._closing is False
 
 
 def test_new_chat_leaves_the_drawer_open(qapp):
