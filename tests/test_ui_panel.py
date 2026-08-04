@@ -1593,3 +1593,28 @@ def test_a_half_written_prompt_is_never_overwritten(qapp):
     composer.set_text("/login")
     assert composer._text_edit.toPlainText() == "make the rotor emit dust when"
     composer.deleteLater()
+
+
+def test_an_empty_agent_list_says_why(qapp, monkeypatch):
+    """Reported from a fresh Linux install: Settings → Agents was empty, with
+    nothing to install and no explanation.
+
+    `fetch_registry` falls back to a cache of any age, so an empty result
+    means there is no cache either — a first run that could not reach the
+    network. The panel simply skipped `set_agents` and said nothing, and an
+    empty list on a fresh install is indistinguishable from a panel that
+    does not work.
+    """
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_refresh_done(None, [])
+
+    assert notes, "an empty agent list was reported as nothing at all"
+    assert "Network" in notes[-1], (
+        f"a studio firewall is the likeliest cause and must be named: {notes[-1]!r}"
+    )
+    widget.shutdown()

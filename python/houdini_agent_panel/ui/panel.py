@@ -166,12 +166,19 @@ class _RefreshWorker(Worker):
 
     def work(self) -> None:  # pragma: no cover - covered via refresh.py
         entries: list = []
+        registry_error = ""
         try:
             from .. import registry
 
             entries = registry.fetch_registry()
-        except Exception:  # noqa: BLE001 - the panel must work without a registry
+        except Exception as exc:  # noqa: BLE001 - the panel must work without a registry
             entries = []
+            # Kept, not swallowed. Without the registry the Agents section is
+            # simply empty, and an empty list of agents on a fresh install
+            # looks exactly like a panel that does nothing — the artist has
+            # no way to tell "couldn't reach the network" from "this is
+            # broken". Reported first-hand from a fresh Linux install.
+            registry_error = f"{type(exc).__name__}: {exc}"
 
         result = None
         try:
@@ -183,6 +190,7 @@ class _RefreshWorker(Worker):
         except Exception:  # noqa: BLE001 - the feed must never break the panel
             result = None
 
+        self._registry_error = registry_error
         self.done.emit(result, entries)
 
 
@@ -1484,6 +1492,17 @@ class AgentPanel(QtWidgets.QWidget):
             self._registry_entries = list(entries)
         self._refresh_agent_chip_menu()
         settings_view = getattr(self, "_settings_view", None)
+        if not entries:
+            # Say why the list is empty. `fetch_registry` falls back to a
+            # cached copy of any age, so reaching this at all means there is
+            # no cache either — a first run that could not reach the network.
+            reason = getattr(self._refresh_worker, "_registry_error", "")
+            self._note(
+                "Couldn't fetch the agent list, so there is nothing to install "
+                "yet. Check the network — or, behind a studio firewall, "
+                "Settings → Network."
+                + (f"\n{reason}" if reason else "")
+            )
         if settings_view is not None and entries:
             from .. import registry
 
