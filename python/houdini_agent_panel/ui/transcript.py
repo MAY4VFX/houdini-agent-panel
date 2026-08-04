@@ -19,7 +19,7 @@ import re
 
 from ..transcript_model import Entry, TranscriptModel
 from . import theme
-from .qt import QtCore, QtGui, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import ThinkingIndicator
 
 #: How many pixels from the bottom still count as "at the bottom" — a small
@@ -62,6 +62,15 @@ def _split_markdown_segments(text: str) -> list[tuple[str, str]]:
 
 
 class TranscriptView(QtWidgets.QScrollArea):
+    #: The gutter (see `current_gutter`) whenever it actually changes size.
+    #: `AgentPanel` uses this to keep the conversation drawer's width in
+    #: sync — as a signal, not a value it pulls on its own resize, because
+    #: a parent's resizeEvent can run before a child's own layout has
+    #: actually been applied, and reading `current_gutter()` at that moment
+    #: would see last frame's number. Pushed here, at the one point this
+    #: value is actually known correct, that ordering problem doesn't exist.
+    gutter_changed = Signal(int)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -83,6 +92,10 @@ class TranscriptView(QtWidgets.QScrollArea):
 
         self._model: TranscriptModel | None = None
         self._rows: dict[str, QtWidgets.QWidget] = {}
+        #: The last gutter `resizeEvent` computed — see `current_gutter()`.
+        #: Matches its own floor (14) as a default so a caller asking before
+        #: the first resize gets a sane, conservative answer.
+        self._gutter = 14
 
         # A per-instance, self-owned timer for the deferred autoscroll below
         # — NOT the static `QTimer.singleShot(0, self._scroll_to_bottom)`,
@@ -320,8 +333,30 @@ class TranscriptView(QtWidgets.QScrollArea):
         # Both supplied references use a 706–736 px reading rail.  Wider
         # Houdini panes add quiet gutters instead of stretching prose forever.
         gutter = max(14, (self.viewport().width() - 736) // 2)
+        if gutter != self._gutter:
+            self._gutter = gutter
+            self.gutter_changed.emit(gutter)
         margins = self._layout.contentsMargins()
         self._layout.setContentsMargins(gutter, margins.top(), gutter, margins.bottom())
+
+    def current_gutter(self) -> int:
+        """The empty margin left of the reading column at the current width.
+
+        `AgentPanel` reads this to size the conversation drawer so it fits
+        INSIDE this already-empty space instead of covering the reading
+        column — the drawer lives in a margin that exists whether or not
+        it's open, so opening it never has to move anything else.
+
+        This is the actual last-applied margin, not a second computation of
+        the same formula: `Composer`'s own centering converges to the same
+        number at any width wide enough for a drawer to matter (both cap at
+        a 736px rail and share the same 14px floor), and asking the
+        transcript directly — which measures against its `viewport()`, a
+        few pixels narrower than the raw widget width whenever its
+        scrollbar is showing — is the more conservative of the two, so it's
+        the one bound the drawer needs.
+        """
+        return self._gutter
 
 
 class _ActivityRow(QtWidgets.QWidget):

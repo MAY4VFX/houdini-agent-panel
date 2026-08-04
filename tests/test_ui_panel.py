@@ -17,6 +17,7 @@ import pytest
 
 from houdini_agent_panel import sessions, settings as settings_mod
 from houdini_agent_panel.ui import panel as panel_mod
+from houdini_agent_panel.ui.qt import QtCore
 
 
 @pytest.fixture(autouse=True)
@@ -465,6 +466,88 @@ def test_choosing_agent_from_chip_menu_switches_agent(qapp, monkeypatch):
     widget.shutdown()
 
 
+def test_restart_agent_stops_and_relaunches_the_same_agent(qapp, monkeypatch):
+    """`_restart_agent` — wired to the Network section's "Restart agent"
+    banner (issue #26) — stops the running client and brings the SAME
+    agent id back, unlike `_on_agent_chosen` which changes identity."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    assert widget._agent_id == "claude-acp"
+
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    stopped = []
+    monkeypatch.setattr(client, "stop", lambda: stopped.append(True))
+    started: list[str] = []
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started.append(agent_id))
+
+    widget._restart_agent()
+
+    assert stopped == [True]
+    assert started == ["claude-acp"]
+    assert widget._agent_id == "claude-acp"  # identity unchanged, unlike a switch
+    assert settings_mod.load().default_agent == "claude-acp"  # never touched
+    widget.shutdown()
+
+
+def test_restart_agent_does_nothing_without_an_agent(qapp, monkeypatch):
+    widget = _make_panel(qapp)
+    started: list[str] = []
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: started.append(agent_id))
+
+    widget._restart_agent()
+
+    assert started == []
+    widget.shutdown()
+
+
+def test_restart_agent_keeps_the_conversation(qapp, monkeypatch):
+    """The recipe borrowed from `_on_agent_chosen`
+    (`AgentPanel._switch_agent_process`) persists the transcript to disk
+    before tearing anything down, and refills the pool from disk once the
+    old one is cleared — so a restart drops the live session id (it
+    belonged to the process that's going away) but not the words."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    client.session_started.emit("s1", _session("s1"))
+    qapp.processEvents()
+    widget._pool.get("s1").title = "About the shot"
+    widget._model("s1").append_error("hello")
+
+    monkeypatch.setattr(client, "is_running", lambda: False)
+    monkeypatch.setattr(widget, "_start_agent", lambda agent_id: None)
+
+    widget._restart_agent()
+
+    assert widget._pool.get("s1") is None
+    restored = [s for s in widget._pool.all() if s.session_id.startswith("restored:")]
+    assert restored and restored[0].title == "About the shot"
+    widget.shutdown()
+
+
+def test_restart_agent_requested_from_settings_reaches_the_panel(qapp, monkeypatch):
+    """The Network section's button is wired all the way through, not just
+    present — `SettingsView.restart_agent_requested` must actually call
+    `AgentPanel._restart_agent` (`_make_settings_view`)."""
+    widget = _make_panel(qapp)
+    calls = []
+    monkeypatch.setattr(widget, "_restart_agent", lambda: calls.append(True))
+
+    widget._settings_view.restart_agent_requested.emit()
+
+    assert calls == [True]
+    widget.shutdown()
+
+
 def test_manage_agents_clicked_opens_settings_focused_on_agents(qapp):
     widget = _make_panel(qapp)
     widget._boot()
@@ -596,14 +679,17 @@ def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     widget.shutdown()
 
 
-def test_open_drawer_overlays_the_conversation_without_moving_it(qapp):
-    """An open drawer must not move the feed or the composer sideways.
+def test_open_drawer_never_moves_the_conversation(qapp):
+    """An open drawer must not move the feed or the composer sideways, ever.
 
     This used to reserve the drawer's width as `_body_layout`'s left
     margin, which pushed the feed/composer aside — smoothly or not, that
-    is still a horizontal jump the owner explicitly does not want. The
-    drawer draws OVER the conversation now, at any panel width, and
-    `_body_layout`'s margin never changes.
+    is still a horizontal jump the owner explicitly does not want.
+    `_body_layout`'s margin is now a genuine constant: the drawer lives in
+    the already-empty gutter beside the reading column instead
+    (`ConversationDrawer.set_available_width`,
+    `TranscriptView.current_gutter`), so there is nothing for `_body` to
+    react to in the first place.
     """
     widget = _make_panel(qapp)
     widget.resize(1000, 700)
@@ -632,7 +718,7 @@ def test_open_drawer_overlays_the_conversation_without_moving_it(qapp):
     widget.shutdown()
 
 
-def test_narrow_panel_also_overlays_not_squeezes_the_feed(qapp):
+def test_narrow_panel_also_never_moves_the_feed(qapp):
     widget = _make_panel(qapp)
     widget.resize(320, 700)
     widget.show()
@@ -643,6 +729,64 @@ def test_narrow_panel_also_overlays_not_squeezes_the_feed(qapp):
 
     assert widget._body_layout.contentsMargins().left() == 0
     widget.shutdown()
+
+
+def test_drawer_width_tracks_the_transcripts_gutter_across_panel_widths(qapp):
+    """The table the owner asked for, as an assertion: the composer's left
+    edge is measured with the drawer closed and open at seven panel widths
+    (1600 down to 320). It must be IDENTICAL at every single width — not
+    just where the drawer comfortably fits — because `_body` never moves
+    regardless of whether the drawer fits its ideal width, has to shrink,
+    or hits its floor and ends up overlapping a little. What's expected to
+    change across these widths is the drawer's OWN width: full 286px while
+    there's room, shrinking with the gutter, floored at
+    `_drawer_floor_width()` below it.
+    """
+    from houdini_agent_panel.ui.conversations import _DRAWER_IDEAL_WIDTH, _drawer_floor_width
+
+    widget = _make_panel(qapp)
+    widget._show_page(widget.PAGE_TRANSCRIPT)  # the gutter only tracks a VISIBLE transcript
+    floor = _drawer_floor_width()
+    rows = []
+
+    for width in (1600, 1300, 1100, 900, 700, 500, 320):
+        widget.resize(width, 700)
+        widget.show()
+        qapp.processEvents()
+
+        composer_x_closed = widget._composer.mapTo(widget, QtCore.QPoint(0, 0)).x()
+
+        widget._conversations.open_drawer()
+        qapp.processEvents()
+        composer_x_open = widget._composer.mapTo(widget, QtCore.QPoint(0, 0)).x()
+        drawer_width = widget._conversations.width()
+        gutter = widget._transcript.current_gutter()
+        widget._conversations.close_drawer()
+        qapp.processEvents()
+
+        rows.append((width, gutter, drawer_width, composer_x_closed, composer_x_open))
+
+        # The hard requirement: identical composer position, at every width.
+        assert composer_x_open == composer_x_closed, (
+            f"composer moved at panel width {width}: "
+            f"{composer_x_closed} (closed) != {composer_x_open} (open)"
+        )
+        # The drawer's own width degrades exactly as designed: full ideal
+        # width when the gutter has room for it, shrunk to the gutter while
+        # the gutter is still above the floor, held at the floor below it.
+        expected_drawer_width = min(_DRAWER_IDEAL_WIDTH, max(floor, gutter))
+        assert drawer_width == expected_drawer_width, (
+            f"at panel width {width}: gutter={gutter}, floor={floor}, "
+            f"expected drawer width {expected_drawer_width}, got {drawer_width}"
+        )
+
+    widget.shutdown()
+
+    header = f"{'panel':>6} {'gutter':>7} {'drawer':>7} {'closed x':>9} {'open x':>7} {'moved?':>7}"
+    print("\n" + header)
+    for width, gutter, drawer_width, x_closed, x_open in rows:
+        moved = "yes" if x_closed != x_open else "no"
+        print(f"{width:>6} {gutter:>7} {drawer_width:>7} {x_closed:>9} {x_open:>7} {moved:>7}")
 
 
 def test_panel_can_be_docked_into_a_narrow_houdini_pane(qapp):

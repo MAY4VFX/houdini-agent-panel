@@ -377,18 +377,26 @@ class AgentPanel(QtWidgets.QWidget):
         self._pages.insertWidget(self.PAGE_SETTINGS, self._make_settings_view())
         self._pages.insertWidget(self.PAGE_AUTH, self._make_auth_view())
 
-        # Everything except the header lives in its own column below it. The
-        # open conversation drawer always OVERLAYS this column — it used to
-        # push it aside by resizing `_body_layout`'s left margin, and pushing
-        # it made the feed and composer visibly jump sideways the moment the
-        # drawer started (or finished) opening. Reported as "the panel
-        # jumps", and once the fix was scoped it turned out the owner didn't
-        # want a smoother jump either: the feed and composer must not change
-        # horizontal position at all, so the drawer only ever draws on top of
-        # them (see `ConversationDrawer`'s own class docstring). The header
-        # stays full width regardless: its sidebar toggle is the only way to
-        # close the drawer again, and the drawer starts below the header
-        # (`set_top_inset`) so it can never end up underneath it.
+        # Everything except the header lives in its own column below it, and
+        # `_body_layout`'s margins never change — NOT while the drawer opens
+        # or closes, not at any panel width. Two rejected designs got here:
+        # first, reserving the drawer's width as this margin, which made the
+        # feed and composer visibly jump sideways the instant the drawer
+        # started (or finished) opening ("the panel jumps"); animating that
+        # same margin instead of jumping it was the second attempt, and the
+        # owner rejected that too — smooth or not, moving the content at all
+        # wasn't wanted. What actually works: `TranscriptView` and
+        # `Composer` already leave an empty gutter on either side of their
+        # own 736px-wide content once the panel is wide enough
+        # (`TranscriptView.current_gutter`), and the drawer draws INSIDE
+        # that already-empty margin (`ConversationDrawer.set_available_
+        # width`) instead of claiming new space. Too narrow for that and it
+        # shrinks; narrower still and it overlaps a little rather than the
+        # reading column ever getting permanently squeezed for it — see
+        # `ConversationDrawer`'s own class docstring for the full reasoning.
+        # The header stays full width regardless: its sidebar toggle is the
+        # only way to close the drawer again, and the drawer starts below
+        # the header (`set_top_inset`) so it can never end up underneath it.
         self._body = QtWidgets.QWidget(self)
         self._body_layout = QtWidgets.QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
@@ -404,6 +412,11 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._conversations = ConversationDrawer(self)
         self._conversations.open_state_changed.connect(self._on_drawer_state_changed)
+        # The authoritative width sync: fires exactly when the transcript's
+        # own gutter actually changes, so there's no ordering dependency on
+        # whether the transcript's or the panel's resizeEvent runs first —
+        # see `TranscriptView.gutter_changed`'s own docstring.
+        self._transcript.gutter_changed.connect(self._conversations.set_available_width)
 
         # The panel forwards focus to the composer: Houdini activates the pane
         # tab and grants focus to the panel widget, not to anything inside it.
@@ -445,6 +458,7 @@ class AgentPanel(QtWidgets.QWidget):
         view.install_succeeded.connect(self._on_agent_install_succeeded)
         view.install_failed.connect(self._on_agent_install_failed)
         view.sign_in_requested.connect(self._offer_sign_in)
+        view.restart_agent_requested.connect(self._restart_agent)
         return view
 
     def _make_auth_view(self) -> QtWidgets.QWidget:
@@ -1131,17 +1145,24 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _sync_drawer_geometry(self) -> None:
         self._conversations.set_top_inset(self._header.height())
+        # The drawer's WIDTH is kept in sync by `TranscriptView.gutter_
+        # changed` (connected in `_build`), not pulled here — pulling
+        # `current_gutter()` from inside this method, itself often called
+        # from `AgentPanel`'s own `resizeEvent`, could read a value the
+        # transcript's OWN resizeEvent hadn't updated yet for this same
+        # resize, i.e. exactly the staleness `gutter_changed` exists to
+        # avoid. `_body` itself never moves either way, at any width.
         self._conversations.sync_parent_geometry()
         if self._conversations.isVisible():
             self._conversations.raise_()
 
     def _on_drawer_state_changed(self, _open: bool) -> None:
-        # The drawer overlays `_body` rather than resizing it (see the
-        # comment where `_body` is built), so nothing here needs to move —
-        # only raised. Re-positioning keeps calling `.raise_()` at the end
-        # of `_position_permission_popover`, which is what keeps an active
-        # permission request visible on TOP of a drawer that just opened
-        # over it, instead of hidden underneath.
+        # `_body` never moves when the drawer opens or closes (see the
+        # comment where it's built) — this only keeps floating chrome
+        # ordered correctly. `_position_permission_popover`'s own
+        # `.raise_()` is what keeps an active permission request visible on
+        # TOP of a drawer that just opened over it, instead of hidden
+        # underneath.
         self._position_permission_popover()
 
     def _start_new_session(self) -> None:
@@ -1648,24 +1669,54 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings.default_agent = agent_id
         settings_mod.save(self._settings)
 
+        self._switch_agent_process(old_agent_id, agent_id)
+
+    def _switch_agent_process(
+        self, old_agent_id: str, new_agent_id: str, *, rejoin: bool = True
+    ) -> None:
+        """Persist → detach from `old_agent_id` → attach to `new_agent_id`
+        → launch it. The tail of `_on_agent_chosen`, factored out so
+        `_restart_agent` doesn't duplicate it (issue #26) — a settings field
+        an agent only reads at spawn (the Network proxy fields) needs this
+        exact recipe with the SAME agent id on both sides.
+
+        `rejoin=True` (a genuine identity switch, `_on_agent_chosen`) moves
+        this tab's client/pool wiring and live-panel membership onto the
+        new agent via `_rejoin_agent` — which also calls
+        `_restore_conversations()` for it — and the old agent's process
+        only stops if no OTHER tab is still using it.
+
+        `rejoin=False` (`_restart_agent`): same identity, so there is
+        nothing to rejoin — this tab never left. The process stops
+        unconditionally instead: it is the one shared by every tab on this
+        agent (`shared_client`), so a restart is not "am I still using
+        it," it is "does everyone using it get the new environment." The
+        pool is cleared just the same, so `_restore_conversations()` is
+        called directly to refill it from disk before relaunching.
+        """
         # The CONVERSATION is not the session id: it is what the artist
-        # wrote and read, and wiping it on every agent switch was the bug,
-        # not the feature. Written to disk before anything about the old
-        # agent is touched.
+        # wrote and read, and wiping it on every switch (or restart) was
+        # the bug, not the feature. Written to disk before anything about
+        # the old process is touched.
         self._persist_conversations()
         self._current_session_id = None
         self._pending_permissions.clear()
 
-        # Detach from the old agent's live-panel count BEFORE deciding
-        # whether it was the last tab there — `_rejoin_agent` does the
-        # detaching, this reads the result right after.
-        self._rejoin_agent(agent_id)
+        if rejoin:
+            # Detach from the old agent's live-panel count BEFORE deciding
+            # whether it was the last tab there — `_rejoin_agent` does the
+            # detaching, this reads the result right after.
+            self._rejoin_agent(new_agent_id)
+            stop_old = not _live_panels_for(old_agent_id)
+        else:
+            stop_old = True
 
-        if not _live_panels_for(old_agent_id):
-            # Nobody else is attached to the agent this tab just left —
-            # its process and session list can go. A session id belongs to
-            # the process that issued it, so the binding must go with it;
-            # a sibling tab still using this same agent would keep both.
+        if stop_old:
+            # Nobody else needs the old process (switch), or restarting it
+            # is the whole point (restart) — either way, a session id
+            # belongs to the process that issued it, so the binding goes
+            # with it. A sibling tab still using this same agent during a
+            # SWITCH would have kept both; a restart always tears it down.
             old_client = shared_client(old_agent_id)
             old_pool = sessions.pool(old_agent_id)
             for state in old_pool.all():
@@ -1674,10 +1725,33 @@ class AgentPanel(QtWidgets.QWidget):
                 old_client.stop()
             old_pool.clear()
 
+        if not rejoin:
+            # `_rejoin_agent` would normally have refilled the pool from
+            # disk as part of moving onto the new agent — skipped above
+            # since there is no new agent to move onto, so it happens here
+            # instead, now that `old_pool.clear()` emptied it.
+            self._restore_conversations()
+
         self._refresh_agent_chip_menu()
         # A message queued for the old agent has nowhere to land yet: the new
         # one has not opened a session. It is kept and sent once it does.
-        self._start_agent(agent_id)
+        self._start_agent(new_agent_id)
+
+    def _restart_agent(self) -> None:
+        """Restart THIS tab's own agent process, in place — no identity
+        change, no `default_agent` write.
+
+        An agent reads its environment once, at spawn
+        (docs/2026-08-03-proxy-support.md), so a Network setting change
+        (proxy/no-proxy/CA bundle) needs a fresh process to take effect,
+        not a Houdini restart. Wired to `SettingsView.restart_agent_
+        requested` (the Network section's own banner button); the
+        settings screen decides WHEN to offer this, this method only does
+        it.
+        """
+        if not self._agent_id:
+            return
+        self._switch_agent_process(self._agent_id, self._agent_id, rejoin=False)
 
     # --- conversations that outlive the agent and Houdini -----------------
 

@@ -8,9 +8,9 @@ stopped earning its keep — see `AgentPanel._open_agent_management`, which is
 just "open settings, scroll to top".
 
 Everything is grouped into collapsible `_Section`s (Agents / Behaviour /
-Updates & notices / Voice / Privacy / Data) inside a fixed-width, centered
-rail — the same 736 px column the feed and composer use — instead of one
-long form stretched edge to edge.
+Updates & notices / Voice / Privacy / Network / Data) inside a fixed-width,
+centered rail — the same 736 px column the feed and composer use — instead
+of one long form stretched edge to edge.
 
 Reads and writes `settings.json` directly (`settings.load`/`settings.save`) —
 the same one-way layering as `ui/agents.py`: the settings screen is allowed
@@ -247,6 +247,20 @@ class SettingsView(QtWidgets.QWidget):
     #: knows how to open the sign-in screen (`AgentPanel._offer_sign_in`);
     #: this view only knows registry/runtime/settings, never the connection.
     sign_in_requested = Signal()
+    #: Fired only by the three Network fields (proxy/no-proxy/CA bundle),
+    #: never by any other field — an agent reads its environment once, at
+    #: spawn (docs/2026-08-03-proxy-support.md), so ONLY these three leave a
+    #: running agent out of date; every other setting takes effect through
+    #: the ordinary `changed` reload. Drives this view's own restart banner
+    #: (see `_on_network_field_changed`); nothing outside this file needs
+    #: to know a network field specifically changed, so it isn't forwarded
+    #: any further.
+    proxy_changed = Signal()
+    #: The restart banner's own button. Restarting the agent process is the
+    #: panel's job, not this view's — it knows `shared_client`, `_pool`,
+    #: session persistence, none of which this screen has any business
+    #: touching (`AgentPanel._restart_agent`).
+    restart_agent_requested = Signal()
 
     def __init__(
         self,
@@ -332,6 +346,74 @@ class SettingsView(QtWidgets.QWidget):
         self._copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics")
         self._copy_diagnostics_button.clicked.connect(self._on_copy_diagnostics)
 
+        # --- Network — see docs/2026-08-03-proxy-support.md and issue #26.
+        # `settings.py`'s `proxy_url`/`no_proxy`/`ca_bundle` and their
+        # translation into environment variables (`proxy.py`) and the
+        # panel's own downloads (`network.py`) already exist and are already
+        # wired up (`AgentPanel._apply_network_settings`, called at startup
+        # and on every `changed`); this section is only the missing UI for
+        # fields that already work.
+        self._proxy_edit = QtWidgets.QLineEdit()
+        self._proxy_edit.setPlaceholderText(
+            "http://proxy.studio.local:8080 (blank = inherit from the machine)"
+        )
+        self._proxy_edit.textChanged.connect(self._on_network_field_changed)
+
+        self._no_proxy_edit = QtWidgets.QLineEdit()
+        self._no_proxy_edit.setPlaceholderText(
+            "extra hosts to bypass, comma-separated — localhost is always excluded"
+        )
+        self._no_proxy_edit.textChanged.connect(self._on_network_field_changed)
+
+        self._ca_bundle_edit = QtWidgets.QLineEdit()
+        self._ca_bundle_edit.setPlaceholderText("/path/to/ca-bundle.pem")
+        self._ca_bundle_edit.textChanged.connect(self._on_network_field_changed)
+        self._browse_ca_bundle_button = QtWidgets.QPushButton("Browse…")
+        self._browse_ca_bundle_button.clicked.connect(self._on_browse_ca_bundle)
+
+        ca_bundle_row = QtWidgets.QHBoxLayout()
+        # Same reasoning as `data_dir_row` above: a nested layout's own
+        # margins aren't guaranteed zero, and this row sits in the same
+        # value column as every other field.
+        ca_bundle_row.setContentsMargins(0, 0, 0, 0)
+        ca_bundle_row.addWidget(self._ca_bundle_edit, 1)
+        ca_bundle_row.addWidget(self._browse_ca_bundle_button)
+
+        # The honest caption the field trio needs to be trustworthy, not
+        # decoration — stated plainly, no hedging: what blank means, where
+        # a typed password actually ends up, and the one thing that is
+        # never sent through the proxy regardless of what's typed above.
+        self._network_caption = QtWidgets.QLabel(
+            "Blank fields fall back to whatever the machine already exports. "
+            "A password typed into the proxy URL is written to settings.json "
+            "as plain text — prefer a proxy with no login, or one restricted "
+            "by IP. localhost is never sent through the proxy."
+        )
+        self._network_caption.setWordWrap(True)
+        # Muted, same idiom `agents.py` already uses for secondary text
+        # (`version_label`/`_state_label`) — a live palette role through Qt's
+        # `palette()` stylesheet function, never a hex literal (`test_theme.py`
+        # forbids those in `ui/**`).
+        self._network_caption.setStyleSheet("color: palette(disabled, text);")
+
+        # The restart banner: hidden until a Network field is actually
+        # edited (`_on_network_field_changed`), never shown for any other
+        # setting. Lives inside the section itself — right where the
+        # artist's eyes already are the moment they type — rather than a
+        # separate global notice.
+        self._restart_banner = QtWidgets.QWidget()
+        self._restart_label = QtWidgets.QLabel(
+            "The agent will pick this up after a restart."
+        )
+        self._restart_label.setWordWrap(True)
+        self._restart_button = QtWidgets.QPushButton("Restart agent")
+        self._restart_button.clicked.connect(self._on_restart_agent_clicked)
+        restart_banner_layout = QtWidgets.QHBoxLayout(self._restart_banner)
+        restart_banner_layout.setContentsMargins(0, 0, 0, 0)
+        restart_banner_layout.addWidget(self._restart_label, 1)
+        restart_banner_layout.addWidget(self._restart_button)
+        self._restart_banner.setVisible(False)
+
         # Measured once from the live font and handed to every section, so
         # "Default agent", "Whisper endpoint" and "Data folder" share one
         # label column and one rhythm instead of each `_Section` sizing
@@ -357,6 +439,15 @@ class SettingsView(QtWidgets.QWidget):
         privacy_section = _Section("Privacy", self, expanded=False, grid=grid_metrics)
         privacy_section.add_checkbox(self._telemetry_checkbox)
 
+        # Collapsed by default (issue #26) — same rank as Privacy/Data: an
+        # artist on a studio with no proxy never needs to open this.
+        network_section = _Section("Network", self, expanded=False, grid=grid_metrics)
+        network_section.add_row("Proxy", self._proxy_edit)
+        network_section.add_row("No proxy", self._no_proxy_edit)
+        network_section.add_row("CA bundle", ca_bundle_row)
+        network_section.add_widget(self._network_caption)
+        network_section.add_widget(self._restart_banner)
+
         data_section = _Section("Data", self, expanded=False, grid=grid_metrics)
         data_section.add_row("Data folder", data_dir_row)
         data_section.add_action_row(self._copy_diagnostics_button)
@@ -370,6 +461,7 @@ class SettingsView(QtWidgets.QWidget):
         self._updates_section = updates_section
         self._voice_section = voice_section
         self._privacy_section = privacy_section
+        self._network_section = network_section
         self._data_section = data_section
 
         rail = QtWidgets.QWidget()
@@ -382,6 +474,7 @@ class SettingsView(QtWidgets.QWidget):
             updates_section,
             voice_section,
             privacy_section,
+            network_section,
             data_section,
         ):
             rail_layout.addWidget(section)
@@ -465,6 +558,13 @@ class SettingsView(QtWidgets.QWidget):
             self._show_announcements_checkbox.setChecked(current.show_announcements)
             self._telemetry_checkbox.setChecked(current.telemetry)
             self._whisper_edit.setText(current.whisper_endpoint)
+            self._proxy_edit.setText(current.proxy_url)
+            self._no_proxy_edit.setText(current.no_proxy)
+            self._ca_bundle_edit.setText(current.ca_bundle)
+            # A reload is a fresh read of what's on disk, not an edit — the
+            # invitation to restart only belongs to an edit THIS screen just
+            # made (`_on_network_field_changed`).
+            self._restart_banner.setVisible(False)
             self._data_dir_label.setText(str(paths.data_dir()))
         finally:
             self._loading = False
@@ -482,9 +582,12 @@ class SettingsView(QtWidgets.QWidget):
         self._default_agent_combo.setCurrentIndex(index if index >= 0 else 0)
         self._default_agent_combo.blockSignals(False)
 
-    def _on_field_changed(self, *_args: object) -> None:
-        if self._loading:
-            return
+    def _save_from_fields(self) -> "settings_module.Settings":
+        """Read every field on the screen into a freshly-loaded `Settings`
+        and save it. The one place that knows the full field list, shared
+        by `_on_field_changed` and `_on_network_field_changed` — those
+        differ only in what they do AFTER saving (the latter also shows the
+        restart banner and fires `proxy_changed`), not in what gets saved."""
         current = settings_module.load()
         current.default_agent = self._default_agent_combo.currentData()
         current.autostart_agent = self._autostart_checkbox.isChecked()
@@ -492,8 +595,40 @@ class SettingsView(QtWidgets.QWidget):
         current.show_announcements = self._show_announcements_checkbox.isChecked()
         current.telemetry = self._telemetry_checkbox.isChecked()
         current.whisper_endpoint = self._whisper_edit.text().strip()
+        current.proxy_url = self._proxy_edit.text().strip()
+        current.no_proxy = self._no_proxy_edit.text().strip()
+        current.ca_bundle = self._ca_bundle_edit.text().strip()
         settings_module.save(current)
+        return current
+
+    def _on_field_changed(self, *_args: object) -> None:
+        if self._loading:
+            return
+        self._save_from_fields()
         self.changed.emit()
+
+    def _on_network_field_changed(self, *_args: object) -> None:
+        """One of the three Network fields changed — see `proxy_changed`'s
+        docstring for why this is not just `_on_field_changed`."""
+        if self._loading:
+            return
+        self._save_from_fields()
+        self._restart_banner.setVisible(True)
+        self.changed.emit()
+        self.proxy_changed.emit()
+
+    def _on_browse_ca_bundle(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "CA bundle", "", "Certificates (*.pem *.crt *.cer);;All files (*)"
+        )
+        if path:
+            # Triggers `_on_network_field_changed` through the field's own
+            # `textChanged` — nothing else to do here.
+            self._ca_bundle_edit.setText(path)
+
+    def _on_restart_agent_clicked(self) -> None:
+        self._restart_banner.setVisible(False)
+        self.restart_agent_requested.emit()
 
     def _on_agents_changed(self) -> None:
         # An install/update/remove writes settings.json directly (like

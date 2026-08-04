@@ -664,9 +664,8 @@ ordinary Qt slots outside any worker at all. Neither replaces the other.
 ```
 AgentPanel (ui/panel.py)                 root QWidget, returned by onCreateInterface()
 ├── HeaderBar (ui/chips.py)              agent chip · $HIP chip · conversations · "+" · gear
-├── body (plain QWidget)                 everything but the header, in its own column so the
-│                                         conversation drawer can push it aside instead of
-│                                         covering it
+├── body (plain QWidget)                 everything but the header. `_body_layout`'s margins
+│                                         are a constant 0 — the drawer never resizes this
 │   ├── NoticeStrip (ui/announcement.py)     quiet update/announcement banner
 │   ├── ConsentStrip (ui/announcement.py)    one-time question (today: telemetry), hidden until asked
 │   ├── QStackedWidget                       PAGE_TRANSCRIPT=0 · PAGE_SETTINGS=1 · PAGE_AUTH=2
@@ -675,7 +674,9 @@ AgentPanel (ui/panel.py)                 root QWidget, returned by onCreateInter
 │   │   └── AuthView (ui/auth_view.py)          the login screen, built from authMethods
 │   ├── BlockingNotice (ui/announcement.py)  popup ABOVE the input field
 │   └── Composer (ui/composer.py)            input, "+", microphone, mode chip, counter, send/stop
-└── ConversationDrawer (ui/conversations.py) overlay, slides in from the left under the header
+└── ConversationDrawer (ui/conversations.py) draws INSIDE the gutter TranscriptView already
+                                            leaves beside its reading column — see its own
+                                            class docstring
 ```
 
 `AgentsView` (`ui/agents.py`) lives inside `SettingsView`, not as its own
@@ -709,12 +710,15 @@ class ModeChip(QtWidgets.QWidget):      # lives inside Composer
 
 # ui/conversations.py
 class ConversationDrawer(QtWidgets.QFrame):
-    """Slides in from the left, under the header. It starts BELOW the header
-    (`set_top_inset`), because the only control that closes it again is the
-    header's own toggle — a drawer covering its own toggle couldn't be
-    closed. It reports its state through `open_state_changed` so the panel
-    can move the conversation column out from under it instead of letting it
-    cover what the artist is reading."""
+    """Slides in from the left, under the header, and lives in the margin
+    that's already empty there (`set_available_width`) rather than moving
+    the feed/composer to make room — see the class's own full docstring in
+    the source for why a push-based version of this was tried and rejected
+    twice. It starts BELOW the header (`set_top_inset`), because the only
+    control that closes it again is the header's own toggle — a drawer
+    covering its own toggle couldn't be closed. `open_state_changed` exists
+    so the panel keeps other floating chrome (the permission popover) on
+    top of it, not to move anything out of its way."""
     session_selected = Signal(str)
     session_renamed = Signal(str, str)
     session_removed = Signal(str)
@@ -722,6 +726,10 @@ class ConversationDrawer(QtWidgets.QFrame):
     open_state_changed = Signal(bool)   # True: starts opening. False: starts closing.
     def set_sessions(self, states: list[SessionState], current_id: str | None) -> None
     def set_top_inset(self, top: int) -> None
+    def set_available_width(self, gutter: int) -> None
+        """Shrinks to fit `gutter`, capped at its own ideal width, floored at
+        `_drawer_floor_width()` below which it overlaps a little rather than
+        the reading column ever narrowing for it."""
     def is_open(self) -> bool
     def toggle(self) -> None
     def open_drawer(self) -> None
@@ -730,13 +738,17 @@ class ConversationDrawer(QtWidgets.QFrame):
 
 # ui/transcript.py
 class TranscriptView(QtWidgets.QScrollArea):
-    # No signals — a permission request is answered through PermissionRow's
-    # own `answered`, wired directly to AgentPanel, not relayed through here.
+    # A permission request is answered through PermissionRow's own
+    # `answered`, wired directly to AgentPanel, not relayed through here.
+    gutter_changed = Signal(int)   # pushed whenever current_gutter() actually changes
     def set_model(self, model: TranscriptModel) -> None
     def reset_thinking_after_tool(self) -> None
     def refresh(self, entry_id: str | None = None) -> None
         """entry_id=None — redraw everything (session switch). Otherwise — only one
         entry: redrawing the whole feed on every streamed chunk is visibly janky."""
+    def current_gutter(self) -> int
+        """The empty margin left of the 706-736px reading column at the current
+        width. AgentPanel sizes the conversation drawer to fit inside it."""
 
 # ui/permissions.py
 class PermissionRow(QtWidgets.QWidget):

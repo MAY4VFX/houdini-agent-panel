@@ -6,13 +6,54 @@ from ..sessions import SessionState
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
-_DRAWER_WIDTH = 286
+#: The drawer's width when there's room for it — i.e. when it fits inside
+#: `TranscriptView.current_gutter()`, the margin that's already empty on
+#: either side of the 736px reading column. Below that it shrinks; see
+#: `set_available_width`.
+_DRAWER_IDEAL_WIDTH = 286
 
 #: What's left for the title once the drawer's own margins and the pin/more
-#: icon buttons take their share. `QPushButton` doesn't elide overflowing
-#: text on its own — without this a long first message pushed the pin and
-#: overflow buttons straight out of the (non-scrolling) drawer, off screen.
-_TITLE_MAX_WIDTH = 190
+#: icon buttons take their share, AT the ideal width. `QPushButton` doesn't
+#: elide overflowing text on its own — without accounting for this, a long
+#: first message pushed the pin and overflow buttons straight out of the
+#: (non-scrolling) drawer, off screen. The icons and margins don't shrink
+#: with the drawer — only the title does — so this same 96px
+#: (`_DRAWER_IDEAL_WIDTH` minus this) is subtracted at any width; see
+#: `_build_row`.
+_TITLE_MAX_WIDTH_IDEAL = 190
+_ROW_CHROME_WIDTH = _DRAWER_IDEAL_WIDTH - _TITLE_MAX_WIDTH_IDEAL
+
+#: A third of `summarize_title`'s own 60-character default limit — not a
+#: separately chosen number. Narrow enough to give real width back to the
+#: reading column; wide enough that a title still reads as a title
+#: ("Set up a full pyro…") instead of two words and an ellipsis.
+_FLOOR_TITLE_CHARS = 20
+
+#: The same kind of prompt `test_long_title_is_elided_not_left_to_overflow_
+#: the_drawer` already uses as this codebase's reference "realistically
+#: long" title — reused here rather than inventing a second one, so the
+#: floor this measures is grounded in an example that's actually plausible
+#: for this project's own artists, not a generic placeholder string.
+_FLOOR_TITLE_SAMPLE = (
+    "Set up a full pyro simulation with a custom velocity field and volume shader chain"
+)
+
+
+def _drawer_floor_width() -> int:
+    """The narrowest the drawer is allowed to shrink to before it stops.
+
+    Below this, `set_available_width` no longer tracks the available
+    gutter — the drawer holds this width and the panel accepts a small
+    overlap with the reading column instead (see its own docstring for
+    why that's the better tradeoff of the two the owner was offered).
+    Measured, not guessed: `_ROW_CHROME_WIDTH` plus the actual rendered
+    width of a title truncated to `_FLOOR_TITLE_CHARS`, against the live
+    application font.
+    """
+    metrics = QtGui.QFontMetrics(QtWidgets.QApplication.font())
+    sample = summarize_title(_FLOOR_TITLE_SAMPLE, limit=_FLOOR_TITLE_CHARS)
+    return _ROW_CHROME_WIDTH + metrics.horizontalAdvance(sample)
+
 
 #: Diameter of the busy/unread markers on a conversation row.
 _DOT_SIZE = 8
@@ -153,15 +194,26 @@ def _row_menu_stylesheet() -> str:
 
 
 class ConversationDrawer(QtWidgets.QFrame):
-    """Slides in from the left, under the header.
+    """Slides in from the left, under the header, and lives in the margin
+    that's already empty there rather than moving anything.
 
-    Two geometry rules, both learned from the panel looking broken with the
-    drawer open. It starts BELOW the header (`set_top_inset`), because the
-    only control that closes it again is the header's own sidebar toggle —
-    a drawer covering its own toggle is a drawer you cannot close. And it
-    reports its state through `open_state_changed` so the panel can move the
-    conversation column out from under it instead of letting it cover the
-    text the artist is reading.
+    Wide panels already leave a quiet gutter on either side of the 736px
+    reading column (`TranscriptView`'s own doing) — the drawer draws inside
+    THAT margin (`set_available_width`), so opening it moves nothing: the
+    feed and composer were never using those pixels to begin with. A push-
+    based version of this (reserving the drawer's width as the body's own
+    left margin) shipped first and was rejected twice over — first for the
+    jump it caused opening instantly, then again after fixing the jump,
+    because the owner didn't want the content moving AT ALL, smoothly or
+    not. This is what stayed.
+
+    Two more geometry rules, both learned from the panel looking broken
+    with the drawer open. It starts BELOW the header (`set_top_inset`),
+    because the only control that closes it again is the header's own
+    sidebar toggle — a drawer covering its own toggle is a drawer you
+    cannot close. And it reports its state through `open_state_changed` so
+    the panel can keep other floating chrome (the permission popover) on
+    top of it, not so the panel can move anything out of its way.
     """
 
     session_selected = Signal(str)
@@ -169,15 +221,13 @@ class ConversationDrawer(QtWidgets.QFrame):
     session_removed = Signal(str)
     new_session_clicked = Signal()
     #: True when the drawer starts opening, False when it starts closing.
-    #: Fires on the way in/out, not on arrival — the panel reserves space for
-    #: it before the slide, so the content never has to be redrawn mid-animation.
     open_state_changed = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("conversationDrawer")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.setFixedWidth(_DRAWER_WIDTH)
+        self.setFixedWidth(_DRAWER_IDEAL_WIDTH)
         self._top = 0
         #: The one row menu, built on first use and reused forever after —
         #: see `_open_row_menu` for why it is never rebuilt.
@@ -342,7 +392,12 @@ class ConversationDrawer(QtWidgets.QFrame):
         button.setProperty("currentConversation", state.session_id == self._current_id)
         button.setToolTip(state.title or "New chat")
         metrics = QtGui.QFontMetrics(button.font())
-        button.setText(metrics.elidedText(title, QtCore.Qt.ElideRight, _TITLE_MAX_WIDTH))
+        # The icons and margins around it don't shrink with the drawer —
+        # only the title does (`set_available_width`) — so what's left for
+        # it is the CURRENT width minus that fixed chrome, not the width at
+        # the ideal size.
+        title_max_width = max(20, self.width() - _ROW_CHROME_WIDTH)
+        button.setText(metrics.elidedText(title, QtCore.Qt.ElideRight, title_max_width))
         button.clicked.connect(
             lambda _checked=False, sid=state.session_id: self._select_session(sid)
         )
@@ -398,6 +453,28 @@ class ConversationDrawer(QtWidgets.QFrame):
             return
         self._top = top
         self.sync_parent_geometry()
+
+    def set_available_width(self, gutter: int) -> None:
+        """How much room the panel has for this drawer without covering the
+        reading column — `TranscriptView.current_gutter()`.
+
+        Shrinks to fit inside `gutter`; never grows past `_DRAWER_IDEAL_
+        WIDTH` even if there's more room than that (a wider conversation
+        list past the point every title already fits buys nothing). Below
+        `_drawer_floor_width()` it stops shrinking — see that function —
+        which means the caller ends up overlapping the reading column by a
+        few pixels in that one tail case, in exchange for the reading
+        column never getting permanently narrower for it. Rebuilds the
+        rows when the width actually changes, so their titles re-elide to
+        the new available space (`_build_row`) — a few dozen rows at most,
+        not the feed, so this is cheap regardless of conversation count.
+        """
+        target = min(_DRAWER_IDEAL_WIDTH, max(_drawer_floor_width(), int(gutter)))
+        if target == self.width():
+            return
+        self.setFixedWidth(target)
+        if self._states:
+            self.set_sessions(list(self._states.values()), self._current_id)
 
     def is_open(self) -> bool:
         return not self.isHidden() and not self._closing

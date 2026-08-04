@@ -19,6 +19,10 @@ def test_reload_reflects_defaults(qapp):
     assert view._show_announcements_checkbox.isChecked() is True
     assert view._telemetry_checkbox.isChecked() is False
     assert view._whisper_edit.text() == ""
+    assert view._proxy_edit.text() == ""
+    assert view._no_proxy_edit.text() == ""
+    assert view._ca_bundle_edit.text() == ""
+    assert view._restart_banner.isVisible() is False
     assert view._data_dir_label.text() == str(paths.data_dir())
 
 
@@ -37,6 +41,130 @@ def test_whisper_endpoint_persists(qapp):
     view = SettingsView()
     view._whisper_edit.setText("http://127.0.0.1:9000")
     assert settings_module.load().whisper_endpoint == "http://127.0.0.1:9000"
+
+
+# --- Network section (issue #26) ------------------------------------------
+
+
+def test_network_section_starts_collapsed(qapp):
+    """Same rank as Privacy/Data — a studio with no proxy never needs it
+    open by default."""
+    view = SettingsView()
+    assert view._network_section._toggle.isChecked() is False
+
+
+def test_network_fields_persist(qapp):
+    view = SettingsView()
+    view._proxy_edit.setText("http://proxy.studio.local:8080")
+    view._no_proxy_edit.setText("render01.internal")
+    view._ca_bundle_edit.setText("/etc/ssl/studio-ca.pem")
+
+    saved = settings_module.load()
+    assert saved.proxy_url == "http://proxy.studio.local:8080"
+    assert saved.no_proxy == "render01.internal"
+    assert saved.ca_bundle == "/etc/ssl/studio-ca.pem"
+
+
+def test_network_field_change_emits_both_changed_and_proxy_changed(qapp):
+    view = SettingsView()
+    changed = []
+    proxy_changed = []
+    view.changed.connect(lambda: changed.append(True))
+    view.proxy_changed.connect(lambda: proxy_changed.append(True))
+
+    view._proxy_edit.setText("http://proxy.studio.local:8080")
+
+    assert changed == [True]
+    assert proxy_changed == [True]
+
+
+def test_ordinary_checkbox_change_does_not_emit_proxy_changed(qapp):
+    """`proxy_changed` is scoped to the three Network fields — "not on
+    every checkbox" (issue #26)."""
+    view = SettingsView()
+    proxy_changed = []
+    view.proxy_changed.connect(lambda: proxy_changed.append(True))
+
+    view._telemetry_checkbox.setChecked(True)
+    view._whisper_edit.setText("http://127.0.0.1:9000")
+
+    assert proxy_changed == []
+
+
+def _expand_network_section(view: SettingsView) -> None:
+    """Network is collapsed by default (`test_network_section_starts_
+    collapsed`) — `isVisible()` only reflects reality once both the window
+    is realised AND the section's own body is expanded (same requirement
+    `test_settings_grid_alignment.py::_build` has for every section)."""
+    view.show()
+    view._network_section._toggle.setChecked(True)
+    view._network_section._on_toggled(True)
+
+
+def test_editing_a_network_field_shows_the_restart_banner(qapp):
+    view = SettingsView()
+    _expand_network_section(view)
+    qapp.processEvents()
+    assert view._restart_banner.isVisible() is False
+
+    view._no_proxy_edit.setText("render01.internal")
+
+    assert view._restart_banner.isVisible() is True
+
+
+def test_restart_button_hides_banner_and_requests_a_restart(qapp):
+    view = SettingsView()
+    _expand_network_section(view)
+    qapp.processEvents()
+    view._proxy_edit.setText("http://proxy.studio.local:8080")
+    assert view._restart_banner.isVisible() is True
+
+    requested = []
+    view.restart_agent_requested.connect(lambda: requested.append(True))
+    view._restart_button.click()
+
+    assert requested == [True]
+    assert view._restart_banner.isVisible() is False
+
+
+def test_reload_hides_the_restart_banner(qapp):
+    """A reload is a fresh read from disk, not an edit THIS screen made —
+    the restart invitation belongs only to the latter."""
+    view = SettingsView()
+    _expand_network_section(view)
+    qapp.processEvents()
+    view._proxy_edit.setText("http://proxy.studio.local:8080")
+    assert view._restart_banner.isVisible() is True
+
+    view.reload()
+
+    assert view._restart_banner.isVisible() is False
+
+
+def test_browse_ca_bundle_fills_the_field(qapp, monkeypatch):
+    from houdini_agent_panel.ui.qt import QtWidgets
+
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileName", lambda *a, **k: ("/etc/ssl/studio-ca.pem", "")
+    )
+    view = SettingsView()
+
+    view._browse_ca_bundle_button.click()
+
+    assert view._ca_bundle_edit.text() == "/etc/ssl/studio-ca.pem"
+    assert settings_module.load().ca_bundle == "/etc/ssl/studio-ca.pem"
+
+
+def test_browse_ca_bundle_cancelled_changes_nothing(qapp, monkeypatch):
+    from houdini_agent_panel.ui.qt import QtWidgets
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+    view = SettingsView()
+
+    view._browse_ca_bundle_button.click()
+
+    assert view._ca_bundle_edit.text() == ""
+    assert view._restart_banner.isVisible() is False
 
 
 def test_default_agent_combo_lists_installed_and_custom(qapp):
