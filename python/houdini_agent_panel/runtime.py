@@ -321,18 +321,24 @@ def _binary_launch_spec(version_dir: Path, dist: BinaryDistribution) -> LaunchSp
 
 
 def install_agent(
-    entry: AgentEntry, *, progress: Progress | None = None, fetch: Fetcher | None = None
+    entry: AgentEntry,
+    *,
+    progress: Progress | None = None,
+    fetch: Fetcher | None = None,
+    settings=None,
 ) -> LaunchSpec:
     """Install an agent and return a ready-to-use launch command.
 
     Idempotent: if the version in `entry` is already installed, there's no
     network, no disk, just `launch_spec` right away. An npx agent only
     needs `ensure_node()` and a manifest — the package itself is downloaded
-    by `npx` on first launch. A binary one downloads the archive, verifies
-    its sha256, extracts it into `<data>/agents/<id>/<version>`, and sets +x.
+    by `npx` on first launch, so the freshly-built spec below must carry the
+    proxy too, or the very install this function exists for runs uncovered.
+    A binary one downloads the archive, verifies its sha256, extracts it
+    into `<data>/agents/<id>/<version>`, and sets +x.
     """
     if is_installed(entry):
-        return launch_spec(entry)
+        return launch_spec(entry, settings=settings)
 
     key = platform_key()
     dist = entry.distribution_for(key)
@@ -349,7 +355,8 @@ def install_agent(
 
         node_bin = node_module.ensure_node(progress=progress, fetch=fetch)
         _write_manifest(entry, kind="npx")
-        return _npx_launch_spec(node_bin, dist)
+        spec = _npx_launch_spec(node_bin, dist)
+        return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
 
     if not dist.sha256:
         # Some registry entries have no sha256 (§ registry.py,
@@ -379,7 +386,8 @@ def install_agent(
     cmd_path = _resolve_cmd(version_dir, dist.cmd)
     _make_executable(cmd_path)
     _write_manifest(entry, kind="binary")
-    return _binary_launch_spec(version_dir, dist)
+    spec = _binary_launch_spec(version_dir, dist)
+    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
 
 
 def uninstall_agent(agent_id: str) -> None:
@@ -397,7 +405,23 @@ def uninstall_agent(agent_id: str) -> None:
     _manifest_cache.pop(agent_id, None)
 
 
-def launch_spec(entry: AgentEntry) -> LaunchSpec:
+def _with_proxy(env: dict[str, str], settings_obj) -> dict[str, str]:
+    """Studio proxy underneath, the agent's own env on top.
+
+    Order matters: a per-agent `HTTPS_PROXY` is a deliberate choice about
+    that agent, and the panel-wide setting is only a default for agents
+    that said nothing.
+    """
+    from . import proxy as proxy_module
+    from . import settings as settings_module
+
+    resolved = settings_module.load() if settings_obj is None else settings_obj
+    merged = proxy_module.child_env(resolved)
+    merged.update(env)
+    return merged
+
+
+def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
     """The launch command for an already-installed agent.
 
     For npx, `ensure_node()` here is cheap: the agent was installed via
@@ -419,14 +443,20 @@ def launch_spec(entry: AgentEntry) -> LaunchSpec:
         from . import node as node_module
 
         node_bin = node_module.ensure_node()
-        return _npx_launch_spec(node_bin, dist)
+        spec = _npx_launch_spec(node_bin, dist)
+    else:
+        if not is_installed(entry):
+            raise InstallError(f"{entry.name} {entry.version}: not installed")
+        version_dir = paths.agent_dir(entry.id) / entry.version
+        spec = _binary_launch_spec(version_dir, dist)
 
-    if not is_installed(entry):
-        raise InstallError(f"{entry.name} {entry.version}: not installed")
-    version_dir = paths.agent_dir(entry.id) / entry.version
-    return _binary_launch_spec(version_dir, dist)
+    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
 
 
-def custom_launch_spec(agent: CustomAgent) -> LaunchSpec:
+def custom_launch_spec(agent: CustomAgent, *, settings=None) -> LaunchSpec:
     """"Custom Agent" — the command as-is, with no install step or versions."""
-    return LaunchSpec(command=agent.command, args=list(agent.args), env=dict(agent.env))
+    return LaunchSpec(
+        command=agent.command,
+        args=list(agent.args),
+        env=_with_proxy(dict(agent.env), settings),
+    )

@@ -58,6 +58,13 @@ class Settings:
     telemetry_consent_asked: bool = False
     whisper_endpoint: str = ""
     buddy: str = "crag"
+    #: Studio proxy, e.g. "http://proxy.studio.local:8080". Empty means
+    #: "whatever the machine already exports" — see `proxy.effective_proxy`.
+    proxy_url: str = ""
+    #: Extra bypass entries. `localhost`/`127.0.0.1`/`::1` are always added.
+    no_proxy: str = ""
+    #: PEM bundle for a TLS-inspecting proxy.
+    ca_bundle: str = ""
     custom_agents: list[CustomAgent] = field(default_factory=list)
     installed_agents: dict[str, InstalledAgent] = field(default_factory=dict)
     seen_announcements: list[str] = field(default_factory=list)
@@ -197,6 +204,13 @@ def diagnostics(settings: Settings) -> str:
     for agent_id, installed in sorted(settings.installed_agents.items()):
         lines.append(f"agent {agent_id} {installed.version} ({installed.kind})")
     lines.append(f"updates: {settings.check_updates}, announcements: {settings.show_announcements}")
+
+    from . import proxy as proxy_module
+
+    address = proxy_module.effective_proxy(settings)
+    lines.append(f"proxy: {proxy_module.sanitize(address) if address else '—'}")
+    lines.append(f"ca bundle: {proxy_module.effective_ca_bundle(settings) or '—'}")
+
     lines.append(f"telemetry: {settings.telemetry}")
     return "\n".join(lines)
 

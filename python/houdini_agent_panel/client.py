@@ -143,6 +143,18 @@ class AgentInfo:
     supports_image: bool
     supports_audio: bool
     supports_embedded_context: bool
+    #: Whether the connected agent implements ACP's `session/load` — i.e.
+    #: whether it can resume the SAME live session again, not just accept a
+    #: fresh one. Measured honestly from `caps.load_session` and covered by
+    #: a test (`test_client.py`), but nothing reads it today: every restored
+    #: conversation is a local, read-only replay of the saved transcript
+    #: (`ui/panel.py::AgentPanel._restore_conversations` — "these
+    #: transcripts have no live session behind them"), never an actual
+    #: `session/load` call. This is where that would plug in if the panel
+    #: ever offers resuming a past conversation as a real live session again
+    #: — closer to reattaching a terminal session than replaying a log —
+    #: which is the "can I get my old session back, not just its text"
+    #: question the owner has actually asked about.
     supports_load_session: bool
     supports_logout: bool
     auth_methods: tuple[AuthMethod, ...]
@@ -507,6 +519,15 @@ class AcpWorker(QtCore.QThread):
             # project all live in that profile and nowhere else. See
             # `shellenv.py` for what this costs and why it is cached.
             env = shellenv.merged(dict(acp.default_environment()), spec.env)
+
+            from . import proxy as _proxy_module
+
+            _proxy_address = env.get("HTTPS_PROXY", "")
+            _log.info(
+                "agent proxy: %s",
+                _proxy_module.sanitize(_proxy_address) if _proxy_address else "none",
+            )
+
             process = subprocess.Popen(
                 [spec.command, *spec.args],
                 stdin=subprocess.PIPE,

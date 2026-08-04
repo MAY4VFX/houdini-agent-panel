@@ -13,7 +13,7 @@ import pytest
 
 from houdini_agent_panel import paths, runtime
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution, NpxDistribution
-from houdini_agent_panel.settings import CustomAgent
+from houdini_agent_panel.settings import CustomAgent, Settings
 
 
 def _add_tar_file(tf: tarfile.TarFile, arcname: str, content: bytes, mode: int = 0o644) -> None:
@@ -360,3 +360,64 @@ def test_custom_launch_spec_passes_through():
     assert spec.command == "/usr/bin/my-agent"
     assert spec.args == ["--flag"]
     assert spec.env == {"X": "1"}
+
+
+# --- studio proxy: launch_spec / custom_launch_spec / install_agent ----------
+
+
+def test_custom_agent_launch_carries_the_proxy(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
+    agent = CustomAgent(id="mine", name="Mine", command="/bin/echo")
+    spec = runtime.custom_launch_spec(agent, settings=Settings(proxy_url="http://studio:8080"))
+    assert spec.env["HTTPS_PROXY"] == "http://studio:8080"
+    assert "localhost" in spec.env["NO_PROXY"]
+
+
+def test_agent_env_wins_over_the_studio_proxy(monkeypatch):
+    # An artist who set HTTPS_PROXY on one custom agent meant it for that
+    # agent. The global setting is a default, not an override.
+    monkeypatch.setattr(os, "environ", {})
+    agent = CustomAgent(
+        id="mine", name="Mine", command="/bin/echo", env={"HTTPS_PROXY": "http://mine:9000"}
+    )
+    spec = runtime.custom_launch_spec(agent, settings=Settings(proxy_url="http://studio:8080"))
+    assert spec.env["HTTPS_PROXY"] == "http://mine:9000"
+
+
+def test_no_proxy_configured_adds_no_variables(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
+    agent = CustomAgent(id="mine", name="Mine", command="/bin/echo")
+    spec = runtime.custom_launch_spec(agent, settings=Settings())
+    assert spec.env == {}
+
+
+def test_launch_spec_binary_carries_the_proxy(monkeypatch, tmp_path, fetcher):
+    monkeypatch.setattr(os, "environ", {})
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    entry, archive_bytes = _binary_entry(tmp_path, sha256=None)
+    fetcher.add_bytes(entry.binaries["fake-platform"].archive, archive_bytes)
+    runtime.install_agent(entry, fetch=fetcher)
+
+    spec = runtime.launch_spec(entry, settings=Settings(proxy_url="http://studio:8080"))
+
+    assert spec.env["HTTPS_PROXY"] == "http://studio:8080"
+    assert "localhost" in spec.env["NO_PROXY"]
+
+
+def test_install_agent_npx_fresh_install_carries_the_proxy(monkeypatch):
+    # This is the actual bug: the very first launch of a freshly-installed
+    # npx agent is the one that runs `npx`'s own registry fetch, and it goes
+    # through `install_agent`, not `launch_spec` — a fix that only touched
+    # `launch_spec` would leave this path uncovered.
+    monkeypatch.setattr(os, "environ", {})
+    entry = _npx_entry()
+    monkeypatch.setattr("houdini_agent_panel.node.ensure_node", lambda **k: Path("/fake/node"))
+    monkeypatch.setattr(
+        "houdini_agent_panel.node.npx_argv",
+        lambda node_bin, package, args: [str(node_bin), "/fake/npx-cli.js", "--yes", package, *args],
+    )
+
+    spec = runtime.install_agent(entry, settings=Settings(proxy_url="http://studio:8080"))
+
+    assert spec.env["HTTPS_PROXY"] == "http://studio:8080"
+    assert spec.env["FOO"] == "bar"  # the distribution's own env survives alongside it
