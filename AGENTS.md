@@ -1,18 +1,13 @@
 <!-- hub-kit identity block (added by /project-register; do not remove) -->
-# houdini-agent-panel — a may-hub system project
+# houdini-agent-panel
 
-You are the agent for the role named in `.dept.md` (a symlink to the role layer in HQ).
-HQ: MAY4VFX/may-hub (~/Github/may-hub).
+Guidance for AI agents working in this repository. Everything below applies to
+anyone contributing, human or otherwise.
 
-**Required before starting work** (if your runner hasn't already loaded this):
-1. Read `.dept.md` at this repo's root — the rules for your active role.
-2. `git -C ~/Github/may-hub pull`, then HQ's HQ.md and your role's open issues for
-   this project.
-
-At the end of the session: `/sync` (no skills — manually: work-record comments on
-affected issues, board statuses, push).
-
-@./.dept.md
+The maintainer's own workflow adds a private role file (`.dept.md`, a symlink
+into a separate HQ repository) — it is deliberately not tracked here, since it
+would be a dangling link in every clone. Nothing in this repository depends on
+it.
 
 <!-- Everything below is local project rules. They OVERRIDE role rules. Sections below
      this marker are NEVER touched by project-register --update. -->

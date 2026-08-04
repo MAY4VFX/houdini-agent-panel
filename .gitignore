@@ -11,3 +11,8 @@ wheels/
 logs/
 .claude/
 .codex/
+
+# The role file is a symlink into the private HQ repo (`../may-hub/...`).
+# Tracked, it becomes a dangling link for everyone who clones this — the
+# target does not exist outside the maintainer's machine.
+.dept.md
