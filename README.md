@@ -4,9 +4,19 @@
 
 ![The panel](docs/images/panel.png)
 
-Ask for what you want in the scene. The agent has 189 Houdini tools through
-[fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp) and works on the
-`.hip` you have open — no ports to pick, no config to write.
+Ask for what you want in the scene. The agent works on the `.hip` you have
+open — no ports to pick, no config to write.
+
+## 🔧 Built on fxhoudinimcp
+
+The scene tools are not ours. They come from
+**[healkeiser/fxhoudinimcp](https://github.com/healkeiser/fxhoudinimcp)** —
+189 MCP tools over Houdini's official `hwebserver`, and the reason an agent
+can read geometry, build networks and cook nodes at all.
+
+This project is the layer that makes them usable without a terminal: an ACP
+client, an installer, and a panel. Credit and any thanks for the tools
+themselves belong upstream. 🙏
 
 ---
 
@@ -64,9 +74,36 @@ instead. OpenCode has no login at all: it reads a provider and a key from
 
 ![Settings](docs/images/settings.png)
 
-Install and update agents, pick what starts with the panel, point it at a
-studio proxy and a corporate CA. Blank proxy fields inherit whatever the
-machine already exports; `localhost` is never proxied.
+Install and update agents, pick what starts with the panel, and point it at
+your studio's network — see below.
+
+## 🌐 Behind a studio proxy
+
+Common in VFX: the firewall drops direct egress and everything goes out
+through `proxy.studio.local:8080`, often with TLS inspection.
+
+Fill in **Settings → Network** and it covers all of it — the agent's own
+traffic, the `npx` fetch that installs an agent, and the panel's own
+downloads (registry, updates, portable Node). No Houdini restart: the panel
+offers to restart the agent right there.
+
+| Field | What it's for |
+| --- | --- |
+| **Proxy** | `http://proxy.studio.local:8080`. Blank = inherit whatever the machine exports. |
+| **No proxy** | Extra hosts to bypass. `localhost` is *always* excluded — the Houdini bridge must never take a detour. |
+| **CA bundle** | For inspecting proxies that present their own certificate. Verification is never disabled — there is no setting for that. |
+
+**HTTP/HTTPS only — SOCKS is not supported.** For SOCKS or NTLM/Kerberos,
+put a local bridge like [`px`](https://github.com/genotrance/px) or
+`cntlm` in front and point the panel at that.
+
+⚠️ A password typed into the proxy URL is stored in `settings.json` as plain
+text. Prefer a proxy with no login, or one restricted by IP. Diagnostics
+redact it; the file does not.
+
+Already exporting `HTTPS_PROXY` in your shell profile? Then there is nothing
+to do — the panel reads your login shell and hands the agent the same
+environment you get in a terminal.
 
 ## 🔒 Privacy
 
