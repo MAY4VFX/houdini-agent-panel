@@ -153,22 +153,36 @@ doesn't leave someone without a panel.
 ```python
 REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
-#: The six from design.md. The order is the order they're shown in the UI.
+#: Ids were checked against the live registry, not typed from memory — they
+#: don't match the human-facing agent names, and only "codex-acp",
+#: "grok-build" and "opencode" are guessable. The order is the order
+#: they're shown in the UI.
 FEATURED_AGENT_IDS: tuple[str, ...] = (
-    "claude-code-acp", "codex-acp", "gemini-cli", "grok-build", "kimi-cli", "opencode",
+    "claude-acp", "codex-acp", "grok-build", "opencode", "gemini", "kimi",
 )
 
 @dataclass(frozen=True)
 class NpxDistribution:
     package: str              # "@zed-industries/claude-code-acp@1.2.3"
-    args: list[str]
+    args: list[str] = field(default_factory=list)
+    #: Not in the original contract above, but the real registry carries it
+    #: (e.g. "auggie" has AUGMENT_DISABLE_AUTO_UPDATE=1) — without it
+    #: install_agent couldn't build a correct LaunchSpec.env for the agents
+    #: that need it. A deviation from the contract, kept because the field
+    #: exists in the code with a comment saying so.
+    env: dict[str, str] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class BinaryDistribution:
     archive: str
     cmd: str                  # "./opencode" — relative to the extracted archive's root
-    args: list[str]
-    sha256: str
+    args: list[str] = field(default_factory=list)
+    #: The contract used to say this is a required str. In the real
+    #: registry, some agents (crow-cli, corust-agent) don't have this field
+    #: at all — it's optional with an empty-string default, and an empty
+    #: value means "nothing to verify against": runtime.install_agent
+    #: refuses to install rather than installing an unverified binary.
+    sha256: str = ""
 
 @dataclass(frozen=True)
 class AgentEntry:
@@ -189,15 +203,25 @@ class AgentEntry:
     def distribution_for(self, key: str | None = None) -> NpxDistribution | BinaryDistribution | None
         """None — the agent can't be installed on this platform (e.g. Kimi on
         darwin-x86_64). The UI must show this as a reason, not silently hide it."""
+    def unavailable_reason(self, key: str | None = None) -> str
+        """Human-readable reason for the missing distribution under `key`.
+        Empty string means "available" — the caller shouldn't show anything.
+        Otherwise: "no installation method in the registry" (neither npx nor
+        binaries at all) or "isn't built for {key}" (this platform specifically)."""
 
 def platform_key() -> str
-    """darwin-aarch64 | darwin-x86_64 | linux-aarch64 | linux-x86_64 | windows-x86_64"""
+    """darwin-aarch64 | darwin-x86_64 | linux-aarch64 | linux-x86_64 | windows-x86_64
+
+    Exactly the five keys that appear as distribution.binary entries in the
+    live registry — there's also a windows-aarch64, but Houdini doesn't exist
+    on Windows ARM, so we never ask for that key."""
 
 def parse_registry(payload: Mapping) -> list[AgentEntry]
 def fetch_registry(*, force: bool = False, max_age: float = 86400.0,
                    fetch: Fetcher | None = None) -> list[AgentEntry]
-    """Cached at <cache>/registry.json. Network unavailable — returns the cache at
-    any age; no cache — RegistryError."""
+    """Cached at <cache>/registry.json, and in memory within this process too
+    (reset_memory_cache_for_tests() clears the latter). Network unavailable —
+    returns the cache at any age; no cache — RegistryError."""
 
 class RegistryError(RuntimeError): ...
 ```
@@ -639,16 +663,26 @@ ordinary Qt slots outside any worker at all. Neither replaces the other.
 
 ```
 AgentPanel (ui/panel.py)                 root QWidget, returned by onCreateInterface()
-├── HeaderBar (ui/chips.py)              agent chip · $HIP chip · session picker · "+" · gear
-├── NoticeStrip (ui/announcement.py)     quiet update/announcement banner
-├── QStackedWidget
-│   ├── TranscriptView (ui/transcript.py)   the feed
-│   ├── AgentsView (ui/agents.py)           the "Agents" screen
-│   ├── SettingsView (ui/settings_view.py)  the settings screen
-│   └── AuthView (ui/auth_view.py)          the login screen, built from authMethods
-└── Composer (ui/composer.py)            input, "+", microphone, mode chip, counter, send/stop
-    └── BlockingNotice (ui/announcement.py) popup ABOVE the input field
+├── HeaderBar (ui/chips.py)              agent chip · $HIP chip · conversations · "+" · gear
+├── body (plain QWidget)                 everything but the header, in its own column so the
+│                                         conversation drawer can push it aside instead of
+│                                         covering it
+│   ├── NoticeStrip (ui/announcement.py)     quiet update/announcement banner
+│   ├── ConsentStrip (ui/announcement.py)    one-time question (today: telemetry), hidden until asked
+│   ├── QStackedWidget                       PAGE_TRANSCRIPT=0 · PAGE_SETTINGS=1 · PAGE_AUTH=2
+│   │   ├── TranscriptView (ui/transcript.py)   the feed
+│   │   ├── SettingsView (ui/settings_view.py)  the settings screen — embeds AgentsView
+│   │   └── AuthView (ui/auth_view.py)          the login screen, built from authMethods
+│   ├── BlockingNotice (ui/announcement.py)  popup ABOVE the input field
+│   └── Composer (ui/composer.py)            input, "+", microphone, mode chip, counter, send/stop
+└── ConversationDrawer (ui/conversations.py) overlay, slides in from the left under the header
 ```
+
+`AgentsView` (`ui/agents.py`) lives inside `SettingsView`, not as its own
+stacked page — there is no `PAGE_AGENTS` any more (`panel.py`'s own
+`_show_page` comment says so; only three `PAGE_*` constants exist, and only
+three `insertWidget` calls build the stack). Switching agents moved to the
+header's own chip menu.
 
 ```python
 # ui/panel.py
@@ -658,13 +692,14 @@ class AgentPanel(QtWidgets.QWidget):
 
 # ui/chips.py
 class HeaderBar(QtWidgets.QWidget):
-    agent_clicked = Signal()
-    session_selected = Signal(str)
+    manage_agents_clicked = Signal()
+    agent_selected = Signal(str)
+    conversations_clicked = Signal()   # opens/closes ConversationDrawer
     new_session_clicked = Signal()
     settings_clicked = Signal()
     def set_agent(self, name: str, icon: QtGui.QIcon | None) -> None
+    def set_agent_menu(self, agents: list[tuple[str, str]], current_id: str | None) -> None
     def set_cwd(self, path: str) -> None
-    def set_sessions(self, states: list[SessionState], current: str | None) -> None
 
 class ModeChip(QtWidgets.QWidget):      # lives inside Composer
     mode_selected = Signal(str)
@@ -672,17 +707,40 @@ class ModeChip(QtWidgets.QWidget):      # lives inside Composer
         """An empty list hides the whole widget. The agent doesn't support it —
         there's no control."""
 
+# ui/conversations.py
+class ConversationDrawer(QtWidgets.QFrame):
+    """Slides in from the left, under the header. It starts BELOW the header
+    (`set_top_inset`), because the only control that closes it again is the
+    header's own toggle — a drawer covering its own toggle couldn't be
+    closed. It reports its state through `open_state_changed` so the panel
+    can move the conversation column out from under it instead of letting it
+    cover what the artist is reading."""
+    session_selected = Signal(str)
+    session_renamed = Signal(str, str)
+    session_removed = Signal(str)
+    new_session_clicked = Signal()
+    open_state_changed = Signal(bool)   # True: starts opening. False: starts closing.
+    def set_sessions(self, states: list[SessionState], current_id: str | None) -> None
+    def set_top_inset(self, top: int) -> None
+    def is_open(self) -> bool
+    def toggle(self) -> None
+    def open_drawer(self) -> None
+    def close_drawer(self) -> None
+    def sync_parent_geometry(self) -> None
+
 # ui/transcript.py
 class TranscriptView(QtWidgets.QScrollArea):
-    permission_answered = Signal(str, str)     # request_key, option_id ("" = cancelled)
+    # No signals — a permission request is answered through PermissionRow's
+    # own `answered`, wired directly to AgentPanel, not relayed through here.
     def set_model(self, model: TranscriptModel) -> None
+    def reset_thinking_after_tool(self) -> None
     def refresh(self, entry_id: str | None = None) -> None
         """entry_id=None — redraw everything (session switch). Otherwise — only one
         entry: redrawing the whole feed on every streamed chunk is visibly janky."""
 
 # ui/permissions.py
 class PermissionRow(QtWidgets.QWidget):
-    answered = Signal(str, str)
+    answered = Signal(str, str)   # request_key, option_id
     def __init__(self, view: PermissionView, parent=None) -> None
         """Buttons are built strictly from view.options. Order is whatever the
         agent sent. We never add our own buttons."""
@@ -692,33 +750,58 @@ class Composer(QtWidgets.QWidget):
     submitted = Signal(list)      # list[dict] — ready-made ACP content blocks
     cancelled = Signal()
     mode_selected = Signal(str)
+    config_option_selected = Signal(str, str)   # config_id, value
+    attachment_rejected = Signal(str)
+    buddy_selected = Signal(str)
     def set_capabilities(self, info: AgentInfo | None, whisper: str) -> None
+    def set_modes(self, modes: list[SessionMode], current_id: str | None) -> None
+    def set_config_options(self, options: list) -> None
+    def set_buddy(self, key: str) -> None
+    def trigger_buddy(self) -> None
+    def popover_anchor_rect(self, target: QtWidgets.QWidget) -> QtCore.QRect
+    def enable_preview_microphone(self) -> None
     def set_busy(self, busy: bool) -> None        # send button ↔ stop
     def set_commands(self, commands: list[AvailableCommand]) -> None
-    def set_modes(self, modes: list[SessionMode], current_id: str | None) -> None
-    def set_usage(self, usage) -> None
+    def set_usage(self, usage: Usage | None) -> None
     def block_input(self, reason: str) -> None    # a blocking announcement
     def unblock_input(self) -> None
     def is_input_blocked(self) -> bool
         """Public, because "an announcement blocks input but not the feed" is a
         requirement that needs to be checkable by a test, without reaching into a
         neighboring widget's private attributes."""
+    def add_attachment(self, path: Path) -> bool
 
 # ui/agents.py
 class AgentsView(QtWidgets.QWidget):
-    agent_chosen = Signal(str)
-    closed = Signal()
+    installed_changed = Signal()
+    install_succeeded = Signal(str)
+    install_failed = Signal(str, str)
+    sign_in_requested = Signal()
+    def set_agents(self, entries: list[AgentEntry], *, updates: list[Update] | None = None) -> None
+    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None
+    def refresh_from_registry(self, *, force: bool = False) -> None
+    def trigger_update(self, agent_id: str) -> bool
 
 # ui/settings_view.py
 class SettingsView(QtWidgets.QWidget):
     changed = Signal()
     closed = Signal()
+    install_succeeded = Signal(str)
+    install_failed = Signal(str, str)
+    sign_in_requested = Signal()
+    def set_agents(self, entries, *, updates=None) -> None
+    def focus_agents(self) -> None
+    def trigger_agent_update(self, agent_id: str) -> bool
+    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None
+    def reload(self) -> None
 
 # ui/auth_view.py
 class AuthView(QtWidgets.QWidget):
     method_chosen = Signal(str)
     logout_requested = Signal()
     def set_methods(self, methods: list[AuthMethod], *, can_logout: bool) -> None
+    def show_error(self, message: str, method_id: str = "") -> None
+    def clear_error(self) -> None
 
 # ui/announcement.py
 class NoticeStrip(QtWidgets.QWidget):
@@ -726,10 +809,20 @@ class NoticeStrip(QtWidgets.QWidget):
     dismissed = Signal(str)
     def show_notice(self, ann: Announcement) -> None
     def show_update(self, update: Update) -> None
+    def hide_notice(self) -> None
 
 class BlockingNotice(QtWidgets.QWidget):
     action_clicked = Signal(str, str)
     def show_notice(self, ann: Announcement) -> None
+    def hide_notice(self) -> None
+
+class ConsentStrip(QtWidgets.QWidget):
+    """A one-time question for the artist — today only the telemetry one. A
+    strip, not a modal: it waits, blocks nothing, and leaves once answered.
+    Both buttons carry equal visual weight on purpose — a question about
+    collecting data must not nudge towards yes."""
+    answered = Signal(bool)
+    def ask(self, question: str) -> None
 ```
 
 Styling — only through Houdini's Qt palette (widgets inherit it on their

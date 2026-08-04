@@ -1777,10 +1777,13 @@ class AgentPanel(QtWidgets.QWidget):
         # the drawer, which is what "conversations survive a restart" was
         # ever supposed to mean.
         del ids, active_id
+        # Nothing else reads this, and the drawer is refreshed from the pool
+        # like every other change. There used to be a
+        # `self._conversations.set_restored(...) if hasattr(...) else None`
+        # here — a guarded call to a method `ConversationDrawer` has never
+        # had, so it was a no-op from the day it was written, waiting to
+        # look like it did something.
         self._restored = stored
-        self._conversations.set_restored(stored) if hasattr(
-            self._conversations, "set_restored"
-        ) else None
 
     def _note(self, text: str) -> None:
         current = self._current_session()
