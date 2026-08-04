@@ -1477,9 +1477,14 @@ def test_panel_or_fx_update_gets_instructions_not_a_silent_attempt(qapp, monkeyp
     current_session = widget._current_session()
     session_id = current_session.session_id if current_session else "__idle__"
     feed_text = " ".join(e.text for e in widget._model(session_id).entries())
-    assert "pip install --upgrade houdini-agent-panel" in feed_text
-    # And the banner is untouched — there is nothing here to make it go away.
-    assert widget._notice.isHidden() is False
+    # `uvx --refresh`, not pip: that is how the README installs it, and
+    # without --refresh uvx would serve its cached copy of the old version.
+    assert "uvx --refresh --from houdini-agent-panel" in feed_text
+    # And the banner goes. It used to stay, on the reasoning that nothing had
+    # been done about the update — but pressing Update again can only repeat
+    # the same instruction, and it was reported as three identical messages
+    # stacked in the feed.
+    assert widget._notice.isHidden() is True
 
     widget.shutdown()
 
@@ -1617,4 +1622,51 @@ def test_an_empty_agent_list_says_why(qapp, monkeypatch):
     assert "Network" in notes[-1], (
         f"a studio firewall is the likeliest cause and must be named: {notes[-1]!r}"
     )
+    widget.shutdown()
+
+
+def test_a_first_install_refreshes_the_menu_and_says_what_to_do(qapp, monkeypatch):
+    """An npx agent installs in under a second — nothing downloads, npx
+    fetches on first launch — so a row flipping to "installed" is the only
+    sign anything happened. Worse, the chip menu is built from
+    `settings.installed_agents` and was never rebuilt, so the agent just
+    installed was missing from the one menu used to pick it."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    refreshed: list[int] = []
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_refresh_agent_chip_menu", lambda: refreshed.append(1))
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_agent_install_succeeded("codex-acp")
+
+    assert refreshed, "the agent menu still lists what was there before the install"
+    assert notes and "agent menu" in notes[-1], f"no next step was given: {notes}"
+    widget.shutdown()
+
+
+def test_the_panels_own_update_gives_a_command_that_works_and_stops_repeating(qapp, monkeypatch):
+    """Pressing Update on a panel update printed `pip install --upgrade` —
+    not how anyone installed this — and left the notice up, so pressing it
+    again repeated the line. Reported as three identical messages stacked."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    class _Update:
+        kind = "panel"
+        target = "houdini-agent-panel"
+        latest = "0.1.6"
+        current = "0.1.4"
+        label = "houdini-agent-panel 0.1.6"
+
+    widget = panel_mod.AgentPanel()
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    widget._active_update = _Update()
+
+    widget._start_update(_Update())
+
+    assert "uvx" in notes[-1], f"the command must be the one that installs it: {notes[-1]!r}"
+    assert "--refresh" in notes[-1], "without --refresh uvx serves its cached copy"
+    assert widget._active_update is None, "the notice stays up and repeats on the next press"
     widget.shutdown()

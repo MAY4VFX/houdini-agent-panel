@@ -1566,10 +1566,20 @@ class AgentPanel(QtWidgets.QWidget):
         in place would be the more dangerous silence, not the honest one.
         """
         if update.kind != "agent":
+            # Say the command that actually works, and say it once. The
+            # advice used to be `pip install --upgrade`, which is not how
+            # anyone installed this — the README's one-liner is uvx, and pip
+            # would miss the `--refresh` that stops uvx serving its cached
+            # copy. And the notice stayed up afterwards, so pressing Update
+            # again just repeated the same line; reported as three identical
+            # messages stacked in the feed.
             self._note(
-                f"Update {update.target} yourself: pip install --upgrade {update.target}, "
+                f"{update.target} can't replace itself while Houdini is running it. Run:\n"
+                f"    uvx --refresh --from {update.target} python -m houdini_agent_panel install\n"
                 "then restart Houdini."
             )
+            self._active_update = None
+            self._notice.hide_notice()
             return
         self._show_page(self.PAGE_SETTINGS)
         self._settings_view.focus_agents()
@@ -1632,6 +1642,21 @@ class AgentPanel(QtWidgets.QWidget):
             self._restart_after_update = None
             self._note(f"{self._display_label(agent_id)} updated — restarting it…")
             self._start_agent(agent_id)
+            return
+
+        # A first install used to end here, silently. The chip menu is built
+        # from `settings.installed_agents`, which the install has just
+        # changed — without this it goes on listing what was there before,
+        # so the agent an artist just installed is missing from the one menu
+        # they would use to pick it. Reported exactly that way.
+        label = self._display_label(agent_id)
+        self._refresh_agent_chip_menu()
+        if not shared_client(agent_id).is_running():
+            # And say what happens next. An npx agent installs in under a
+            # second — nothing downloads, npx fetches the package on first
+            # launch — so a row flipping to "installed" is the only sign
+            # anything happened at all, and it reads like nothing did.
+            self._note(f"{label} installed. Pick it in the agent menu to start.")
 
     def _on_agent_install_failed(self, agent_id: str, message: str) -> None:
         self._restart_after_update = None
