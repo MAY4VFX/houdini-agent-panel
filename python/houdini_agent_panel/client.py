@@ -79,7 +79,7 @@ from acp.schema import (
     TextContentBlock,
 )
 
-from . import __version__
+from . import __version__, shellenv
 from .logbook import logger as _logbook_logger
 from .sessions import SessionMode as _SessionMode
 from .sessions import SessionState
@@ -500,8 +500,13 @@ class AcpWorker(QtCore.QThread):
             # module docstring) — we spawn the process and hook its pipes
             # into the loop ourselves, the same public way it does
             # internally, minus the step that needs a child watcher.
-            env = dict(acp.default_environment())
-            env.update(spec.env)
+            # `acp.default_environment()` alone is six variables. Houdini is
+            # launched by the window server, not a shell, so it never saw the
+            # artist's profile — and the agent, launched from Houdini, sees
+            # even less. Their key, their studio's proxy and their cloud
+            # project all live in that profile and nowhere else. See
+            # `shellenv.py` for what this costs and why it is cached.
+            env = shellenv.merged(dict(acp.default_environment()), spec.env)
             process = subprocess.Popen(
                 [spec.command, *spec.args],
                 stdin=subprocess.PIPE,
