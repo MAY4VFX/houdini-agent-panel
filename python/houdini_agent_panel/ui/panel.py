@@ -604,6 +604,16 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.set_agent(self._pending_agent_label or info.name, None)
         self._settings_view.set_current_agent_auth(self._settings.default_agent, bool(info.auth_methods))
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
+        # What a CLI prints when it starts, and the thing that was missing
+        # from a five-second gap: "Preparing…", "Launching…", then silence
+        # while the agent spawns, initialises and opens a session. Measured,
+        # the panel's own share of that is under 10ms — the wait is the
+        # agent's process, its handshake and its MCP servers, and none of it
+        # is ours to shorten. Saying who answered, and from where, at least
+        # tells the artist the silence ended.
+        label = self._pending_agent_label or info.name
+        version = f" {info.version}" if info.version else ""
+        self._note(f"{label}{version} · {scene.hip_dir()}")
         self._show_page(self.PAGE_TRANSCRIPT)
         current = self._current_session()
         if current is None:
@@ -1588,9 +1598,15 @@ class AgentPanel(QtWidgets.QWidget):
             self._model(key).load_records(conversation.entries)
 
         ids = {c.id for c in stored}
-        wanted = _RESTORED_PREFIX + (active_id if active_id in ids else stored[0].id)
-        if self._pool.get(wanted) is not None:
-            self._set_current_session(wanted)
+        # Restored conversations go into the drawer and NOT onto the screen.
+        # Opening the last one looked helpful and was misleading: it was
+        # usually had with a different agent, and reopening it under today's
+        # agent shows a conversation the model has no memory of, presented
+        # as if it were continuous. An artist opening the panel gets a new
+        # chat with the agent they chose; the old ones are one click away in
+        # the drawer, which is what "conversations survive a restart" was
+        # ever supposed to mean.
+        del ids, active_id
         self._restored = stored
         self._conversations.set_restored(stored) if hasattr(
             self._conversations, "set_restored"

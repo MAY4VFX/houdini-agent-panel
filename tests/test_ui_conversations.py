@@ -108,22 +108,23 @@ def test_selecting_conversation_emits_id_and_closes_drawer(qapp):
     assert drawer._closing is True
 
 
-def test_new_conversation_action_emits_and_closes(qapp):
-    from PySide6 import QtWidgets
-
-    parent = QtWidgets.QWidget()
-    parent.resize(900, 700)
-    drawer = ConversationDrawer(parent)
-    seen = []
-    drawer.new_session_clicked.connect(lambda: seen.append(True))
+def test_new_chat_leaves_the_drawer_open(qapp):
+    """Picking an existing conversation closes the drawer — that one was
+    asked for and is about to be read. Asking for a NEW chat is the action
+    most likely to be repeated, and closing the list means reopening it to
+    do the same thing again. The new chat appears in the list the artist is
+    still looking at."""
+    drawer = ConversationDrawer()
     drawer.open_drawer()
-    drawer._animation.stop()
-    drawer.move(0, 0)
+    qapp.processEvents()
 
-    drawer._new_button.click()
+    seen: list[int] = []
+    drawer.new_session_clicked.connect(lambda: seen.append(1))
+    drawer._on_new_session()
+    qapp.processEvents()
 
-    assert seen == [True]
-    assert drawer._closing is True
+    assert seen == [1]
+    assert not drawer._closing, "the drawer started closing on a new chat"
 
 
 def test_drawer_is_child_overlay_not_native_window(qapp):

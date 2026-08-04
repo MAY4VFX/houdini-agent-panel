@@ -440,8 +440,12 @@ class ConversationDrawer(QtWidgets.QFrame):
         self.close_drawer()
 
     def _on_new_session(self) -> None:
+        # The drawer stays open. Picking an existing conversation closes it
+        # because the artist asked for that one and wants to read it; asking
+        # for a NEW chat is the one action most likely to be repeated, and
+        # closing the list means reopening it to do the same thing again.
+        # The new chat appears in the list they are still looking at.
         self.new_session_clicked.emit()
-        self.close_drawer()
 
     def _on_animation_finished(self) -> None:
         if self._closing:

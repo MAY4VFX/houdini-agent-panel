@@ -57,9 +57,14 @@ def test_restored_conversations_appear_with_their_transcripts(qapp):
     widget.shutdown()
 
 
-def test_the_conversation_that_was_open_comes_back_on_top(qapp):
-    """Recency alone can't answer this: saving bumps every live conversation,
-    so more than one can tie for most recent."""
+def test_nothing_restored_is_opened_on_screen(qapp):
+    """History belongs in the drawer, not on the screen.
+
+    Opening the last conversation at startup looked helpful and misled: it
+    was usually had with a different agent, so today's agent was shown a
+    transcript it has no memory of, presented as continuous. The panel opens
+    a new chat; the old ones are one click away.
+    """
     wanted = _stored("Was open", "text", updated=5.0)
     store.save([_stored("Other", "text", updated=5.0), wanted], active_id=wanted.id)
 
@@ -67,8 +72,11 @@ def test_the_conversation_that_was_open_comes_back_on_top(qapp):
     widget._restore_conversations()
     qapp.processEvents()
 
-    current = widget._current_session()
-    assert current is not None and current.title == "Was open"
+    assert widget._current_session() is None, (
+        "a conversation from a previous session was put on screen"
+    )
+    titles = sorted(s.title for s in widget._pool.all())
+    assert titles == ["Other", "Was open"], "the drawer must still list them"
     widget.shutdown()
 
 
@@ -97,6 +105,8 @@ def test_the_transcript_moves_onto_the_live_session(qapp, monkeypatch):
     widget = panel_mod.AgentPanel()
     widget._restore_conversations()
     qapp.processEvents()
+    # Opening one is a click now, not something the panel does at startup.
+    widget._set_current_session(panel_mod._RESTORED_PREFIX + conversation.id)
     monkeypatch.setattr(widget, "_start_new_session", lambda: None)
     widget._on_submitted([{"type": "text", "text": "and more"}])
 
@@ -116,13 +126,11 @@ def test_the_transcript_moves_onto_the_live_session(qapp, monkeypatch):
     widget.shutdown()
 
 
-def test_connecting_gives_the_restored_conversation_a_live_session(qapp, monkeypatch):
-    """A transcript off disk must not sit there without an agent under it.
-
-    Modes, slash commands and the model picker all arrive with `session/new`.
-    While the panel waited for the artist's first message before opening a
-    session, a restored conversation came back on screen with no controls
-    beneath it — no mode chip, no model — and nothing said why.
+def test_connecting_opens_a_fresh_chat_rather_than_reviving_history(qapp, monkeypatch):
+    """The reason the panel no longer adopts a restored conversation on
+    connect: there is nothing on screen to adopt. A new chat gets its modes,
+    its model picker and its slash commands from `session/new` the ordinary
+    way, and the artist is not shown a conversation their agent never had.
     """
     conversation = _stored("Rotor pyro", "make dust")
     store.save([conversation])
@@ -133,24 +141,16 @@ def test_connecting_gives_the_restored_conversation_a_live_session(qapp, monkeyp
 
     opened: list[bool] = []
     monkeypatch.setattr(widget, "_start_new_session", lambda: opened.append(True))
-
     widget._on_connected(
         client_mod.AgentInfo(
-            name="claude",
-            version="1.0",
-            protocol_version=1,
-            supports_image=False,
-            supports_audio=False,
-            supports_embedded_context=False,
-            supports_load_session=False,
-            supports_logout=False,
-            auth_methods=(),
+            name="claude", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False, auth_methods=(),
         )
     )
 
-    assert opened, "connecting must open a session for the restored conversation"
-    assert widget._adopting_restored == panel_mod._RESTORED_PREFIX + conversation.id
-    # Nothing was typed, so nothing may be queued to send.
+    assert opened, "connecting must open a session"
+    assert widget._adopting_restored is None, "nothing was on screen to adopt"
     assert not widget._pending_prompt
     widget.shutdown()
 
