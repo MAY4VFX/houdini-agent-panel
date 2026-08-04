@@ -296,3 +296,30 @@ def test_the_note_about_old_history_combines_scene_and_agent_into_one_line(qapp,
     assert len(matching) == 1, f"expected exactly one combined note, got: {notes}"
     assert "scene" in matching[0] and "agent" in matching[0]
     widget.shutdown()
+
+
+def test_a_conversation_is_never_saved_without_a_scene(qapp):
+    """Twenty-five of the owner's Claude conversations were saved with an
+    empty `cwd` and became invisible for good — a conversation with no scene
+    matches no scene.
+
+    The cause: the scene was only written when the session was still in the
+    pool, and switching agents clears the pool before persisting. Leaving the
+    pool is exactly when persisting matters most.
+    """
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._conversation_ids["gone-1"] = "conv-gone"
+    widget._model("gone-1").append_user("what happened to my chats")
+    # No SessionState for "gone-1": the pool has already been cleared, which
+    # is the state an agent switch leaves behind.
+    assert widget._pool.get("gone-1") is None
+
+    widget._persist_conversations()
+
+    saved = {c.id: c for c in store.load()}
+    assert saved["conv-gone"].cwd, "saved with no scene — invisible from now on"
+    assert saved["conv-gone"].cwd == panel_mod.scene.hip_dir()
+    widget.shutdown()

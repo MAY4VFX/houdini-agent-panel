@@ -352,6 +352,62 @@ class _ComposerSurface(QtWidgets.QFrame):
 _BAR_OPTION_HINTS = ("model", "effort")
 
 
+def _named_choices(choices: list, current_value: str = "") -> tuple[list, str]:
+    """Drop a choice that is an alias for one already in the list, and say
+    which value now stands for `current_value`.
+
+    Claude offers "Default (recommended)" alongside "Opus (1M context)", both
+    carrying the identical description — "Opus 5 with 1M context · Best for
+    everyday, complex tasks" — because they are the same model. Shown as
+    written, the picker lists one model twice under the same subtitle and asks
+    the artist to choose between a thing and itself. Claude Code's own picker
+    doesn't do this: four models, no defaults.
+
+    A choice is dropped when another shares its description word for word.
+    That test is the agent's own statement that the two are the same thing;
+    judging by name would be us guessing what "default" means.
+
+    The LAST of the matching set survives, because the agent lists the alias
+    before the model it points at — observed in the real data, where
+    `default` precedes `opus[1m]`. Keeping the first would leave exactly the
+    entry that names nothing.
+
+    Returns the surviving value for `current_value` too: if the artist is
+    currently on the alias we just removed, the chip has to select the
+    survivor, or it would show an empty label and the next click would look
+    like a change when it isn't.
+    """
+    by_description: dict[str, object] = {}
+    order: list = []
+    for choice in choices:
+        description = str(getattr(choice, "description", "") or "").strip()
+        if not description:
+            order.append(choice)
+            continue
+        if description in by_description:
+            order[order.index(by_description[description])] = choice
+        else:
+            order.append(choice)
+        by_description[description] = choice
+
+    resolved = current_value
+    if current_value and not any(
+        str(getattr(c, "value", "")) == current_value for c in order
+    ):
+        dropped_description = next(
+            (
+                str(getattr(c, "description", "") or "").strip()
+                for c in choices
+                if str(getattr(c, "value", "")) == current_value
+            ),
+            "",
+        )
+        survivor = by_description.get(dropped_description)
+        if survivor is not None:
+            resolved = str(getattr(survivor, "value", ""))
+    return order, resolved
+
+
 def _is_bar_option(option) -> bool:
     identifier = (getattr(option, "id", "") or "").lower()
     name = (getattr(option, "name", "") or "").lower()
@@ -693,7 +749,10 @@ class Composer(QtWidgets.QWidget):
             self._config_chips.append(chip)
 
         for chip, option in zip(self._config_chips, wanted):
-            choices = list(getattr(option, "choices", ()) or ())
+            current_value = str(getattr(option, "current_value", "") or "")
+            choices, current_value = _named_choices(
+                list(getattr(option, "choices", ()) or []), current_value
+            )
             option_description = getattr(option, "description", "") or getattr(option, "name", "") or ""
             chip.clear()
             chip.blockSignals(True)
@@ -713,7 +772,7 @@ class Composer(QtWidgets.QWidget):
                         str(getattr(choice, "value", "")),
                         tooltip,
                     )
-                index = chip.findData(str(getattr(option, "current_value", "") or ""))
+                index = chip.findData(current_value)
                 if index >= 0:
                     chip.setCurrentIndex(index)
             finally:

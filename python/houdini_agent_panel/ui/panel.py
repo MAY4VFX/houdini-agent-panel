@@ -1888,11 +1888,20 @@ class AgentPanel(QtWidgets.QWidget):
                 state = self._pool.get(session_id)
                 if state is not None:
                     conversation.title = state.title
-                    # The scene this conversation belongs to. Taken from the
-                    # session rather than from `$HIP` right now, so saving
-                    # after the artist opens a different scene doesn't drag
-                    # the previous scene's conversations along with it.
-                    conversation.cwd = state.cwd or scene.hip_dir()
+                # The scene this conversation belongs to. Preferably from the
+                # session, so saving after the artist opens a different scene
+                # doesn't drag the previous scene's conversations along — but
+                # NEVER left empty, which is what happened when the session
+                # was already gone from the pool. A conversation with no
+                # scene matches no scene: twenty-five of the reporter's
+                # Claude conversations were saved that way and became
+                # invisible for good, which read as "the panel lost them".
+                # Leaving the pool is exactly when persisting matters most.
+                conversation.cwd = (
+                    (state.cwd if state is not None else "")
+                    or conversation.cwd
+                    or scene.hip_dir()
+                )
                 # THIS tab's own agent at the moment of persisting, not
                 # `self._settings.default_agent`: `_on_agent_chosen` already
                 # updates that to the NEW agent before persisting the OLD

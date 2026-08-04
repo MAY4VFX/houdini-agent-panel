@@ -763,3 +763,62 @@ def test_hiding_the_composer_takes_the_slash_palette_with_it(qapp):
 
     assert not composer._popup.isVisible()
     assert composer._text_edit.popup_active is False
+
+
+def _choice(value: str, name: str, description: str = ""):
+    class _C:
+        pass
+
+    c = _C()
+    c.value, c.name, c.description = value, name, description
+    return c
+
+
+def test_a_model_listed_twice_under_one_description_appears_once(qapp):
+    """Claude offers "Default (recommended)" and "Opus (1M context)" with the
+    identical description, because they are the same model. Listed as sent,
+    the picker asks the artist to choose between a thing and itself — Claude
+    Code's own picker shows four models and no defaults."""
+    from houdini_agent_panel.ui.composer import _named_choices
+
+    opus = "Opus 5 with 1M context · Best for everyday, complex tasks"
+    choices = [
+        _choice("default", "Default (recommended)", opus),
+        _choice("opus[1m]", "Opus (1M context)", opus),
+        _choice("sonnet", "Sonnet", "Sonnet 5 · Efficient for routine tasks"),
+    ]
+
+    kept, current = _named_choices(choices, "default")
+
+    assert [c.name for c in kept] == ["Opus (1M context)", "Sonnet"], (
+        "the alias survived instead of the model it points at"
+    )
+    assert current == "opus[1m]", (
+        "the artist was on the alias; the chip must select what replaced it, "
+        "or it shows an empty label"
+    )
+
+
+def test_choices_without_descriptions_are_left_exactly_as_sent(qapp):
+    """The rule keys on descriptions matching — the agent's own word that two
+    entries are the same. With no descriptions there is nothing to compare and
+    nothing may be removed."""
+    from houdini_agent_panel.ui.composer import _named_choices
+
+    choices = [_choice("low", "Low"), _choice("high", "High"), _choice("max", "Max")]
+    kept, current = _named_choices(choices, "high")
+
+    assert [c.name for c in kept] == ["Low", "High", "Max"]
+    assert current == "high"
+
+
+def test_distinct_models_are_never_collapsed(qapp):
+    from houdini_agent_panel.ui.composer import _named_choices
+
+    choices = [
+        _choice("opus[1m]", "Opus (1M context)", "Opus 5 · complex tasks"),
+        _choice("fable", "Fable", "Fable 5 · hardest tasks"),
+        _choice("haiku", "Haiku", "Haiku 4.5 · quick answers"),
+    ]
+    kept, _ = _named_choices(choices, "fable")
+    assert len(kept) == 3
