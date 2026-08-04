@@ -140,8 +140,8 @@ def test_drawer_is_child_overlay_not_native_window(qapp):
 
 
 def test_summarize_title_empty_message_reads_as_new_conversation():
-    assert summarize_title("") == "New conversation"
-    assert summarize_title("   \n  ") == "New conversation"
+    assert summarize_title("") == "New chat"
+    assert summarize_title("   \n  ") == "New chat"
 
 
 def test_summarize_title_keeps_a_short_first_line_verbatim():
@@ -312,3 +312,22 @@ def test_drawer_reports_its_open_state(qapp):
     assert drawer.is_open() is False
 
     assert states == [True, False]
+
+
+def test_the_compose_icon_is_drawn_and_not_blank(qapp):
+    """The header's "+" and the drawer's button share one glyph. Drawn from
+    the palette rather than shipped as an image, so it survives a theme
+    change — and so it needs a test that it actually drew something."""
+    from houdini_agent_panel.ui.conversations import compose_icon
+
+    icon = compose_icon()
+    assert not icon.isNull()
+    pixmap = icon.pixmap(16, 16)
+    image = pixmap.toImage()
+    painted = sum(
+        1
+        for x in range(image.width())
+        for y in range(image.height())
+        if image.pixelColor(x, y).alpha() > 0
+    )
+    assert painted > 20, f"the glyph is effectively empty: {painted} pixels drawn"

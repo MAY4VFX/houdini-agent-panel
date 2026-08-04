@@ -769,7 +769,7 @@ class AcpWorker(QtCore.QThread):
 
         state = SessionState(
             session_id=response.session_id,
-            title="New conversation",
+            title="New chat",
             cwd=cwd,
             created_at=time.time(),
             current_mode_id=current_mode_id,

@@ -49,7 +49,7 @@ class StoredConversation:
     """One conversation as it survives on disk."""
 
     id: str
-    title: str = "New conversation"
+    title: str = "New chat"
     created_at: float = 0.0
     updated_at: float = 0.0
     pinned: bool = False
@@ -66,7 +66,7 @@ class StoredConversation:
 
     @staticmethod
     def new(
-        title: str = "New conversation", agent_id: str = "", cwd: str = ""
+        title: str = "New chat", agent_id: str = "", cwd: str = ""
     ) -> "StoredConversation":
         now = time.time()
         return StoredConversation(
@@ -100,7 +100,7 @@ class StoredConversation:
         entries = payload.get("entries")
         return cls(
             id=conversation_id,
-            title=str(payload.get("title") or "New conversation"),
+            title=str(payload.get("title") or "New chat"),
             created_at=float(payload.get("created_at") or 0.0),
             updated_at=float(payload.get("updated_at") or 0.0),
             pinned=bool(payload.get("pinned")),

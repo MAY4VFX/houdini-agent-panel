@@ -57,6 +57,56 @@ def sidebar_icon() -> QtGui.QIcon:
     return QtGui.QIcon(pixmap)
 
 
+def compose_icon(size: int = 16) -> QtGui.QIcon:
+    """The pencil-over-a-page glyph every chat application uses for "new
+    chat", drawn rather than shipped.
+
+    A bare "+" is the generic "add something" of every toolbar in Houdini,
+    and next to a conversation list it reads as "add a row", not "start
+    talking". This shape is the one an artist already knows from every other
+    assistant they use, which is the whole argument for it.
+
+    Drawn with the palette's own pen for the same reason as `sidebar_icon`:
+    an image file would need a light and a dark copy and would still be
+    wrong under a theme preset.
+    """
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    try:
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        scale = size / 16.0
+        pen = QtGui.QPen(theme.palette().color(QtGui.QPalette.Text), 1.3 * scale)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        # The page, open at its top-right corner so the pencil can sit there.
+        page = QtGui.QPainterPath()
+        page.moveTo(9.6 * scale, 2.4 * scale)
+        page.lineTo(3.2 * scale, 2.4 * scale)
+        page.quadTo(2.0 * scale, 2.4 * scale, 2.0 * scale, 3.6 * scale)
+        page.lineTo(2.0 * scale, 12.4 * scale)
+        page.quadTo(2.0 * scale, 13.6 * scale, 3.2 * scale, 13.6 * scale)
+        page.lineTo(12.0 * scale, 13.6 * scale)
+        page.quadTo(13.2 * scale, 13.6 * scale, 13.2 * scale, 12.4 * scale)
+        page.lineTo(13.2 * scale, 6.4 * scale)
+        painter.drawPath(page)
+        # The pencil, crossing that corner.
+        painter.drawLine(
+            QtCore.QPointF(8.4 * scale, 8.0 * scale), QtCore.QPointF(13.6 * scale, 2.8 * scale)
+        )
+        painter.drawLine(
+            QtCore.QPointF(11.9 * scale, 1.6 * scale), QtCore.QPointF(14.4 * scale, 4.1 * scale)
+        )
+        painter.drawLine(
+            QtCore.QPointF(8.4 * scale, 8.0 * scale), QtCore.QPointF(7.6 * scale, 8.8 * scale)
+        )
+    finally:
+        painter.end()
+    return QtGui.QIcon(pixmap)
+
+
 def summarize_title(text: str, limit: int = 60) -> str:
     """First line of a human message, cut at a word boundary within `limit`.
 
@@ -66,7 +116,7 @@ def summarize_title(text: str, limit: int = 60) -> str:
     """
     first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
     if not first_line:
-        return "New conversation"
+        return "New chat"
     if len(first_line) <= limit:
         return first_line
     truncated = first_line[:limit]
@@ -136,14 +186,16 @@ class ConversationDrawer(QtWidgets.QFrame):
         # the drawer is closed. A second copy of the same icon a couple of
         # centimeters away, only usable while the drawer happens to be open,
         # was a redundant control, not a second way in.
-        self._new_button = QtWidgets.QPushButton("＋  New conversation", self)
+        self._new_button = QtWidgets.QPushButton("  New chat", self)
         self._new_button.setObjectName("newConversation")
+        self._new_button.setIcon(compose_icon())
         self._new_button.clicked.connect(self._on_new_session)
         layout.addWidget(self._new_button)
 
-        heading = QtWidgets.QLabel("Conversations", self)
-        heading.setObjectName("drawerHeading")
-        layout.addWidget(heading)
+        # No "Conversations" heading. The button above says what this column
+        # is for and the rows below are self-evidently the conversations —
+        # a label between them names something nobody was in doubt about
+        # while taking a line of a narrow panel.
 
         scroll = QtWidgets.QScrollArea(self)
         scroll.setObjectName("drawerScroll")
@@ -195,7 +247,6 @@ class ConversationDrawer(QtWidgets.QFrame):
             " text-align: left; color: palette(text); background: transparent;"
             "}"
             "QPushButton#newConversation:hover { background: palette(alternate-base); }"
-            "QLabel#drawerHeading { color: palette(disabled, text); padding: 12px 8px 4px 8px; }"
             "QScrollArea#drawerScroll { background: transparent; border: none; }"
             "QScrollArea#drawerScroll > QWidget > QWidget { background: transparent; }"
             + theme.scrollbar_stylesheet("QScrollArea#drawerScroll ")
@@ -258,7 +309,7 @@ class ConversationDrawer(QtWidgets.QFrame):
             self._sessions_layout.insertWidget(self._sessions_layout.count() - 1, row)
 
     def _build_row(self, state: SessionState) -> QtWidgets.QWidget:
-        title = summarize_title(state.title) if state.title else "New conversation"
+        title = summarize_title(state.title) if state.title else "New chat"
         row = QtWidgets.QWidget(self._content)
         row_layout = QtWidgets.QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
@@ -279,7 +330,7 @@ class ConversationDrawer(QtWidgets.QFrame):
         button = QtWidgets.QPushButton(row)
         button.setProperty("conversation", True)
         button.setProperty("currentConversation", state.session_id == self._current_id)
-        button.setToolTip(state.title or "New conversation")
+        button.setToolTip(state.title or "New chat")
         metrics = QtGui.QFontMetrics(button.font())
         button.setText(metrics.elidedText(title, QtCore.Qt.ElideRight, _TITLE_MAX_WIDTH))
         button.clicked.connect(
@@ -457,7 +508,7 @@ class ConversationDrawer(QtWidgets.QFrame):
             self.session_renamed.emit(session_id, text.strip())
 
     def _confirm_delete(self, session_id: str, title: str) -> None:
-        label = summarize_title(title) if title else "New conversation"
+        label = summarize_title(title) if title else "New chat"
         reply = QtWidgets.QMessageBox.question(
             self,
             "Delete conversation",

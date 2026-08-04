@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from ..sessions import SessionMode
 from . import theme
-from .conversations import sidebar_icon
+from .conversations import compose_icon as _compose_icon, sidebar_icon
 from .qt import QtCore, QtGui, QtWidgets, Signal
 
 _RAIL_WIDTH = 736
@@ -318,7 +318,12 @@ class HeaderBar(QtWidgets.QWidget):
 
         self._new_conversation_button = QtWidgets.QToolButton(self._rail)
         self._new_conversation_button.setObjectName("contextIcon")
-        self._new_conversation_button.setText("+")
+        # The same compose glyph as the drawer's "New chat" button: one
+        # action, one shape, wherever it appears. A bare "+" next to a
+        # conversation list reads as "add a row" — it is the generic add of
+        # every toolbar in Houdini and says nothing about starting to talk.
+        self._new_conversation_button.setText("")
+        self._new_conversation_button.setIcon(_compose_icon())
         self._new_conversation_button.setToolTip("New conversation")
         self._new_conversation_button.clicked.connect(self.new_session_clicked)
         layout.addWidget(self._new_conversation_button)

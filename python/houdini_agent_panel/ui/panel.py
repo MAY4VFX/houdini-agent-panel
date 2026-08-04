@@ -1136,10 +1136,12 @@ class AgentPanel(QtWidgets.QWidget):
             entry = self._model(current.session_id).append_user(text)
             self._touch(current.session_id, entry.id)
             # `client.py.do_new_session` seeds every fresh session with the
-            # English "New conversation" — this used to compare against the
-            # old Russian default and never matched, so live conversations
-            # never got a real name until this fix.
-            if current.title in ("", "New conversation"):
+            # placeholder title, and this is where the first thing the artist
+            # says replaces it. The old placeholder is still listed because
+            # conversations written before the rename are on disk with that
+            # exact title — dropping it would leave them called "New
+            # conversation" forever, no matter what was said in them.
+            if current.title in ("", "New chat", "New conversation"):
                 current.title = summarize_title(text)
                 self._pool.mark_changed(current.session_id)
         current.busy = True

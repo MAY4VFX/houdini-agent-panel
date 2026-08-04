@@ -38,7 +38,7 @@ class Usage:
 @dataclass
 class SessionState:
     session_id: str
-    title: str  # the first line of the first prompt, otherwise "New conversation"
+    title: str  # the first line of the first prompt, otherwise "New chat"
     cwd: str
     created_at: float
     current_mode_id: str | None = None
