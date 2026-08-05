@@ -308,3 +308,33 @@ def test_doctor_reports_deps_ready_when_installed(fake_houdini, monkeypatch):
     install_mod.doctor(out=logged.append)
 
     assert any("ready" in line.lower() for line in logged)
+
+
+# --- updating over ourselves ------------------------------------------------
+
+
+def test_requirement_is_pinned_when_the_installer_came_from_elsewhere(tmp_path):
+    """`uvx --from houdini-agent-panel==0.2.0 …` must put 0.2.0 in Houdini."""
+    from houdini_agent_panel.install import _requirement_for
+
+    assert _requirement_for(tmp_path / "deps" / "py3.13", "0.2.0") == (
+        "houdini-agent-panel==0.2.0"
+    )
+
+
+def test_requirement_drops_the_pin_when_running_from_the_target_tree(monkeypatch, tmp_path):
+    """Houdini's package file puts the deps tree ahead of site-packages for
+    `hython` too, so `hython -m houdini_agent_panel install` — the documented
+    update command — imports the panel from the tree it is about to
+    overwrite. Pinning there asks pip for the version already installed, and
+    the update silently does nothing. Seen on the Linux machine: site-packages
+    at 0.2.3, deps tree stuck at 0.2.2 across repeated installs."""
+    from houdini_agent_panel import install as install_mod
+
+    target = tmp_path / "deps" / "py3.13"
+    (target / "houdini_agent_panel").mkdir(parents=True)
+    monkeypatch.setattr(
+        install_mod, "__file__", str(target / "houdini_agent_panel" / "install.py")
+    )
+
+    assert install_mod._requirement_for(target, "0.2.2") == "houdini-agent-panel"

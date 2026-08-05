@@ -45,6 +45,40 @@ def _panel_version() -> str:
     return __version__
 
 
+_PACKAGE = "houdini-agent-panel"
+
+
+def _requirement_for(target: Path, panel_version: str) -> str:
+    """What to hand pip for this deps tree.
+
+    Normally we pin: an installer run as `uvx --from
+    houdini-agent-panel==0.2.0 …` should put 0.2.0 inside Houdini, so the
+    CLI and the panel are the same build. That is right whenever the
+    installer came from somewhere else.
+
+    It is exactly wrong in the case that matters most. Houdini's package
+    file puts this deps tree on `sys.path` ahead of site-packages, and that
+    applies to `hython` too — so `hython -m houdini_agent_panel install`,
+    the documented way to update, imports the panel FROM the tree it is
+    about to overwrite. Pinning then asks pip for the version already there,
+    and the update is a no-op that reports success. Measured on the Linux
+    machine: site-packages had 0.2.3, the deps tree stayed on 0.2.2 through
+    repeated installs, each one cheerfully reinstalling 0.2.2.
+
+    So when the running module lives inside the target, we drop the pin and
+    let `--upgrade` fetch the newest release. Anywhere else, the pin stands.
+    """
+    try:
+        here = Path(__file__).resolve().parent.parent
+    except OSError:
+        return f"{_PACKAGE}=={panel_version}"
+    try:
+        same_tree = here == target.resolve()
+    except OSError:
+        same_tree = False
+    return _PACKAGE if same_tree else f"{_PACKAGE}=={panel_version}"
+
+
 def _resolve_package_dirs(explicit: str | None) -> tuple[list[Path], str]:
     """Same pattern as fxhoudinimcp's `resolve_houdini_dirs` (install.py:121-152):
     an explicit path wins unconditionally, otherwise fall back to auto-detection
@@ -121,11 +155,14 @@ def install(
         if skip_deps:
             out("  --skip-deps: not touching dependencies")
         else:
+            requirement = _requirement_for(target, panel_version)
+            if requirement == _PACKAGE:
+                out("  running from this tree — installing the latest release, not a copy of itself")
             try:
                 deps_mod.install_deps(
                     hython,
                     target=target,
-                    requirement=f"houdini-agent-panel=={panel_version}",
+                    requirement=requirement,
                     find_links=find_links,
                     offline=offline,
                     dry_run=dry_run,
