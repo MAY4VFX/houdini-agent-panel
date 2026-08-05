@@ -104,6 +104,7 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
             # `setParent(None)` right away, not just `deleteLater()`: otherwise
             # the old row still counts as a child until the next event loop
             # pass and shows up in `findChildren`/gets counted twice.
+            widget.hide()  # before orphaning: a parentless widget is a window
             widget.setParent(None)
             widget.deleteLater()
 

@@ -80,6 +80,7 @@ class NoticeStrip(QtWidgets.QWidget):
             # still counts as a child until the next event-loop pass, and
             # re-showing an announcement would briefly show the old and new
             # buttons at once).
+            self._buttons_row.hide()  # before orphaning: a parentless widget is a window
             self._buttons_row.setParent(None)
             self._buttons_row.deleteLater()
             self._buttons_row = None
@@ -154,6 +155,7 @@ class BlockingNotice(QtWidgets.QWidget):
             item = self._buttons_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()  # before orphaning: a parentless widget is a window
                 widget.setParent(None)
                 widget.deleteLater()
 

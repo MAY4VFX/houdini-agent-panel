@@ -741,6 +741,7 @@ class Composer(QtWidgets.QWidget):
             # which is rare — not on every update.
             chip = self._config_chips.pop()
             self._config_layout.removeWidget(chip)
+            chip.hide()  # before orphaning: a parentless widget is a window
             chip.setParent(None)
             chip.deleteLater()
         while len(self._config_chips) < len(wanted):
@@ -988,6 +989,7 @@ class Composer(QtWidgets.QWidget):
             if widget is not None:
                 # `setParent(None)` right away: otherwise the chip still
                 # counts as a child of the composer until the next event-loop pass.
+                widget.hide()  # before orphaning: a parentless widget is a window
                 widget.setParent(None)
                 widget.deleteLater()
         for index, block in enumerate(self._attachments):

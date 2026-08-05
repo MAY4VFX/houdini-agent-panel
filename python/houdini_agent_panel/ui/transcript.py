@@ -169,6 +169,7 @@ class TranscriptView(QtWidgets.QScrollArea):
                 continue
             seen_widgets.add(id(row))
             self._layout.removeWidget(row)
+            row.hide()  # before orphaning: a parentless widget is a window
             row.setParent(None)
             row.deleteLater()
         self._rows.clear()
@@ -212,6 +213,7 @@ class TranscriptView(QtWidgets.QScrollArea):
             row = self._rows.pop(entry_id, None)
             if row is not None:
                 self._layout.removeWidget(row)
+                row.hide()  # before orphaning: a parentless widget is a window
                 row.setParent(None)
                 row.deleteLater()
             return
@@ -222,6 +224,7 @@ class TranscriptView(QtWidgets.QScrollArea):
             row = self._rows.pop(entry_id, None)
             if row is not None:
                 self._layout.removeWidget(row)
+                row.hide()  # before orphaning: a parentless widget is a window
                 row.setParent(None)
                 row.deleteLater()
             return
@@ -438,6 +441,7 @@ class _MessageRow(QtWidgets.QWidget):
 
         for widget in self._segments:
             self._layout.removeWidget(widget)
+            widget.hide()  # before orphaning: a parentless widget is a window
             widget.setParent(None)
             widget.deleteLater()
         self._segments = []
@@ -821,6 +825,7 @@ class _PlanRow(QtWidgets.QWidget):
         while len(self._step_labels) > len(steps):
             label = self._step_labels.pop()
             self._layout.removeWidget(label)
+            label.hide()  # before orphaning: a parentless widget is a window
             label.setParent(None)
             label.deleteLater()
 

@@ -26,6 +26,7 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            widget.hide()  # before orphaning: a parentless widget is a window
             widget.setParent(None)
             widget.deleteLater()
 
