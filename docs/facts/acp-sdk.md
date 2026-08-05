@@ -1327,3 +1327,114 @@ alternative — it's a wholly separate code path in the same package.
 - Whether a real `DISPLAY` would make it open an actual browser window —
   same caveat as gemini/grok in §13, inferred from the env passed and the
   tool's own "Browser didn't open?" message, not observed on a screen.
+
+### Does `setup-token` (and the `npx` fetch that launches it) honour `HTTPS_PROXY`?
+
+The panel has a `proxy_url` setting and threads it into every agent
+process; the concern was that spawning `claude setup-token` on a machine
+that can't reach the internet directly would just hang before printing
+anything, and the panel would be showing a dead button all over again.
+Measured on mayfx02, not assumed.
+
+**First, what's actually configured there.** The panel's own
+`~/.local/share/houdini-agent-panel/settings.json` has:
+```json
+{"proxy_url": "http://127.0.0.1:8118", "no_proxy": ""}
+```
+None of `~/.zshrc`, `~/.bashrc`, `~/.profile`, `~/.bash_profile` export
+`HTTP_PROXY`/`HTTPS_PROXY`, and a login shell's own environment has them
+unset too (`$SHELL -lc 'echo $HTTPS_PROXY'` → empty) — the panel's own
+setting is the *only* place a proxy exists on this machine; nothing would
+reach an agent process through the shell environment alone. `ss -tlnp`
+confirms something real is listening on `127.0.0.1:8118`.
+
+**One caveat that matters before reading the rest of this: mayfx02 itself
+has direct internet access, proxy or not.** `curl -x http://127.0.0.1:8118
+https://www.google.com` and the identical `curl` with no `-x` at all both
+returned `200`. This machine is not "reaches nothing without a proxy" the
+way the owner's is described — so a same-machine "no proxy" run cannot, by
+itself, prove the CLI would survive on a machine where direct really is
+blocked. What it *can* do, and what was actually tested, is whether the
+tooling reads and uses the proxy env vars at all when they're set, versus
+silently ignoring them and going direct regardless.
+
+**Ran `npx --yes @anthropic-ai/claude-code setup-token` twice**, pty
+attached, fresh `$HOME` each time (forces a real registry fetch both times,
+no cache reuse between runs) — once with `HTTPS_PROXY`/`HTTP_PROXY`/lowercase
+variants exported to the panel's own `http://127.0.0.1:8118`, once with none
+of them set. Both killed (`SIGTERM` to the process group) well before any
+code was pasted. A mid-run snapshot (`ss -tnp`, filtered to the run's own
+process tree) was taken ~4.3s in, while `npm exec` was still fetching the
+package:
+
+- **With the proxy vars set:** 7 established sockets, all
+  `127.0.0.1:<random> → 127.0.0.1:8118`, owned by the `npm exec
+  @anthr...` process. npm routed its own package fetch through the proxy.
+- **Without them:** 7 established sockets instead, all
+  `192.168.2.140:<random> → 104.16.{3,5}.34:443` (Cloudflare IPs, almost
+  certainly the npm registry's CDN) — npm fell back to a direct connection.
+- **Output was identical in both runs**, same shape as the single run
+  above, first output byte at ~0.3s in both, same sequence (`Welcome to
+  Claude Code v2.1.222` → `Opening browser to sign in…` spinner →
+  `Browser didn't open?` fallback → the OAuth URL → `Paste code here if
+  prompted >`). Neither run stalled; the URL printed both times.
+
+Answering the four questions directly:
+
+1. **`npx` itself does read and use `HTTPS_PROXY`/`HTTP_PROXY`** — this is
+   the one part measured unambiguously: the connection destination flips
+   from the proxy's own address to a direct Cloudflare IP depending only on
+   whether those env vars were set. It is not ignoring them.
+2. **The URL printed without the proxy on this machine** — but that's
+   because this machine can also reach the internet directly; this run
+   does not distinguish "the CLI doesn't need a proxy" from "the CLI didn't
+   need this proxy specifically, because it went around it." Given (1),
+   the reasonable expectation for a machine where direct really is blocked
+   is that the same env-var-driven routing would carry the fetch through
+   the proxy instead of failing — **but that's an extrapolation from (1),
+   not something measured on a machine that actually lacks direct access.**
+3. **Nothing stalled before the URL, in either condition.** No connection
+   activity was observed between the fetch (~4.3s snapshot) and the URL
+   appearing seconds later, consistent with the URL being generated purely
+   client-side (PKCE `code_challenge` is local math) and needing no network
+   call of its own — only sampled once per run, not watched continuously,
+   so treat "the URL step itself needs zero network" as inferred from
+   timing and the single snapshot, not exhaustively confirmed.
+4. **Yes — the `npx --yes` fetch is a real, first network dependency, and
+   its failure would look exactly like a login failure.** It opens real
+   TCP connections (7, in both runs) before `claude setup-token` has even
+   printed its first line (`Welcome to Claude Code…`); if that fetch can't
+   complete — wrong proxy, proxy down, direct blocked and no working proxy
+   given — the whole spawn dies at that point, and from the panel's
+   perspective that's indistinguishable from "the sign-in itself failed"
+   unless the panel specifically detects and reports a fetch/connectivity
+   failure differently from an auth failure.
+
+### Consequences for the UI (proxy)
+
+1. **The panel already has the right variable to pass — `proxy_url` from
+   its own settings — and passing it through as `HTTPS_PROXY`/`HTTP_PROXY`
+   (plus lowercase) is confirmed to actually change where `npx` connects,
+   not a no-op.** This is the one piece of the owner's concern that's
+   fully resolved: the mechanism the panel already has is the correct
+   mechanism.
+2. **A failed `npx` fetch needs its own error message, distinct from "sign-in
+   failed."** Since the fetch is a real network dependency that runs before
+   anything login-related even starts, a client that only reports "couldn't
+   sign in" on any non-zero exit will misattribute a proxy/connectivity
+   problem to the agent's auth flow.
+3. **This specific measurement cannot certify the owner's actual machine.**
+   mayfx02 has working direct internet access, so "it worked without a
+   proxy here" proves nothing about a machine that has none. What
+   transfers is narrower and still useful: the CLI's tooling genuinely
+   consults `HTTPS_PROXY`/`HTTP_PROXY` rather than ignoring them.
+
+### Not established (proxy)
+
+- Whether the fetch succeeds, over the proxy alone, on a machine with no
+  direct route at all — not testable on this machine, which has one.
+- Whether `claude setup-token` (the binary itself, after npm's fetch
+  completes) makes any of its own proxied network calls beyond what was
+  captured in the one mid-fetch snapshot — not watched continuously.
+- Whether `no_proxy` (empty in the panel's settings here) has any effect —
+  not exercised, since it was empty on this machine.
