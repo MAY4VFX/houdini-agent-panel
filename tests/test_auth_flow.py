@@ -521,3 +521,154 @@ def test_sign_out_failure_from_settings_is_noted_not_lost(qapp, monkeypatch):
     assert attempt.action == "sign_out"
     assert attempt.ok is False
     widget.shutdown()
+
+
+def test_a_terminal_auth_method_spawns_a_worker_instead_of_authenticating(qapp, monkeypatch):
+    """Kimi's `login` never answers `authenticate()` at all (docs/facts/
+    acp-sdk.md §13-14) — calling it anyway would just hang for no reason.
+    Measured: this method wants a SEPARATE process, not the ACP channel."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("kimi")
+    client = panel_mod.shared_client(widget._agent_id)
+    authenticated: list[str] = []
+    monkeypatch.setattr(client, "authenticate", lambda mid: authenticated.append(mid))
+    ta = client_mod.TerminalAuth(command="/bin/fake-kimi", args=["login"], env={})
+    monkeypatch.setattr(
+        client, "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="kimi", version="1.49.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(
+                client_mod.AuthMethod(id="login", name="Login with Kimi account", terminal_auth=ta),
+            ),
+        ),
+    )
+
+    widget._on_auth_method_chosen("login")
+
+    assert authenticated == [], "authenticate() was called for a method that never answers it"
+    assert widget._terminal_login_worker is not None
+    widget.shutdown()
+
+
+def test_the_sdks_unresolved_terminal_shape_falls_back_to_authenticate(qapp, monkeypatch):
+    """The SDK's own `TerminalAuthMethod` shape has no `command` field at
+    all (`client.TerminalAuth.command is None`) — unmeasured in practice,
+    no agent probed uses it (docs/facts/acp-sdk.md §13). Resolving "the
+    agent's own binary" isn't implemented, so this degrades to the
+    ordinary wait rather than attempting a spawn with nothing to run."""
+    from houdini_agent_panel import client as client_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("some-agent")
+    client = panel_mod.shared_client(widget._agent_id)
+    authenticated: list[str] = []
+    monkeypatch.setattr(client, "authenticate", lambda mid: authenticated.append(mid))
+    ta = client_mod.TerminalAuth(command=None, args=["--login"], env={})
+    monkeypatch.setattr(
+        client, "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="some-agent", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(
+                client_mod.AuthMethod(id="terminal", name="Terminal login", terminal_auth=ta),
+            ),
+        ),
+    )
+
+    widget._on_auth_method_chosen("terminal")
+
+    assert authenticated == ["terminal"]
+    assert widget._terminal_login_worker is None
+    widget.shutdown()
+
+
+def test_terminal_login_url_found_shows_a_link_on_the_sign_in_screen(qapp):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+
+    widget._on_terminal_login_url(
+        "https://www.kimi.com/code/authorize_device?user_code=14OI-AX7F", "14OI-AX7F"
+    )
+
+    text = widget._auth_view._pending_label.text()
+    assert "14OI-AX7F" in text
+    assert "kimi.com" in text
+    widget.shutdown()
+
+
+def test_leaving_the_sign_in_screen_stops_a_running_terminal_login(qapp):
+    """Real `kimi login` polls indefinitely on its own (docs/facts/acp-sdk.md
+    §14) — walking away from the screen must not leave it running."""
+    from types import SimpleNamespace
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    stopped: list[bool] = []
+    widget._terminal_login_worker = SimpleNamespace(stop=lambda: stopped.append(True))
+
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+
+    assert stopped == [True]
+    assert widget._terminal_login_worker is None
+    widget.shutdown()
+
+
+def test_cancel_pending_stops_a_running_terminal_login(qapp):
+    from types import SimpleNamespace
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    stopped: list[bool] = []
+    widget._terminal_login_worker = SimpleNamespace(stop=lambda: stopped.append(True))
+
+    widget._on_auth_cancel_pending()
+
+    assert stopped == [True]
+    assert widget._terminal_login_worker is None
+    widget.shutdown()
+
+
+def test_gemini_style_stderr_while_pending_is_shown_on_the_sign_in_screen(qapp):
+    """Gemini's `oauth-personal` never returns and never emits anything but
+    stderr retry text (docs/facts/acp-sdk.md §13) — today that line matches
+    none of `_FATAL_STDERR_MARKERS`, so without this it went nowhere the
+    artist could see."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._auth_pending = True
+    client = panel_mod.shared_client(widget._agent_id)
+
+    client.log_line.emit("Failed to authenticate with authorization code:invalid_grant")
+    qapp.processEvents()
+
+    assert "invalid_grant" in widget._auth_view._pending_detail_label.text()
+    widget.shutdown()
+
+
+def test_stderr_is_not_surfaced_when_not_actually_pending(qapp):
+    """Ordinary stderr noise from a running conversation must not start
+    showing up on the sign-in screen just because it happens to be open —
+    only while a sign-in is actually in flight."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    client = panel_mod.shared_client(widget._agent_id)
+
+    client.log_line.emit("some ordinary line")
+    qapp.processEvents()
+
+    assert widget._auth_view._pending_detail_label.text() == ""
+    widget.shutdown()

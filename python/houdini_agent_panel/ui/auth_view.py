@@ -90,6 +90,17 @@ class AuthView(QtWidgets.QWidget):
         self._pending_label = QtWidgets.QLabel()
         self._pending_label.setWordWrap(True)
         self._pending_label.setVisible(False)
+        #: The agent's own raw stderr while pending, one line at a time —
+        #: e.g. gemini's `oauth-personal`, which never emits anything else
+        #: (docs/facts/acp-sdk.md §13: "Failed to authenticate with
+        #: authorization code:invalid_grant" / "...Retrying..." on stderr,
+        #: nothing on the ACP channel itself). Replaced on each new line
+        #: rather than accumulated — this is "what's happening right now",
+        #: not a log the artist has to scroll.
+        self._pending_detail_label = QtWidgets.QLabel()
+        self._pending_detail_label.setWordWrap(True)
+        self._pending_detail_label.setVisible(False)
+        self._pending_detail_label.setStyleSheet("color: palette(disabled, text);")
         self._cancel_pending_button = QtWidgets.QPushButton("Cancel")
         self._cancel_pending_button.setVisible(False)
         self._cancel_pending_button.clicked.connect(self._on_cancel_pending)
@@ -116,6 +127,7 @@ class AuthView(QtWidgets.QWidget):
         rail_layout.addWidget(self._empty_label)
         rail_layout.addWidget(self._error_label)
         rail_layout.addWidget(self._pending_label)
+        rail_layout.addWidget(self._pending_detail_label)
         rail_layout.addLayout(self._cancel_pending_row)
         rail_layout.addLayout(self._methods_layout)
         # Sign out belongs with the choices, not pinned to the floor. The
@@ -222,7 +234,36 @@ class AuthView(QtWidgets.QWidget):
         division of labour as everywhere else in this file.
         """
         self.clear_error()
+        self._pending_label.setTextFormat(QtCore.Qt.PlainText)
+        self._pending_label.setOpenExternalLinks(False)
         self._pending_label.setText(message)
+        self._pending_label.setVisible(True)
+        self._cancel_pending_button.setVisible(True)
+        for button in self._buttons.values():
+            button.setEnabled(False)
+        self._logout_button.setEnabled(False)
+
+    def set_pending_detail(self, text: str) -> None:
+        """The agent's own raw stderr line while pending — see the label's
+        own docstring for why gemini specifically needs this."""
+        self._pending_detail_label.setText(text)
+        self._pending_detail_label.setVisible(bool(text))
+
+    def set_terminal_login_link(self, url: str, code: str) -> None:
+        """A verification URL a spawned terminal-auth process printed
+        (Kimi, docs/facts/acp-sdk.md §14) — the one agent measured where a
+        real, clickable link is possible at all (`AgentPanel._start_
+        terminal_login` is what spawns and parses it; this only draws the
+        result). Replaces the plain pending message with the link itself;
+        Cancel above still works, and now also stops that process.
+        """
+        self.clear_error()
+        text = f'<a href="{url}">{url}</a>'
+        if code:
+            text += f"<br>Code: {code}"
+        self._pending_label.setTextFormat(QtCore.Qt.RichText)
+        self._pending_label.setOpenExternalLinks(True)
+        self._pending_label.setText(text)
         self._pending_label.setVisible(True)
         self._cancel_pending_button.setVisible(True)
         for button in self._buttons.values():
@@ -231,6 +272,10 @@ class AuthView(QtWidgets.QWidget):
 
     def clear_pending(self) -> None:
         self._pending_label.setVisible(False)
+        self._pending_label.setTextFormat(QtCore.Qt.PlainText)
+        self._pending_label.setOpenExternalLinks(False)
+        self._pending_detail_label.clear()
+        self._pending_detail_label.setVisible(False)
         self._cancel_pending_button.setVisible(False)
         for button in self._buttons.values():
             button.setEnabled(True)

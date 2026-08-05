@@ -121,10 +121,84 @@ _CONTENT_BLOCK_TYPES: dict[str, type] = {
 
 
 @dataclass(frozen=True)
+class TerminalAuth:
+    """Enough to spawn a SEPARATE process for one auth method — not
+    something `authenticate()` on the ACP channel can ever finish by
+    itself. Measured for real on Kimi (docs/facts/acp-sdk.md §13-14):
+    `authenticate(methodId="login")` never returns, with or without a pty
+    on the ACP connection, because the method isn't asking the ACP channel
+    for anything — its `initialize` response says, verbatim, "Run `kimi
+    login` command in the terminal, then follow the instructions to finish
+    login," and that second, independent process is where the real
+    verification URL and device code get printed.
+
+    Two wire shapes normalize to this — see `_terminal_auth_from`:
+
+    - Kimi's own convention: a nested `field_meta["terminal-auth"]` key
+      carrying `command`/`args`/`env`/`label` directly. Not the SDK's own
+      typed shape — Kimi's method has no top-level `type` at all, so
+      `acp`'s pydantic models fall back to the untyped `AuthMethodAgent`
+      variant and never expose this as a real field.
+    - The SDK's own `TerminalAuthMethod` (`acp.schema`, `type: "terminal"`,
+      top-level `args`/`env`, no `command` field): it means "run the
+      agent's own binary again with these args," so `command` is `None`
+      here and the caller is expected to fill it in from whatever launched
+      the agent. Unmeasured in practice — none of the six agents probed
+      use it — included because the schema defines it and a future agent
+      might; `ui/panel.py` does not attempt to resolve `command` for it
+      today (see `AgentPanel._start_terminal_login`), so this shape
+      currently just falls back to the ordinary pending wait.
+    """
+
+    command: str | None
+    args: list[str]
+    env: dict[str, str]
+    label: str = ""
+
+
+def _terminal_auth_from(m: Any) -> "TerminalAuth | None":
+    """`None` unless `m` carries one of the two shapes `TerminalAuth`
+    documents. Deliberately does NOT look at `m.description` at all, even
+    though opencode's reads exactly like Kimi's in prose ("Run `opencode
+    auth login` in the terminal") — measured for real (docs/facts/acp-sdk.md
+    §14), `opencode auth login` is an interactive arrow-key TUI menu, not a
+    stream a client can spawn and read; there is also no structured field
+    to parse in the first place, since opencode's method carries no `_meta`
+    at all. Scraping the description into a command would work for THIS
+    string by accident and break the day another agent's prose happens to
+    look similar but isn't spawnable — this only ever trusts structured
+    fields.
+    """
+    if getattr(m, "type", None) == "terminal":
+        return TerminalAuth(
+            command=None,
+            args=[str(a) for a in (getattr(m, "args", None) or [])],
+            env={str(k): str(v) for k, v in (getattr(m, "env", None) or {}).items()},
+        )
+    meta = getattr(m, "field_meta", None)
+    if not isinstance(meta, dict):
+        return None
+    payload = meta.get("terminal-auth")
+    if not isinstance(payload, dict) or not payload.get("command"):
+        return None
+    return TerminalAuth(
+        command=str(payload["command"]),
+        args=[str(a) for a in (payload.get("args") or [])],
+        env={str(k): str(v) for k, v in (payload.get("env") or {}).items()},
+        label=str(payload.get("label", "")),
+    )
+
+
+@dataclass(frozen=True)
 class AuthMethod:
     id: str
     name: str
     description: str = ""
+    #: `None` for every method the panel can only wait on `authenticate()`
+    #: for — see `TerminalAuth`'s own docstring for the two shapes that set
+    #: this, and `_terminal_auth_from` for why opencode's look-alike prose
+    #: never does.
+    terminal_auth: "TerminalAuth | None" = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +276,12 @@ def _agent_info_from(init: Any) -> AgentInfo:
         # contract, not a guess via truthiness.
         supports_logout=auth_caps is not None and getattr(auth_caps, "logout", None) is not None,
         auth_methods=tuple(
-            AuthMethod(id=m.id, name=m.name, description=getattr(m, "description", None) or "")
+            AuthMethod(
+                id=m.id,
+                name=m.name,
+                description=getattr(m, "description", None) or "",
+                terminal_auth=_terminal_auth_from(m),
+            )
             for m in (init.auth_methods or [])
         ),
     )

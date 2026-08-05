@@ -402,6 +402,20 @@ class AgentPanel(QtWidgets.QWidget):
         #: recorded as a sign-out attempt rather than a sign-in one
         #: (`_record_auth_attempt`, issue #33's "last attempt" text).
         self._pending_logout_agent: str | None = None
+        #: True from `_on_auth_method_chosen` until the pending
+        #: `authenticate()` resolves (or the artist cancels the wait) —
+        #: lets `_on_log_line` know an agent's stderr right now is likely
+        #: about the sign-in in progress (gemini's `oauth-personal`: the
+        #: ONLY thing it ever says, docs/facts/acp-sdk.md §13) rather than
+        #: unrelated noise from a running conversation.
+        self._auth_pending: bool = False
+        #: The worker currently running a spawned terminal-auth process
+        #: (Kimi's `kimi login`, §13-14), if any — `None` the rest of the
+        #: time. Kept so `_on_auth_cancel_pending`/`_show_page`/`shutdown`
+        #: can stop it: it polls indefinitely on its own, so leaving it
+        #: running after the artist has moved on is a real leak, the same
+        #: hazard `orphans.py` exists for on the agent process itself.
+        self._terminal_login_worker: Any = None
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -551,6 +565,17 @@ class AgentPanel(QtWidgets.QWidget):
         return view
 
     def _show_page(self, index: int) -> None:
+        if (
+            self._pages.currentIndex() == self.PAGE_AUTH
+            and index != self.PAGE_AUTH
+            and self._terminal_login_worker is not None
+        ):
+            # Leaving the sign-in screen with a spawned terminal-auth
+            # process (Kimi) still running — it polls indefinitely on its
+            # own (docs/facts/acp-sdk.md §14), so walking away without
+            # stopping it is a real leak, not a background task that will
+            # tidy itself up.
+            self._stop_terminal_login()
         self._pages.setCurrentIndex(index)
         # Writing to the agent from the settings or auth screen is pointless:
         # the reply lands in a feed the human can't see right now.
@@ -1013,6 +1038,11 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_auth_required(self, methods: list) -> None:
         # Whatever we thought, the agent has just said otherwise.
         self._remember_signed_in(False)
+        # A fresh `auth_required` moots any wait already in progress —
+        # including a spawned terminal-auth process (Kimi), which has no
+        # reason to still be running once the agent has said this.
+        self._stop_terminal_login()
+        self._auth_pending = False
         if self._pending_logout_agent == self._agent_id:
             # `do_logout` reports success this way: the agent has nothing
             # of its own to signal "logged out" with, so it just answers
@@ -1288,6 +1318,7 @@ class AgentPanel(QtWidgets.QWidget):
         # reporting it: the screen just sits, which is indistinguishable from
         # a login that quietly did nothing.
         if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_pending = False
             self._auth_view.show_error(message, self._last_auth_method)
             self._record_auth_attempt(
                 self._agent_id, action="sign_in", ok=False, message=message,
@@ -2017,6 +2048,18 @@ class AgentPanel(QtWidgets.QWidget):
     _FATAL_STDERR_MARKERS = ("authorizationrequired", "fatal", "error", "command not found")
 
     def _on_log_line(self, line: str) -> None:
+        if self._auth_pending and self._pages.currentIndex() == self.PAGE_AUTH:
+            # The only thing SOME agents ever say while a sign-in is
+            # pending — gemini's `oauth-personal` never emits anything
+            # else at all (docs/facts/acp-sdk.md §13: "Failed to
+            # authenticate with authorization code:invalid_grant" /
+            # "Failed to authenticate with user code. Retrying..."), and
+            # neither line matches a `_FATAL_STDERR_MARKERS` entry below —
+            # without this branch it went nowhere the artist could ever
+            # see. Shown right beside the wait itself, replaced on each new
+            # line (`AuthView.set_pending_detail`), not appended to the
+            # transcript feed the artist may not be looking at.
+            self._auth_view.set_pending_detail(line.strip())
         lowered = line.lower()
         if not any(marker in lowered for marker in self._FATAL_STDERR_MARKERS):
             return
@@ -2137,6 +2180,19 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._last_auth_method = method_id
+        info = shared_client(self._agent_id).agent_info()
+        method = next(
+            (m for m in (info.auth_methods if info is not None else ()) if m.id == method_id),
+            None,
+        )
+        if method is not None and method.terminal_auth is not None and method.terminal_auth.command:
+            # This method isn't answered over the ACP channel at all — see
+            # `_start_terminal_login`'s own docstring (Kimi, docs/facts/
+            # acp-sdk.md §13-14). Skip `authenticate()` entirely; calling it
+            # anyway would just hang forever for no reason (measured: it
+            # never returns).
+            self._start_terminal_login(method)
+            return
         message = self._auth_advice_for(method_id)
         self._note(message)
         # On screen too, not only in a feed the artist may have already
@@ -2147,20 +2203,113 @@ class AgentPanel(QtWidgets.QWidget):
         # silence. `set_pending` also disables the buttons for the wait;
         # `AuthView.cancel_pending`/`_on_auth_cancel_pending` is the way
         # back if the artist gives up watching.
+        self._auth_pending = True
         self._auth_view.set_pending(message)
         shared_client(self._agent_id).authenticate(method_id)
 
-    def _on_auth_cancel_pending(self) -> None:
-        """The artist gave up waiting on a pending `authenticate()` call.
+    def _start_terminal_login(self, method: Any) -> None:
+        """Spawn the SEPARATE process `method.terminal_auth` points at, and
+        read its output for a verification URL.
 
-        UI-only: there is no protocol call to cancel `authenticate()`
-        itself (docs/facts/acp-sdk.md §12 — a client-side timeout would
-        break a login that's actually working, so the panel has none and
-        must not grow one here either). The call is simply left to resolve
-        on its own; `_on_authenticated`/`_on_error` still apply whenever it
-        does, even if the artist has since picked a different method or
-        left the screen entirely. This only gives the method list back.
+        Measured for real on Kimi (docs/facts/acp-sdk.md §13-14):
+        `authenticate(methodId="login")` never returns — not because it is
+        slow, but because this method isn't asking the ACP channel for
+        anything. Its `initialize` response says so directly: "Run `kimi
+        login` command in the terminal, then follow the instructions to
+        finish login." Running that command ourselves (in a pipe the
+        panel reads, not a human types into) and parsing its output is what
+        turns "check your terminal" into an actual clickable link — the one
+        agent measured where that's possible at all (§14; gemini and grok
+        both hang on an OAuth method with no URL ever crossing the wire,
+        and opencode's own command opens an interactive arrow-key menu no
+        subprocess reader can drive).
         """
+        from .terminal_login import TerminalLoginWorker
+
+        ta = method.terminal_auth
+        message = (
+            f"Opening {method.name} in a terminal the panel manages — this "
+            f"can take a moment. If it prints a sign-in link, it will "
+            f"appear here."
+        )
+        self._note(message)
+        self._auth_pending = True
+        self._auth_view.set_pending(message)
+
+        worker = TerminalLoginWorker(self._agent_id, ta, cwd=scene.hip_dir(), parent=self)
+        worker.line_received.connect(self._on_terminal_login_line)
+        worker.url_found.connect(self._on_terminal_login_url)
+        worker.exited.connect(self._on_terminal_login_exited)
+        worker.failed.connect(self._on_terminal_login_failed)
+        self._terminal_login_worker = worker
+        worker.start()
+
+    def _on_terminal_login_line(self, line: str) -> None:
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_pending_detail(line)
+
+    def _on_terminal_login_url(self, url: str, code: str) -> None:
+        self._note(f"Sign in at: {url}" + (f" (code {code})" if code else ""))
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_terminal_login_link(url, code)
+
+    def _on_terminal_login_exited(self, exit_code: int) -> None:
+        """The spawned process is gone — ended on its own, or `_stop_
+        terminal_login` killed it.
+
+        Not evidence of success OR failure: docs/facts/acp-sdk.md §14
+        explicitly could not measure what a successful `kimi login` prints
+        or exits with (the probe killed it first, deliberately), and this
+        process never touches the ACP channel, so none of the agent's own
+        signals (`authenticated`/`auth_required`) ever fire from it either.
+        The one honest signal the rest of this file already relies on for
+        every agent still applies here: a completed turn
+        (`_remember_signed_in`, via `_on_turn_finished`).
+        """
+        self._terminal_login_worker = None
+        self._auth_pending = False
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._note(f"Terminal login process ended (exit {exit_code}).")
+
+    def _on_terminal_login_failed(self, message: str) -> None:
+        self._terminal_login_worker = None
+        self._auth_pending = False
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.show_error(message, self._last_auth_method)
+        else:
+            self._note(f"Terminal login failed: {message}")
+
+    def _stop_terminal_login(self) -> None:
+        """Ends whatever login was in progress in the spawned process —
+        called when the artist cancels, leaves the sign-in screen, or the
+        panel closes. Not a courtesy: `kimi login` polls indefinitely on
+        its own (§14), so leaving it running is a real leak, the same
+        hazard `orphans.py`'s own module docstring describes for the agent
+        process itself.
+        """
+        worker = self._terminal_login_worker
+        if worker is None:
+            return
+        worker.stop()
+        self._terminal_login_worker = None
+        self._auth_pending = False
+
+    def _on_auth_cancel_pending(self) -> None:
+        """The artist gave up waiting on a pending sign-in.
+
+        For a plain `authenticate()` call: UI-only, nothing to cancel on
+        the protocol side (docs/facts/acp-sdk.md §12 — a client-side
+        timeout would break a login that's actually working, so the panel
+        has none and must not grow one here either). The call is simply
+        left to resolve on its own; `_on_authenticated`/`_on_error` still
+        apply whenever it does, even if the artist has since picked a
+        different method or left the screen entirely.
+
+        For a spawned terminal-auth process (Kimi): this genuinely stops
+        something — see `_stop_terminal_login`.
+        """
+        self._stop_terminal_login()
+        self._auth_pending = False
         self._auth_view.clear_pending()
 
     def _on_authenticated(self, method_id: str) -> None:
@@ -2175,6 +2324,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._record_auth_attempt(
             self._agent_id, action="sign_in", ok=True, message="Signed in.", method_id=method_id
         )
+        self._auth_pending = False
         self._auth_view.clear_pending()
         self._show_page(self.PAGE_TRANSCRIPT)
         if self._current_session() is None:
@@ -2608,6 +2758,23 @@ class AgentPanel(QtWidgets.QWidget):
                     signal.disconnect(slot)
             launch.wait(3000)
             self._launch_worker = None
+
+        terminal_login = self._terminal_login_worker
+        if terminal_login is not None:
+            # Same reasoning as `_show_page`: this process polls
+            # indefinitely on its own (docs/facts/acp-sdk.md §14) — the
+            # panel closing must not leave it running.
+            for signal, slot in (
+                (terminal_login.line_received, self._on_terminal_login_line),
+                (terminal_login.url_found, self._on_terminal_login_url),
+                (terminal_login.exited, self._on_terminal_login_exited),
+                (terminal_login.failed, self._on_terminal_login_failed),
+            ):
+                with contextlib.suppress(RuntimeError, TypeError):
+                    signal.disconnect(slot)
+            terminal_login.stop()
+            terminal_login.wait(2000)
+            self._terminal_login_worker = None
 
         for signal, slot in (
             *getattr(self, "_client_wiring", ()),
