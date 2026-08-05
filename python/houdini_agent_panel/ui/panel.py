@@ -24,6 +24,7 @@ never touches `hou`.
 from __future__ import annotations
 
 import contextlib
+import shutil
 import time
 import weakref
 from dataclasses import replace
@@ -426,6 +427,19 @@ class AgentPanel(QtWidgets.QWidget):
         #: doesn't fully close (a Qt cross-thread signal already queued at
         #: the moment of disconnect still gets delivered).
         self._terminal_login_agent_id: str = ""
+        #: Whether the spawned process has printed ANYTHING yet — tells
+        #: apart a fetch/start that never got off the ground (no output at
+        #: all — on a machine that needs a proxy, the npx fetch happens
+        #: BEFORE the CLI prints a byte, docs/facts/acp-sdk.md §14) from a
+        #: real authentication failure (it printed something, then ended).
+        #: Reported as the single most confusing failure mode the panel
+        #: has: the two used to read identically.
+        self._terminal_login_got_output: bool = False
+        #: Single-shot: if nothing has printed yet after a while, say so
+        #: instead of leaving the artist watching an unchanged message —
+        #: informational only, this NEVER kills the process (unlike
+        #: `authenticate()`, this is ours to poll, but not to give up on).
+        self._terminal_login_slow_timer: Any = None
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -572,6 +586,7 @@ class AgentPanel(QtWidgets.QWidget):
         view.method_chosen.connect(self._on_auth_method_chosen)
         view.logout_requested.connect(self._on_logout_requested)
         view.cancel_pending.connect(self._on_auth_cancel_pending)
+        view.terminal_login_input_submitted.connect(self._on_terminal_login_input_submitted)
         return view
 
     def _show_page(self, index: int) -> None:
@@ -2146,24 +2161,96 @@ class AgentPanel(QtWidgets.QWidget):
         If a live session already knows about a real `/login` command,
         that's the more specific, already-established answer
         (`_offer_login_command`, also reached automatically from
-        `auth_required`). Otherwise this shows the SAME static advice
-        directly on the sign-in screen — Settings just sent the artist
-        here, they should not need to already be mid-conversation and hit
-        a failure first to see it.
+        `auth_required`). Next, a built-in recipe the PANEL supplies
+        itself (Claude's `setup-token`, `_builtin_terminal_auth_method`) —
+        real and spawnable even though the agent advertised nothing.
+        Otherwise this shows the same static advice directly on the
+        sign-in screen — Settings just sent the artist here, they should
+        not need to already be mid-conversation and hit a failure first
+        to see it.
         """
         if self._has_login_command():
             self._offer_login_command(info)
+            return
+        builtin = self._builtin_terminal_auth_method(self._agent_id)
+        if builtin is not None:
+            self._auth_view.set_methods([builtin], can_logout=False)
+            self._show_page(self.PAGE_AUTH)
             return
         self._auth_view.set_methods(
             [], can_logout=False, no_methods_help=self._no_methods_advice()
         )
         self._show_page(self.PAGE_AUTH)
 
+    #: A terminal-auth recipe the PANEL supplies itself for an agent that
+    #: advertises NO auth methods at all — claude-acp's own `initialize`
+    #: reports an empty list (measured), so this can never come from
+    #: `client._terminal_auth_from`, which only ever reads the wire. Real
+    #: and spawnable all the same (docs/facts/acp-sdk.md §14, verbatim):
+    #: `claude setup-token` opens a browser, prints an OAuth URL, and
+    #: blocks at "Paste code here if prompted >" for exactly one line
+    #: back. Written here as DATA, deliberately — the same rule `client.
+    #: _terminal_auth_from` already follows for opencode's identical-
+    #: looking prose (never scrape a description for a command): this is
+    #: the one place the panel is allowed to invent a command, because
+    #: it's the PANEL'S OWN knowledge about a specific, named agent id,
+    #: never a guess about what some other agent's sentence means.
+    _BUILTIN_TERMINAL_AUTH_IDS = frozenset({"claude-setup-token"})
+
+    def _builtin_terminal_auth_method(self, agent_id: str) -> Any:
+        if agent_id != "claude-acp":
+            return None
+        # Prefer a `claude` already on PATH: same CLI, but it skips npx's
+        # own fetch entirely — measured to happen BEFORE the CLI prints
+        # anything at all (seven TCP connections first, §14), and the
+        # single slowest, least reliable part of this on a bad connection.
+        claude_on_path = shutil.which("claude")
+        if claude_on_path:
+            command, args = claude_on_path, ["setup-token"]
+        else:
+            command, args = "npx", ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+        return acp_client.AuthMethod(
+            id="claude-setup-token",
+            name="Sign in with browser",
+            description=(
+                "Opens `claude setup-token` — it signs in through your "
+                "browser and writes ~/.claude/.credentials.json. Prefer "
+                "ANTHROPIC_API_KEY in your shell profile instead if you "
+                "already have one: no flow needed, just restart the "
+                "agent from Settings."
+            ),
+            terminal_auth=acp_client.TerminalAuth(command=command, args=args, env={}),
+        )
+
+    def _find_auth_method(self, method_id: str) -> Any:
+        """Wire methods first (`agent_info().auth_methods`), then the
+        panel's own built-in recipe — Claude's `setup-token` isn't
+        advertised by the agent at all, so it would never be found the
+        first way."""
+        info = shared_client(self._agent_id).agent_info()
+        for m in (info.auth_methods if info is not None else ()):
+            if m.id == method_id:
+                return m
+        builtin = self._builtin_terminal_auth_method(self._agent_id)
+        if builtin is not None and builtin.id == method_id:
+            return builtin
+        return None
+
     #: What each measured sign-in method actually does, so the panel can say
     #: it instead of leaving the artist watching a button. Keyed by the
     #: method id the agent advertises; anything unknown gets the generic
     #: line. Measured on a clean HOME (docs/facts/acp-sdk.md §12).
     _AUTH_ADVICE = {
+        # Plain `authenticate()` wait, NOT a terminal-auth spawn, and
+        # deliberately not given the paste-back treatment Claude's
+        # `setup-token` gets (`_on_terminal_login_input_requested`):
+        # Codex's own OAuth redirects to `http://localhost:1455/auth/
+        # callback` — it completes itself the moment the browser is
+        # approved, with nothing for the artist to copy back. Claude's
+        # equivalent has no local callback at all, which is exactly why
+        # IT needs the artist to paste a code. Two different agents
+        # solving the same OAuth problem two different ways — do not
+        # "unify" them into the same code path later.
         "chat-gpt": (
             "Opening ChatGPT in your browser — it can take a few seconds to "
             "appear. Sign in there and come back; the panel is waiting and "
@@ -2243,18 +2330,22 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._last_auth_method = method_id
-        info = shared_client(self._agent_id).agent_info()
-        method = next(
-            (m for m in (info.auth_methods if info is not None else ()) if m.id == method_id),
-            None,
-        )
+        method = self._find_auth_method(method_id)
         if method is not None and method.terminal_auth is not None and method.terminal_auth.command:
             # This method isn't answered over the ACP channel at all — see
             # `_start_terminal_login`'s own docstring (Kimi, docs/facts/
             # acp-sdk.md §13-14). Skip `authenticate()` entirely; calling it
             # anyway would just hang forever for no reason (measured: it
             # never returns).
-            self._start_terminal_login(method)
+            #
+            # The built-in recipe's OWN description (ANTHROPIC_API_KEY as
+            # the simpler alternative) is written FOR this spawned flow and
+            # should replace the generic pending text; a wire method's own
+            # description (Kimi's "run this yourself…") is written for the
+            # opposite case and must not (`_start_terminal_login`'s own
+            # docstring says why).
+            override = method.description if method_id in self._BUILTIN_TERMINAL_AUTH_IDS else ""
+            self._start_terminal_login(method, message_override=override)
             return
         message = self._auth_advice_for(method_id)
         self._note(message)
@@ -2270,7 +2361,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._auth_view.set_pending(message)
         shared_client(self._agent_id).authenticate(method_id)
 
-    def _start_terminal_login(self, method: Any) -> None:
+    def _start_terminal_login(self, method: Any, *, message_override: str = "") -> None:
         """Spawn the SEPARATE process `method.terminal_auth` points at, and
         read its output for a verification URL.
 
@@ -2286,11 +2377,24 @@ class AgentPanel(QtWidgets.QWidget):
         both hang on an OAuth method with no URL ever crossing the wire,
         and opencode's own command opens an interactive arrow-key menu no
         subprocess reader can drive).
+
+        `method` need not come from the wire at all — `_offer_sign_in_
+        with_no_methods` builds one for Claude's `setup-token`, a recipe
+        the panel supplies itself (`_builtin_terminal_auth_for`), since
+        claude-acp advertises no methods for this to come from.
         """
         from .terminal_login import TerminalLoginWorker
 
         ta = method.terminal_auth
-        message = (
+        # A caller-supplied message (the Claude built-in recipe uses this
+        # to mention ANTHROPIC_API_KEY as the simpler alternative) always
+        # wins; otherwise the generic line. Deliberately NOT `method.
+        # description` — Kimi's own description ("Run `kimi login`
+        # command in the terminal…") is written for an artist running it
+        # THEMSELVES, and would read as wrong now that the panel spawns it
+        # instead (`AuthView` still shows that text as the button's
+        # tooltip via `set_methods`, which is the right amount of it).
+        message = message_override or (
             f"Opening {method.name} in a terminal the panel manages — this "
             f"can take a moment. If it prints a sign-in link, it will "
             f"appear here."
@@ -2306,6 +2410,10 @@ class AgentPanel(QtWidgets.QWidget):
         # something this regex doesn't recognise must never be a dead end).
         self._terminal_login_url_shown = False
         self._terminal_login_command = " ".join([ta.command or "", *ta.args])
+        # Whether ANYTHING has printed yet — tells a fetch/start that never
+        # got off the ground apart from a real authentication failure (see
+        # `_terminal_login_no_output_message`'s own docstring).
+        self._terminal_login_got_output = False
         # A belt-and-suspenders check alongside `_stop_terminal_login`'s
         # signal-disconnect: Qt does not retract an already-QUEUED cross-
         # thread signal delivery just because `disconnect()` ran before it
@@ -2320,16 +2428,46 @@ class AgentPanel(QtWidgets.QWidget):
         worker = TerminalLoginWorker(self._agent_id, ta, cwd=scene.hip_dir(), parent=self)
         worker.line_received.connect(self._on_terminal_login_line)
         worker.url_found.connect(self._on_terminal_login_url)
+        worker.input_requested.connect(self._on_terminal_login_input_requested)
         worker.exited.connect(self._on_terminal_login_exited)
         worker.failed.connect(self._on_terminal_login_failed)
         self._terminal_login_worker = worker
         worker.start()
 
+        # Informational only — never kills anything (unlike `authenticate`,
+        # this process is genuinely ours to poll, not to time out). npx's
+        # own fetch happens BEFORE the CLI prints a byte (§14: 7 TCP
+        # connections first), and on a connection that needs a proxy but
+        # doesn't have a working one, that fetch can hang for a very long
+        # time rather than fail cleanly (measured on the owner's own
+        # machine: ~21KB of 48KB in 60s direct, half a second through the
+        # proxy) — silence that long looks exactly like a dead screen.
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda aid=self._agent_id: self._on_terminal_login_slow(aid))
+        timer.start(15000)
+        self._terminal_login_slow_timer = timer
+
     def _on_terminal_login_line(self, line: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:
             return  # stale — see `_start_terminal_login`'s own comment
+        self._terminal_login_got_output = True
+        if self._terminal_login_slow_timer is not None:
+            self._terminal_login_slow_timer.stop()
+            self._terminal_login_slow_timer = None
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_pending_detail(line)
+
+    def _on_terminal_login_slow(self, agent_id: str) -> None:
+        self._terminal_login_slow_timer = None
+        if agent_id != self._agent_id or self._terminal_login_worker is None:
+            return
+        if self._terminal_login_got_output:
+            return  # something arrived in the meantime — nothing to say
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_pending_detail(
+                "Still working — this can take a while over a slow connection."
+            )
 
     def _on_terminal_login_url(self, url: str, code: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:
@@ -2339,15 +2477,62 @@ class AgentPanel(QtWidgets.QWidget):
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_terminal_login_link(url, code)
 
+    def _on_terminal_login_input_requested(self) -> None:
+        """The child printed its own input prompt (Claude's `setup-token`,
+        docs/facts/acp-sdk.md §14: "Paste code here if prompted >") —
+        detected from ITS output, never from a timer."""
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_terminal_login_awaiting_input(True)
+
+    def _on_terminal_login_input_submitted(self, text: str) -> None:
+        """The artist pasted the code and submitted it — write it back to
+        the child's stdin, the one thing Claude's `setup-token` needs to
+        finish (§14). Not evidence of success: same as everywhere else in
+        this flow, only a completed turn proves that."""
+        worker = self._terminal_login_worker
+        if worker is None or self._terminal_login_agent_id != self._agent_id:
+            return
+        worker.send_line(text)
+        self._note("Code sent — waiting for the agent to finish.")
+
     def _terminal_login_fallback_message(self) -> str:
         """"No line → fall back to showing the command. Never a blank
         screen" — the format `_URL_RE` looks for was measured exactly once
         (docs/facts/acp-sdk.md §14), with no contract that it stays that
         way, so a run that never matches it is an expected outcome to
-        handle, not a bug to fix by tightening the regex."""
+        handle, not a bug to fix by tightening the regex. Only used once
+        the child has printed SOMETHING — see `_terminal_login_no_output_
+        message` for the other case."""
         return (
             "This didn't produce a recognisable sign-in link. Run it "
             f"yourself in a terminal:\n    {self._terminal_login_command}"
+        )
+
+    def _terminal_login_no_output_message(self) -> str:
+        """Nothing came out of the child AT ALL before it ended.
+
+        Reported as the single most confusing failure mode the panel has:
+        before the CLI prints a byte, `npx` does its own fetch over the
+        network (measured: seven TCP connections open first, docs/facts/
+        acp-sdk.md §14) — a proxy that's wrong, down, or simply not
+        configured on a machine that needs one kills the whole attempt
+        before any URL could ever exist, and from here that looks
+        IDENTICAL to an authentication failure unless said explicitly.
+        Names the proxy actually in use (sanitised — never the password)
+        so the artist can tell at a glance whether Settings matches what
+        they expect.
+        """
+        from .. import proxy as proxy_module
+
+        address = proxy_module.effective_proxy(self._settings)
+        proxy_text = proxy_module.sanitize(address) if address else "none configured"
+        return (
+            "Nothing came back at all — that usually means it couldn't "
+            f"reach the network to start. Proxy currently in use: "
+            f"{proxy_text}. Check Network in Settings, or run the "
+            f"command yourself in a terminal:\n    {self._terminal_login_command}"
         )
 
     def _on_terminal_login_exited(self, exit_code: int) -> None:
@@ -2373,10 +2558,18 @@ class AgentPanel(QtWidgets.QWidget):
             return
         self._terminal_login_worker = None
         self._auth_pending = False
+        if self._terminal_login_slow_timer is not None:
+            self._terminal_login_slow_timer.stop()
+            self._terminal_login_slow_timer = None
         if self._pages.currentIndex() != self.PAGE_AUTH:
             return
+        self._auth_view.set_terminal_login_awaiting_input(False)
         if not self._terminal_login_url_shown:
-            message = self._terminal_login_fallback_message()
+            message = (
+                self._terminal_login_fallback_message()
+                if self._terminal_login_got_output
+                else self._terminal_login_no_output_message()
+            )
             self._note(message)
             self._auth_view.set_pending(message)
             return
@@ -2393,12 +2586,20 @@ class AgentPanel(QtWidgets.QWidget):
             return
         self._terminal_login_worker = None
         self._auth_pending = False
+        if self._terminal_login_slow_timer is not None:
+            self._terminal_login_slow_timer.stop()
+            self._terminal_login_slow_timer = None
         if self._pages.currentIndex() != self.PAGE_AUTH:
             self._note(f"Terminal login failed: {message}")
             return
         self._auth_view.show_error(message, self._last_auth_method)
         if not self._terminal_login_url_shown:
-            self._note(self._terminal_login_fallback_message())
+            fallback = (
+                self._terminal_login_fallback_message()
+                if self._terminal_login_got_output
+                else self._terminal_login_no_output_message()
+            )
+            self._note(fallback)
 
     def _stop_terminal_login(self) -> None:
         """Ends whatever login was in progress in the spawned process —
@@ -2422,12 +2623,16 @@ class AgentPanel(QtWidgets.QWidget):
         able to reach these handlers again, no matter when its thread
         actually winds down.
         """
+        if self._terminal_login_slow_timer is not None:
+            self._terminal_login_slow_timer.stop()
+            self._terminal_login_slow_timer = None
         worker = self._terminal_login_worker
         if worker is None:
             return
         for signal, slot in (
             (worker.line_received, self._on_terminal_login_line),
             (worker.url_found, self._on_terminal_login_url),
+            (worker.input_requested, self._on_terminal_login_input_requested),
             (worker.exited, self._on_terminal_login_exited),
             (worker.failed, self._on_terminal_login_failed),
         ):

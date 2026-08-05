@@ -70,7 +70,17 @@ def test_set_methods_replaces_previous_buttons(qapp):
 
 
 def test_no_own_fields_beyond_what_agent_sent(qapp):
-    """No login/password fields of our own — only what authMethods carried."""
+    """No login/password fields of our own — only what authMethods carried.
+
+    One narrow, deliberate exception: `_terminal_input_edit` exists in the
+    tree but starts hidden — it isn't a login/password field the panel
+    invented, it relays one line of text back to a process the panel
+    itself already spawned (Claude's `setup-token`, docs/facts/acp-sdk.md
+    §14), and it only ever appears once that specific process asks for it
+    (`AuthView.set_terminal_login_awaiting_input`).
+    """
     view = AuthView()
     view.set_methods([AuthMethod(id="a", name="A")], can_logout=False)
-    assert view.findChildren(QtWidgets.QLineEdit) == []
+    edits = view.findChildren(QtWidgets.QLineEdit)
+    assert edits == [view._terminal_input_edit]
+    assert edits[0].isHidden()

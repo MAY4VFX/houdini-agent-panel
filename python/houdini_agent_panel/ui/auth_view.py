@@ -41,6 +41,12 @@ class AuthView(QtWidgets.QWidget):
     #: wants the method list back — see `set_pending`'s docstring for why
     #: this can't actually cancel anything on the protocol side.
     cancel_pending = Signal()
+    #: One line submitted back to a spawned terminal-auth process that's
+    #: actually waiting for it — Claude's `setup-token`, which blocks at
+    #: "Paste code here if prompted >" (docs/facts/acp-sdk.md §14). Only
+    #: ever emitted while `set_terminal_login_awaiting_input(True)` is
+    #: showing the field this comes from.
+    terminal_login_input_submitted = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -120,6 +126,24 @@ class AuthView(QtWidgets.QWidget):
         self._cancel_pending_row.addStretch(1)
         self._cancel_pending_row.addWidget(self._cancel_pending_button)
 
+        # Shown only once the spawned terminal-auth process is actually
+        # waiting for one line back (Claude's `setup-token`, docs/facts/
+        # acp-sdk.md §14) — `AgentPanel` shows this from the child's OWN
+        # output ("Paste code here"), never from a timer, so it never
+        # appears for kimi (which polls, it never blocks on stdin).
+        self._terminal_input_edit = QtWidgets.QLineEdit()
+        self._terminal_input_edit.setPlaceholderText("Paste the code from your browser")
+        self._terminal_input_edit.setVisible(False)
+        self._terminal_input_edit.returnPressed.connect(self._on_terminal_input_submit)
+        self._terminal_input_button = QtWidgets.QPushButton("Continue")
+        self._terminal_input_button.setVisible(False)
+        self._terminal_input_button.clicked.connect(self._on_terminal_input_submit)
+        self._terminal_input_row = QtWidgets.QHBoxLayout()
+        self._terminal_input_row.setContentsMargins(0, 0, 0, 0)
+        self._terminal_input_row.setSpacing(6)
+        self._terminal_input_row.addWidget(self._terminal_input_edit, 1)
+        self._terminal_input_row.addWidget(self._terminal_input_button)
+
         self.setStyleSheet(
             'QPushButton[signInFailed="true"] {'
             " color: palette(disabled, text);"
@@ -139,6 +163,7 @@ class AuthView(QtWidgets.QWidget):
         rail_layout.addWidget(self._error_label)
         rail_layout.addWidget(self._pending_label)
         rail_layout.addWidget(self._pending_detail_label)
+        rail_layout.addLayout(self._terminal_input_row)
         rail_layout.addLayout(self._cancel_pending_row)
         rail_layout.addLayout(self._methods_layout)
         # Sign out belongs with the choices, not pinned to the floor. The
@@ -289,6 +314,17 @@ class AuthView(QtWidgets.QWidget):
             button.setEnabled(False)
         self._logout_button.setEnabled(False)
 
+    def set_terminal_login_awaiting_input(self, awaiting: bool) -> None:
+        """The spawned process just printed its own input prompt (Claude's
+        `setup-token`, §14) — show the one-line field, or hide it again
+        once it's been answered or the attempt ends."""
+        self._terminal_input_edit.setVisible(awaiting)
+        self._terminal_input_button.setVisible(awaiting)
+        if awaiting:
+            self._terminal_input_edit.setFocus()
+        else:
+            self._terminal_input_edit.clear()
+
     def clear_pending(self) -> None:
         self._pending_label.setVisible(False)
         self._pending_label.setTextFormat(QtCore.Qt.PlainText)
@@ -296,6 +332,7 @@ class AuthView(QtWidgets.QWidget):
         self._pending_detail_label.clear()
         self._pending_detail_label.setVisible(False)
         self._cancel_pending_button.setVisible(False)
+        self.set_terminal_login_awaiting_input(False)
         for button in self._buttons.values():
             button.setEnabled(True)
         self._logout_button.setEnabled(True)
@@ -303,6 +340,13 @@ class AuthView(QtWidgets.QWidget):
     def _on_cancel_pending(self) -> None:
         self.clear_pending()
         self.cancel_pending.emit()
+
+    def _on_terminal_input_submit(self) -> None:
+        text = self._terminal_input_edit.text().strip()
+        if not text:
+            return
+        self.terminal_login_input_submitted.emit(text)
+        self.set_terminal_login_awaiting_input(False)
 
 
 __all__ = ["AuthView"]

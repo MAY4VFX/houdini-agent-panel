@@ -24,8 +24,10 @@ def _fake_terminal_worker(stopped: list) -> SimpleNamespace:
     necessary)."""
     return SimpleNamespace(
         stop=lambda: stopped.append(True),
+        wait=lambda *_a: None,
         line_received=SimpleNamespace(disconnect=lambda *_a: None),
         url_found=SimpleNamespace(disconnect=lambda *_a: None),
+        input_requested=SimpleNamespace(disconnect=lambda *_a: None),
         exited=SimpleNamespace(disconnect=lambda *_a: None),
         failed=SimpleNamespace(disconnect=lambda *_a: None),
     )
@@ -760,6 +762,7 @@ def test_stale_terminal_login_worker_cannot_paint_over_a_new_agents_screen(qapp)
     worker = TerminalLoginWorker("kimi", ta, cwd="/tmp")
     worker.line_received.connect(widget._on_terminal_login_line)
     worker.url_found.connect(widget._on_terminal_login_url)
+    worker.input_requested.connect(widget._on_terminal_login_input_requested)
     worker.exited.connect(widget._on_terminal_login_exited)
     worker.failed.connect(widget._on_terminal_login_failed)
     widget._terminal_login_worker = worker
@@ -827,12 +830,13 @@ def test_an_ordinary_methods_success_still_says_signed_in(qapp, monkeypatch):
     widget.shutdown()
 
 
-def test_claude_agents_no_methods_screen_shows_the_real_instructions(qapp):
+def test_claude_agents_no_methods_screen_offers_a_real_spawnable_sign_in(qapp):
     """Reported for real: Claude Agent's Settings row had "Sign in…", and
     clicking it did nothing — zero `authMethods` used to mean the panel
-    gave up. It still has a real way in (`claude setup-token` /
-    `ANTHROPIC_API_KEY`, docs/facts/acp-sdk.md §9/§11) — the sign-in
-    screen has to say so, not just report that there is nothing to show.
+    gave up. `claude setup-token` is measured buildable (docs/facts/acp-
+    sdk.md §14): the panel's own built-in recipe offers it as a real
+    button, not just a sentence to copy — ANTHROPIC_API_KEY is still
+    named as the simpler alternative, in the button's own description.
     """
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
@@ -843,9 +847,55 @@ def test_claude_agents_no_methods_screen_shows_the_real_instructions(qapp):
     widget._offer_sign_in()
 
     assert widget._pages.currentIndex() == widget.PAGE_AUTH
-    text = widget._auth_view._empty_label.text()
-    assert "claude setup-token" in text
-    assert "ANTHROPIC_API_KEY" in text
+    assert "claude-setup-token" in widget._auth_view._buttons
+    button = widget._auth_view._buttons["claude-setup-token"]
+    assert button.text() == "Sign in with browser"
+    assert "ANTHROPIC_API_KEY" in button.toolTip()
+    widget.shutdown()
+
+
+def test_clicking_claudes_built_in_sign_in_spawns_setup_token(qapp, monkeypatch):
+    """Confirms the button from the test above actually routes to a spawn,
+    not `authenticate()` — claude-acp has no such method on the wire at
+    all, so calling `authenticate("claude-setup-token")` would be sending
+    the agent an id it never advertised."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+    authenticated: list[str] = []
+    monkeypatch.setattr(client, "authenticate", lambda mid: authenticated.append(mid))
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+
+    assert authenticated == []
+    assert widget._terminal_login_worker is not None
+    assert "ANTHROPIC_API_KEY" in widget._auth_view._pending_label.text()
+    widget.shutdown()
+
+
+def test_claudes_built_in_recipe_prefers_claude_on_path(qapp, monkeypatch):
+    """§14: prefer a `claude` already on PATH over `npx --yes` — same CLI,
+    but it skips npx's own fetch entirely, the slowest and least reliable
+    part of this on a bad connection."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None)
+    method = widget._builtin_terminal_auth_method("claude-acp")
+    assert method.terminal_auth.command == "/usr/local/bin/claude"
+    assert method.terminal_auth.args == ["setup-token"]
+
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+    method = widget._builtin_terminal_auth_method("claude-acp")
+    assert method.terminal_auth.command == "npx"
+    assert method.terminal_auth.args == ["--yes", "@anthropic-ai/claude-code", "setup-token"]
     widget.shutdown()
 
 
@@ -920,4 +970,81 @@ def test_terminal_login_handlers_ignore_a_mismatched_agent_id(qapp):
     )
 
     assert "STALE" not in widget._auth_view._pending_label.text()
+    widget.shutdown()
+
+
+def test_terminal_login_input_requested_shows_the_field(qapp):
+    """Claude's `setup-token` blocks at an actual input prompt (docs/facts/
+    acp-sdk.md §14) — the field only appears once the CHILD's own output
+    says so, never from a timer."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_agent_id = widget._agent_id
+
+    widget._on_terminal_login_input_requested()
+
+    assert not widget._auth_view._terminal_input_edit.isHidden()
+    widget.shutdown()
+
+
+def test_submitting_terminal_login_input_sends_it_to_the_worker(qapp):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    sent: list[str] = []
+    worker = _fake_terminal_worker([])
+    worker.send_line = sent.append
+    widget._terminal_login_worker = worker
+    widget._terminal_login_agent_id = widget._agent_id
+
+    widget._on_terminal_login_input_submitted("MY-CODE")
+
+    assert sent == ["MY-CODE"]
+    widget.shutdown()
+
+
+def test_terminal_login_no_output_at_all_names_the_configured_proxy(qapp):
+    """Reported as the single most confusing failure mode: a fetch that
+    never gets off the ground (proxy down, wrong, or missing on a machine
+    that needs one, docs/facts/acp-sdk.md §14) looks identical to an
+    authentication failure unless the panel says which one this was."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    current = settings_mod.load()
+    current.proxy_url = "http://proxy.studio.local:8080"
+    settings_mod.save(current)
+    widget._settings = current
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_url_shown = False
+    widget._terminal_login_got_output = False
+    widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
+
+    widget._on_terminal_login_exited(1)
+
+    text = widget._auth_view._pending_label.text()
+    assert "proxy.studio.local" in text
+    assert "reach the network" in text
+    widget.shutdown()
+
+
+def test_terminal_login_with_output_reads_as_a_login_failure_not_a_proxy_one(qapp):
+    """The other half of the same distinction: SOME output arrived, so
+    this is not "couldn't even start" — the raw-command fallback applies
+    instead, with no mention of a proxy that was never the problem."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_url_shown = False
+    widget._terminal_login_got_output = True
+    widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
+
+    widget._on_terminal_login_exited(1)
+
+    text = widget._auth_view._pending_label.text()
+    assert "proxy" not in text.lower()
+    assert "npx --yes @anthropic-ai/claude-code setup-token" in text
     widget.shutdown()
