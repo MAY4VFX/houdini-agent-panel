@@ -378,3 +378,54 @@ def test_custom_agent_add_and_remove(qapp):
     current = settings_module.load()
     assert current.custom_agents == []
     assert changed == [True, True]
+
+
+def test_shutdown_releases_a_still_running_install_worker(qapp, monkeypatch):
+    """A `_InstallWorker` is parented to `AgentsView` (`_install`,
+    `parent=self`) — if this whole widget is torn down while a download
+    is still in flight, that used to be exactly the crash docs/facts/
+    houdini.md §14 describes: a `QThread` still running when its parent
+    is destroyed is `qFatal()`/`SIGABRT`, not a warning. `shutdown()` has
+    to actually release it, not just hope the download already finished.
+    """
+    import threading
+
+    gate = threading.Event()
+
+    def _blocking_install(entry, progress, fetch):
+        gate.wait()
+
+    monkeypatch.setattr("houdini_agent_panel.runtime.install_agent", _blocking_install)
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_layout.itemAt(0).widget()
+    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Install")
+    install_button.click()
+
+    _wait_until(lambda: bool(view._threads))
+    worker = view._threads[0]
+    assert worker.isRunning()
+
+    view.shutdown()
+
+    assert worker.parent() is None, "still a Qt child of `view` would crash when it's destroyed"
+    assert view._threads == []
+
+    def _finished_or_gone() -> bool:
+        # `release()`'s own `deleteLater()` (fired once `finished` proved
+        # the OS thread actually joined) can beat this poll to the C++
+        # object entirely — that is success, not something to catch.
+        try:
+            return not worker.isRunning()
+        except RuntimeError:
+            return True
+
+    gate.set()
+    _wait_until(_finished_or_gone)

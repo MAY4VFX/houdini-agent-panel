@@ -710,5 +710,14 @@ class SettingsView(QtWidgets.QWidget):
         if clipboard is not None:
             clipboard.setText(text)
 
+    def shutdown(self) -> None:
+        """Forwarded to the embedded `AgentsView` — see its own `shutdown`.
+        Called from `AgentPanel.shutdown()`: a `_InstallWorker` still
+        running when this whole widget tree comes down is exactly the
+        same hazard as this panel's own workers (docs/facts/houdini.md
+        §14), just one screen further in.
+        """
+        self._agents_view.shutdown()
+
 
 __all__ = ["SettingsView"]

@@ -30,7 +30,7 @@ from .. import registry, runtime
 from ..updates import is_newer
 from .. import settings as settings_module
 from .qt import QtCore, QtWidgets, Signal
-from .worker import Worker
+from .worker import Worker, release
 
 if TYPE_CHECKING:
     from ..network import Fetcher
@@ -531,6 +531,24 @@ class AgentsView(QtWidgets.QWidget):
         worker.wait()
         if worker in self._threads:
             self._threads.remove(worker)
+
+    def shutdown(self) -> None:
+        """Release every install/update thread still running — called from
+        `SettingsView.shutdown()`/`AgentPanel.shutdown()`.
+
+        A `_InstallWorker` is parented to THIS widget (`_install`,
+        `parent=self`), so a download still in flight when this widget is
+        torn down is the exact same hazard as any of `AgentPanel`'s own
+        workers: a `QThread` still running when its parent is destroyed
+        is `qFatal()`/`SIGABRT`, not a warning (docs/facts/houdini.md
+        §14). `release()` reparents each one out and keeps it alive
+        elsewhere until it actually finishes; `_forget_thread` still runs
+        afterward from `finished` exactly as before, it just has nothing
+        left to remove from `self._threads` by then.
+        """
+        for worker in list(self._threads):
+            release(worker)
+        self._threads = []
 
     def _on_install_failed(self, row: "_AgentRow", message: str, agent_id: str) -> None:
         self._installing.discard(agent_id)

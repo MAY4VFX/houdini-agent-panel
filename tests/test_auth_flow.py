@@ -24,7 +24,12 @@ def _fake_terminal_worker(stopped: list) -> SimpleNamespace:
     necessary)."""
     return SimpleNamespace(
         stop=lambda: stopped.append(True),
-        wait=lambda *_a: None,
+        # `release()` calls these too now (`ui/worker.py`) — `wait` returns
+        # True (as if the thread had already finished) so it takes the
+        # early-return path and never touches `setParent`/`finished`,
+        # which this bare stand-in doesn't have.
+        requestInterruption=lambda: None,
+        wait=lambda *_a: True,
         line_received=SimpleNamespace(disconnect=lambda *_a: None),
         url_found=SimpleNamespace(disconnect=lambda *_a: None),
         input_requested=SimpleNamespace(disconnect=lambda *_a: None),

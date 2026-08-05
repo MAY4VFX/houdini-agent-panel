@@ -320,6 +320,25 @@ def test_shutdown_is_idempotent(qapp):
     widget.shutdown()
 
 
+def test_shutdown_releases_the_settings_and_composers_own_workers(qapp, monkeypatch):
+    """`AgentsView`'s install threads and `Composer`'s voice-upload thread
+    are parented several widgets deep, not directly to `AgentPanel` — the
+    exact same crash docs/facts/houdini.md §14 describes applies to them
+    just as much (a `QThread` still running when ITS parent is destroyed
+    is `qFatal()`, regardless of how many widgets deep that parent is),
+    so `shutdown()` has to reach them too, not only its own four workers.
+    """
+    widget = _make_panel(qapp)
+    calls: list[str] = []
+    monkeypatch.setattr(widget._settings_view, "shutdown", lambda: calls.append("settings"))
+    monkeypatch.setattr(widget._composer, "shutdown", lambda: calls.append("composer"))
+
+    widget.shutdown()
+
+    assert "settings" in calls
+    assert "composer" in calls
+
+
 def test_permission_answer_reaches_client_and_resolves_in_transcript(qapp, monkeypatch):
     widget = _make_panel(qapp)
     widget.resize(900, 700)

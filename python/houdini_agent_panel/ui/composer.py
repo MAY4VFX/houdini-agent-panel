@@ -737,6 +737,11 @@ class Composer(QtWidgets.QWidget):
         supports_audio = info is not None and info.supports_audio
         self._voice_button.configure(supports_audio=supports_audio, whisper_endpoint=whisper)
 
+    def shutdown(self) -> None:
+        """Forwarded to `VoiceButton` — see its own `shutdown`. Called from
+        `AgentPanel.shutdown()`."""
+        self._voice_button.shutdown()
+
     def set_modes(self, modes: list["SessionMode"], current_id: str | None) -> None:
         """Facade over `mode_chip.set_modes` — the panel feeds session modes
         here instead of reaching into the nested widget (architecture.md §10:

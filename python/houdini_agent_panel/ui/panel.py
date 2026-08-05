@@ -41,6 +41,7 @@ from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
 from .qt import QtCore, QtWidgets, Signal
 from .transcript import TranscriptView
+from . import worker as worker_module
 from .worker import Worker
 
 #: One connection per agent id, not one for the whole Houdini process. Two
@@ -2622,6 +2623,14 @@ class AgentPanel(QtWidgets.QWidget):
         `_terminal_login_worker` that's been told to stop must never be
         able to reach these handlers again, no matter when its thread
         actually winds down.
+
+        `worker_module.release()` after `stop()`, not a bare drop of the
+        reference: `stop()` only sends the child a terminate signal, it
+        does not wait for the OS thread to actually join — and this
+        worker is parented to THIS widget, so if it's still running the
+        moment this widget itself is destroyed (a switch immediately
+        followed by closing the panel, say), that is `qFatal()`/`SIGABRT`,
+        not a leak (docs/facts/houdini.md §14).
         """
         if self._terminal_login_slow_timer is not None:
             self._terminal_login_slow_timer.stop()
@@ -2639,6 +2648,7 @@ class AgentPanel(QtWidgets.QWidget):
             with contextlib.suppress(RuntimeError, TypeError):
                 signal.disconnect(slot)
         worker.stop()
+        worker_module.release(worker)
         self._terminal_login_worker = None
         self._auth_pending = False
 
@@ -3113,12 +3123,23 @@ class AgentPanel(QtWidgets.QWidget):
         # that is "RuntimeError: The SignalInstance object was already
         # deleted". Disconnecting first is what makes the wait a courtesy
         # rather than a race we have to win.
+        #
+        # `worker_module.release()`, not a bare `.wait()` then drop the
+        # reference: a worker still running after its bounded wait used to
+        # stay a Qt CHILD of this widget regardless — Python letting go of
+        # its own reference does nothing to that C++ parent-child link —
+        # and a `QThread` still `isRunning()` when the widget that parented
+        # it is destroyed is not a warning, it is `qFatal()`/`SIGABRT`, the
+        # whole process down (docs/facts/houdini.md §14, reproduced
+        # directly on both Houdini hythons and this project's own PySide
+        # venv). `release()` reparents it out and keeps it alive elsewhere
+        # until it actually finishes, so THIS widget's own destruction
+        # can never be the thing that kills the process.
         worker = self._refresh_worker
         if worker is not None:
             with contextlib.suppress(RuntimeError, TypeError):
                 worker.done.disconnect(self._on_refresh_done)
-            worker.requestInterruption()
-            worker.wait(2000)
+            worker_module.release(worker)
             self._refresh_worker = None
 
         launch = self._launch_worker
@@ -3130,19 +3151,30 @@ class AgentPanel(QtWidgets.QWidget):
             ):
                 with contextlib.suppress(RuntimeError, TypeError):
                     signal.disconnect(slot)
-            launch.wait(3000)
+            worker_module.release(launch)
             self._launch_worker = None
+
+        sweep = getattr(self, "_orphan_sweep_worker", None)
+        if sweep is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                sweep.done.disconnect(self._on_orphans_swept)
+            worker_module.release(sweep)
+            self._orphan_sweep_worker = None
 
         # Same reasoning as `_switch_agent_process`/`_show_page`: this
         # process polls indefinitely on its own (docs/facts/acp-sdk.md
         # §14) — the panel closing must not leave it running.
-        # `_stop_terminal_login` disconnects its signals before asking it
-        # to stop; `.wait()` here just gives the thread a real chance to
-        # actually join before this widget starts getting torn down.
-        terminal_login = self._terminal_login_worker
+        # `_stop_terminal_login` itself now calls `release()` (its own
+        # docstring explains why that moved there instead of staying a
+        # separate step only `shutdown()` performed).
         self._stop_terminal_login()
-        if terminal_login is not None:
-            terminal_login.wait(2000)
+
+        # `AgentsView`'s own install/update threads, and `Composer`'s own
+        # voice-upload thread — same hazard, same fix, different widgets
+        # (docs/facts/houdini.md §14 again: EVERY `Worker` this panel owns
+        # needs this, not only the four constructed directly in this file).
+        self._settings_view.shutdown()
+        self._composer.shutdown()
 
         for signal, slot in (
             *getattr(self, "_client_wiring", ()),

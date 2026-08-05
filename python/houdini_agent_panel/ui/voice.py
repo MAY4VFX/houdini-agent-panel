@@ -307,5 +307,21 @@ class VoiceButton(QtWidgets.QToolButton):
         if text:
             self.transcribed_text.emit(text)
 
+    def shutdown(self) -> None:
+        """Release the upload thread if one is still running — called
+        from `Composer.shutdown()`.
+
+        `_upload_thread` is parented to THIS widget, so a slow whisper
+        upload still in flight when the panel closes is the same hazard
+        as any other worker here: a `QThread` still running when its
+        parent is destroyed is `qFatal()`/`SIGABRT`, not a warning
+        (docs/facts/houdini.md §14). See `ui/worker.py::release`'s own
+        docstring for why a bare `wait()` isn't enough.
+        """
+        from .worker import release
+
+        release(self._upload_thread)
+        self._upload_thread = None
+
 
 __all__ = ["VoiceButton", "RecordBackend", "Uploader", "build_default_backend", "default_uploader"]
