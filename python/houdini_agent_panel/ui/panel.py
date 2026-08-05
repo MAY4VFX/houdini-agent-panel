@@ -937,13 +937,38 @@ class AgentPanel(QtWidgets.QWidget):
         reason: the screen the protocol suggests is a dead end here.
         """
         label = self._pending_agent_label or getattr(info, "name", "") or "This agent"
-        self._note(
-            f"{label} isn't signed in, and offers no sign-in method to the "
-            f"panel — it uses its own /login command instead. It's ready in "
-            f"the input box below."
-        )
-        self._composer.set_text("/login")
         self._show_page(self.PAGE_TRANSCRIPT)
+        if self._has_login_command():
+            self._note(
+                f"{label} isn't signed in, and offers no sign-in method to "
+                f"the panel — it has its own /login command instead. It's "
+                f"ready in the input box below."
+            )
+            self._composer.set_text("/login")
+            return
+        # No sign-in method AND no /login. Telling them to type it anyway is
+        # what this used to do, and the agent answered "/login isn't
+        # available in this environment" — which was measured beforehand and
+        # ignored: `claude-acp` reports an EMPTY command list.
+        self._note(
+            f"{label} isn't signed in, and it has no sign-in the panel can "
+            f"run: no auth method, no /login command. Sign in to its own CLI "
+            f"in a terminal (for Claude Agent that is `claude`, then /login "
+            f"inside it), or export its API key in your shell profile — the "
+            f"panel passes your login shell's environment to the agent. Then "
+            f"restart it from Settings."
+        )
+
+    def _has_login_command(self) -> bool:
+        """Does the open session actually offer a login command?
+
+        Asked of the session, never assumed. `availableCommands` is the only
+        place the answer exists, and it differs per agent: measured on a
+        clean machine, `claude-acp` returns an empty list.
+        """
+        current = self._current_session()
+        commands = (getattr(current, "available_commands", None) or []) if current else []
+        return any(getattr(c, "name", "") in ("login", "auth") for c in commands)
 
     def _on_session_started(self, session_id: str, state: Any) -> None:
         # There is a session: the agent is up, its tools are loaded, and the

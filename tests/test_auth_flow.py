@@ -188,8 +188,10 @@ def test_an_agent_with_no_methods_is_sent_to_its_login_command(qapp, monkeypatch
     assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT, (
         "sent to a sign-in screen with nothing on it"
     )
-    assert widget._composer._text_edit.toPlainText() == "/login"
-    assert notes and "/login" in notes[-1]
+    # NOT prefilled with /login any more: this agent answered "/login isn't
+    # available in this environment" when it was. What must be there is a
+    # route out, named.
+    assert notes and ("terminal" in notes[-1] or "/login" in notes[-1])
     widget.shutdown()
 
 
@@ -307,4 +309,37 @@ def test_each_sign_in_method_says_what_it_actually_does(qapp, monkeypatch):
 
     widget._on_auth_method_chosen("api-key")
     assert "CODEX_API_KEY" in notes[-1], "the variable it actually needs went unnamed"
+    widget.shutdown()
+
+
+def test_login_is_only_suggested_when_the_agent_has_it(qapp, monkeypatch):
+    """The panel told a signed-out Claude Agent to type `/login`, and the
+    agent answered "/login isn't available in this environment". The
+    measurement that predicted it was already in hand and went unused:
+    `claude-acp` returns an EMPTY `availableCommands`.
+
+    So the question gets asked of the session instead of assumed."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel import sessions
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    state = sessions.SessionState("s1", "chat", "/tmp", 0.0)
+    widget._pool.add(state)
+    widget._current_session_id = "s1"
+    info = client_mod.AgentInfo(
+        name="claude", version="1.0", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=False, auth_methods=(),
+    )
+
+    widget._offer_login_command(info)
+
+    assert widget._composer._text_edit.toPlainText() != "/login", (
+        "still putting a command the agent does not have into the input"
+    )
+    assert "terminal" in notes[-1], "no route out was named at all"
     widget.shutdown()

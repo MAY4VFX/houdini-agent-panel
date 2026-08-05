@@ -873,11 +873,15 @@ Three consequences the UI depends on:
    of three open one while signed out. Anything drawn from "a session
    exists" is wrong for those two — this is how a never-configured Claude
    came to be shown a "Sign out" button.
-2. **`authMethods` empty does not mean "no login".** It means the login is
-   a slash command inside the session (`/login`), which is what Zed's own
-   documentation tells people to use. Sending the artist to a sign-in
-   screen there produces a page headed "Sign in" that reads "The agent
-   offered no sign-in methods" — a dead end.
+2. **`authMethods` empty does not mean "no login" — and does not mean
+   `/login` either.** This was written the second way first, from Zed's
+   documentation rather than from the agent, and `claude-acp` refuted it in
+   the panel: told to type `/login`, it answered "/login isn't available in
+   this environment". The measurement was already in the table above —
+   `claude-acp` returns an EMPTY `availableCommands` — and went unread.
+   Ask the session what it has; do not assume a command exists because
+   another agent has one. `claude-acp` expects credentials to already exist
+   on the machine (its own CLI's login, or an API key in the environment).
 3. **A completed turn is the one signal all three agree on.** None of them
    answers a prompt for an account that is not signed in. That is what the
    panel records, and it records it persistently, because otherwise the
