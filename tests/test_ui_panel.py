@@ -1827,3 +1827,36 @@ def test_a_new_chat_on_a_running_agent_does_not_cover_the_input(qapp, monkeypatc
     assert composer._boot_scrim.isHidden() is True
     assert composer._text_edit.isReadOnly() is False
     widget.shutdown()
+
+
+def test_a_stalled_new_session_gives_the_input_back(qapp, monkeypatch):
+    """Seen on the Linux machine: Codex connected, never answered
+    `session/new`, and the panel said so in the feed — while the progress
+    strip sat full at 4/4 and the input stayed blurred and unusable. The
+    artist could not even type the `/login` the message was suggesting."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id),
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="codex", version="1.1.9", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False, auth_methods=(),
+        ),
+        raising=False,
+    )
+    composer = widget._composer
+    composer.begin_boot("Codex")
+    assert composer._boot_scrim.isHidden() is False
+
+    widget._report_stalled_new_session(set())
+
+    assert composer._boot_scrim.isHidden() is True, "the input was left covered"
+    assert composer._text_edit.isReadOnly() is False, "the input was left read-only"
+    assert composer.boot_status().isHidden() is True, "the strip was left at 4/4 forever"
+    widget.shutdown()

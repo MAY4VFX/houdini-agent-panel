@@ -850,16 +850,10 @@ class Composer(QtWidgets.QWidget):
             surface_x, surface_y, width, self._surface.height()
         )
         self._boot_scrim.raise_()
-        # Centred on where the buddy stands, with the hole at its feet: the
-        # creature has to come out of the floor it already lives on, not out
-        # of some other spot that happens to be free.
-        buddy = self._buddy.geometry()
-        self._entrance.setGeometry(
-            buddy.center().x() - 60,
-            buddy.y() - 16,
-            120,
-            buddy.height() + 16 + BuddyEntrance._HOLE_H,
-        )
+        # Wrapped around the buddy's own rect, with the hole at its feet:
+        # the creature comes out of the floor it already lives on, and the
+        # animation ends exactly where the sprite sits.
+        self._entrance.setGeometry(self._entrance.geometry_for(self._buddy.geometry()))
         self._entrance.raise_()
 
     def boot_status(self) -> BootStatus:
@@ -913,7 +907,11 @@ class Composer(QtWidgets.QWidget):
         if not was_booting:
             return
         self.set_booting(False, show_buddy=False)
-        self._entrance.play(self._buddy.idle_pixmap())
+        # Geometry first: the entrance has to know where the sprite will
+        # land before it can land on it, and during a boot the buddy has
+        # been hidden, so nothing has re-laid it out.
+        self._entrance.setGeometry(self._entrance.geometry_for(self._buddy.geometry()))
+        self._entrance.play(self._buddy, self._buddy.geometry())
 
     def _on_entrance_finished(self) -> None:
         self._buddy.show()

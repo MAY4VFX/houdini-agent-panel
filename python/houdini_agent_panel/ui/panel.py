@@ -1353,6 +1353,13 @@ class AgentPanel(QtWidgets.QWidget):
     def _report_stalled_new_session(self, before: set) -> None:
         """Say what is actually wrong, which is usually "it isn't signed in".
 
+        Also ends the boot, whatever it says. The progress strip and the
+        cover over the input belong to a start that is still happening; a
+        `session/new` that never answered is not one. Seen for real on the
+        Linux machine: the panel reported the stall in the feed while the
+        strip sat full at 4/4 and the input stayed blurred and unusable, so
+        the artist could not even type the `/login` the message suggested.
+
         On a machine where the agent has never been configured, it connects
         happily, advertises NO auth methods at all, and then never answers
         `session/new` — measured on all six of them with an empty HOME. The
@@ -1366,6 +1373,7 @@ class AgentPanel(QtWidgets.QWidget):
         diagnosis we know is wrong — and put the command in the composer, so
         it costs a keystroke rather than knowing it exists.
         """
+        self._composer.cancel_boot()
         if self._closed:
             return
         if {state.session_id for state in self._pool.all()} - before:

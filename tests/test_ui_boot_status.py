@@ -195,46 +195,166 @@ def test_the_hole_opens_before_the_buddy_moves_and_closes_after(qapp):
 
 
 def test_reduced_motion_finishes_at_once_rather_than_never(qapp, monkeypatch):
-    """The caller shows the real buddy on `finished`. Skipping the animation
-    without emitting would leave the panel with no companion at all."""
-    from houdini_agent_panel.ui.qt import QtGui
-    from houdini_agent_panel.ui.thinking import BuddyEntrance
+    """The caller reveals the real buddy on `finished`. Skipping the
+    animation without emitting would leave the panel with no companion."""
+    from houdini_agent_panel.ui.qt import QtCore
+    from houdini_agent_panel.ui.thinking import BuddyEntrance, _BuddySprite
 
     monkeypatch.setenv("HOUDINI_AGENT_REDUCED_MOTION", "1")
     entrance = BuddyEntrance()
+    sprite = _BuddySprite()
     done: list[int] = []
     entrance.finished.connect(lambda: done.append(1))
 
-    entrance.play(QtGui.QPixmap(8, 8))
+    entrance.play(sprite, QtCore.QRect(0, 0, 54, 54))
 
     assert done == [1]
     assert entrance.isHidden() is True
 
 
-def test_an_empty_sprite_still_finishes(qapp):
-    """A missing image is not a reason to withhold the companion forever."""
-    from houdini_agent_panel.ui.qt import QtGui
+def test_nothing_to_draw_still_finishes(qapp):
+    """A missing sprite is not a reason to withhold the companion forever."""
+    from houdini_agent_panel.ui.qt import QtCore
     from houdini_agent_panel.ui.thinking import BuddyEntrance
 
     entrance = BuddyEntrance()
     done: list[int] = []
     entrance.finished.connect(lambda: done.append(1))
 
-    entrance.play(QtGui.QPixmap())
+    entrance.play(None, QtCore.QRect(0, 0, 54, 54))
 
     assert done == [1]
 
 
 def test_a_cancelled_boot_stops_the_entrance_without_pretending_it_ended(qapp):
-    from houdini_agent_panel.ui.qt import QtGui
-    from houdini_agent_panel.ui.thinking import BuddyEntrance
+    from houdini_agent_panel.ui.qt import QtCore
+    from houdini_agent_panel.ui.thinking import BuddyEntrance, _BuddySprite
 
     entrance = BuddyEntrance()
+    sprite = _BuddySprite()
     done: list[int] = []
     entrance.finished.connect(lambda: done.append(1))
-    entrance.play(QtGui.QPixmap(8, 8))
+    entrance.play(sprite, QtCore.QRect(0, 0, 54, 54))
 
     entrance.skip()
 
     assert done == [], "a cancelled boot announced a companion that never arrived"
     assert entrance.isHidden() is True
+    assert sprite._hold_clock is False, "the sprite was left ticking while hidden"
+
+
+# --- the join ---------------------------------------------------------------
+
+
+def test_the_animation_lands_exactly_where_the_sprite_sits(qapp):
+    """Reported from Houdini: opening a second tab made the buddy jump — it
+    ended up bigger and displaced. Three separate mismatches: the raw 64px
+    source pixmap drawn where `_BuddySprite` renders 54px, an invented
+    resting position, and a fixed idle frame against a sprite that was
+    elsewhere in its cadence.
+
+    At `t = 1` the drawn rect must equal the sprite's own rect, or the
+    handover is a jump rather than a cut.
+    """
+    from houdini_agent_panel.ui.qt import QtCore
+    from houdini_agent_panel.ui.thinking import BuddyEntrance, _BuddySprite
+
+    sprite = _BuddySprite()
+    entrance = BuddyEntrance()
+    target = QtCore.QRect(300, 120, 54, 54)
+    entrance.setGeometry(entrance.geometry_for(target))
+    entrance.play(sprite, target)
+
+    entrance._t = 1.0
+    hole, rise, scale = entrance._state()
+
+    assert scale == 1.0, f"it settled at {scale}x the sprite's size"
+    assert rise == 1.0
+    assert hole == 0.0
+    # The rect the paint code builds, recomputed here from the same numbers.
+    local = QtCore.QRect(
+        target.x() - entrance.x(), target.y() - entrance.y(), target.width(), target.height()
+    )
+    ground = local.bottom() + 1
+    top = ground - local.height() * scale
+    assert top == local.y(), "the buddy came to rest above or below its own place"
+
+
+def test_the_entrance_draws_the_sprites_live_frame_not_a_fixed_one(qapp):
+    """Otherwise the pose jumps at the handover, however good the geometry."""
+    from houdini_agent_panel.ui.thinking import _BuddySprite
+
+    sprite = _BuddySprite()
+    sprite.advance(0)
+    first = sprite.current_frame()
+    sprite.advance(10_000)
+    later = sprite.current_frame()
+
+    assert not first.isNull()
+    assert first.cacheKey() != later.cacheKey(), "current_frame() ignores the clock"
+
+
+def test_the_sprites_clock_keeps_running_while_the_entrance_draws_it(qapp):
+    """The sprite stops its timer when hidden — a mascot nobody can see has
+    no right to the artist's frame time. The one exception is while somebody
+    else is drawing it, or the pose freezes and the handover jumps a frame."""
+    from houdini_agent_panel.ui.thinking import _BuddySprite
+
+    sprite = _BuddySprite()
+    sprite.show()
+    sprite.hold_clock(True)
+    sprite.hide()
+
+    assert sprite._timer.isActive() is True
+
+    sprite.hold_clock(False)
+    assert sprite._timer.isActive() is False
+
+
+def test_the_last_frame_is_pixel_identical_to_the_sprite(qapp):
+    """The strongest form of "no jump" available: render the finished
+    animation and the real sprite over the same background and diff them.
+
+    This caught a half-pixel offset that no geometry assertion would have —
+    `QRect.center()` floors, so on a 54px sprite the drawn rect sat at
+    x-0.5 and the final frame resampled to something subtly different
+    across the buddy's lower half.
+    """
+    from houdini_agent_panel.ui.qt import QtCore, QtGui, QtWidgets
+    from houdini_agent_panel.ui.thinking import BuddyEntrance, _BuddySprite
+
+    host = QtWidgets.QWidget()
+    host.resize(160, 130)
+    host.setAutoFillBackground(True)
+    sprite = _BuddySprite(host)
+    sprite.setGeometry(53, 40, 54, 54)
+    entrance = BuddyEntrance(host)
+    entrance.setGeometry(entrance.geometry_for(sprite.geometry()))
+    host.show()
+    qapp.processEvents()
+    sprite.advance(0)  # freeze the pose, so only geometry can differ
+
+    at_rest = host.grab().toImage()
+
+    sprite.hide()
+    entrance._source = sprite
+    entrance._target = QtCore.QRect(
+        sprite.x() - entrance.x(), sprite.y() - entrance.y(), sprite.width(), sprite.height()
+    )
+    entrance.show()
+    entrance._t = 1.0
+    entrance.update()
+    qapp.processEvents()
+    last_frame = host.grab().toImage()
+
+    assert last_frame.size() == at_rest.size()
+    differing = [
+        (x, y)
+        for y in range(at_rest.height())
+        for x in range(at_rest.width())
+        if at_rest.pixel(x, y) != last_frame.pixel(x, y)
+    ]
+    assert differing == [], (
+        f"{len(differing)} pixels differ between the animation's last frame and the "
+        f"sprite it hands over to, first at {differing[0]}"
+    )
