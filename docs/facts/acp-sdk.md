@@ -918,3 +918,160 @@ the agent, one typed into a dialog would have nowhere to go.
 
 Not established: whether `claude-acp`, `gemini`, `grok` and `kimi` emit a URL
 their clients could open — only `codex-acp` was probed this way.
+
+---
+
+## 13. `gemini`, `grok` and `kimi` — the three agents left unmeasured in §11
+
+Measured on the same Linux machine, same method as §11-12
+(`scratchpad/loginprobe.py`, `scratchpad/oauthprobe.py`, `scratchpad/kimi_pty.py`),
+each agent launched with a throwaway `HOME`. This closes the "not
+established" note at the end of §11.
+
+| agent | `initialize.authMethods` | `session/new` |
+|---|---|---|
+| `gemini` (`@google/gemini-cli` 0.53.1, `--acp`) | `oauth-personal`, `gemini-api-key`, `vertex-ai`, `gateway` | **succeeds**, 0 available commands |
+| `grok-build` (`@xai-official/grok` 0.2.120, `agent stdio`) | `grok.com` | **fails**: `Authentication required` |
+| `kimi` 1.49.0 | `login` (see below — not a plain id) | not reached (authenticate never returns) |
+
+### `authenticate`, per method, exact text
+
+| agent | method | result |
+|---|---|---|
+| `gemini` | `oauth-personal` | **does not return** — `TimeoutError` at both 45s and 90s. Meanwhile stderr printed `Failed to authenticate with authorization code:invalid_grant` and `Failed to authenticate with user code. Retrying...` — it drives an OAuth *device-code* flow (a user code + polling), and the polling was failing/retrying throughout the probe window. |
+| `gemini` | `gemini-api-key` | returns immediately: `OK field_meta=None`. No validation happens at `authenticate` time — nothing was set in the environment for it to check. |
+| `gemini` | `vertex-ai` | same: immediate `OK field_meta=None`. |
+| `gemini` | `gateway` | same: immediate `OK field_meta=None`. |
+| `grok-build` | `grok.com` | **does not return** — `TimeoutError` at 45s (short probe) and 90s (longer probe, see below). |
+
+For `gemini`, a prompt of literally `/login` after `session/new` also timed
+out (60s, no reply, no error) — consistent with the account still being
+mid-OAuth-retry from the `authenticate` call moments before.
+
+### Does anything emit a URL? Does a browser open?
+
+**`gemini`**: no URL anywhere — none in stderr, none in any `session/update`
+(checked by regexing every chunk seen by the client and every stderr line).
+No browser-related process appeared in the process tree during the full 90s
+`oauth-personal` wait (`ps -ef` filtered for `firefox`/`chromium`/`google-chrome`/
+`xdg-open` found nothing, only the `npm exec @google/gemini-cli` node process
+itself) — inferred, from the absence of any such process, that gemini does
+not open a browser on this machine for `oauth-personal`. It only prints the
+device-code retry failures quoted above; a client would have to read those
+verbatim, since nothing structured (no code, no URL) travels over the wire.
+
+**`grok-build`**: no URL either — stdout/stderr from the ACP channel were
+completely empty (`stderr tail: []`) during the whole `authenticate(grok.com)`
+call. But the process tree told a different story than gemini's: 20s into the
+call,
+```
+node .../grok agent stdio
+ └─ grok agent stdio
+     └─ [firefox] <defunct>
+```
+— **grok does spawn a browser** (Firefox, at `~/.nix-profile/bin/firefox`,
+version 141.0.3, confirmed present on the machine) for `grok.com` auth. It
+went `<defunct>` (zombie, exited) within the same `ps` snapshot — the probe
+deliberately withheld `DISPLAY` from the agent's environment (same env
+allowlist as every other probe in this file), so Firefox had nowhere to
+open a window and died immediately. This is inferred from the env passed
+in, not observed on a screen: on a machine with a real `DISPLAY`, the same
+spawn would very likely produce a visible window instead of a zombie, but
+that wasn't tested. Either way, no URL crosses the ACP channel for grok —
+whatever page Firefox would have opened is a browser-side argument, invisible
+to the client.
+
+### `kimi`: what it's actually waiting for — and it isn't a TTY
+
+The pty hypothesis from §12 is **refuted**. `scratchpad/kimi_pty.py` gives
+`kimi acp`'s own stdin/stdout a real pty (`pty.openpty()`, local echo
+disabled, raw JSON-RPC hand-written over the master fd — the `acp` SDK's
+stream helpers assume plain pipes, so this probe talks the wire protocol
+directly). `authenticate(methodId="login")` still never returns — 60s with
+the pty attached, same as without one — and no new child process appears in
+`kimi`'s process tree in response to the call (only the `Kimi Code` worker
+that was already there from `initialize`). A pty on the ACP channel itself
+changes nothing.
+
+What actually explains the wait was sitting in the `initialize` response the
+whole time, verbatim (only truncated here for width):
+```json
+"authMethods": [{
+  "_meta": {
+    "terminal-auth": {
+      "command": "/home/may/.local/share/houdini-agent-panel/agents/kimi/1.49.0/kimi",
+      "args": ["login"],
+      "label": "Kimi Code Login",
+      "env": {},
+      "type": "terminal"
+    }
+  },
+  "description": "Run `kimi login` command in the terminal, then follow the instructions to finish login.",
+  "id": "login",
+  "name": "Login with Kimi account"
+}]
+```
+Kimi isn't asking the ACP stdio channel for anything at all. It's telling the
+client, in the one auth method it offers, to spawn a **second, independent
+process** — the same `kimi` binary, invoked with `login` instead of `acp` —
+attached to a real interactive terminal, outside the ACP JSON-RPC channel
+entirely, and let the human finish there.
+
+This is close to — but not quite — the protocol's own built-in shape for
+exactly this case: `acp.schema.AuthMethodTerminal`/`TerminalAuthMethod`
+(`schema.py:1177`, `:3867`) has `id`/`name`/`description` plus top-level
+`args`/`env` and a discriminator `type: "terminal"`, meant for precisely
+"run the agent binary again with these args for terminal auth." Kimi's
+payload carries the same information but nested one level down, inside a
+custom `_meta.terminal-auth` key, with no top-level `type` field on the auth
+method object itself. Consequence: `acp`'s typed `InitializeResponse.auth_methods`
+parses this entry as the fallback `AuthMethodAgent` (`schema.py:1221` — the
+variant with no `type` discriminator, so it's what pydantic reaches for when
+none of `EnvVarAuthMethod`/`TerminalAuthMethod` match) — `args`/`env`/`type`
+never surface as typed fields. A client has to know to open `field_meta`
+(`_meta`) on the auth method and look for a `terminal-auth` key by
+convention; there's nothing in the schema forcing that key's name or shape.
+
+### Consequences for the UI
+
+1. **Gemini and grok both hang on their OAuth method with no client-visible
+   progress, and neither can be helped by a client-drawn link** — gemini
+   because it never emits a URL (device-code retries only, in stderr text),
+   grok because whatever it would show lives inside a browser window it
+   spawns itself. The one thing a client CAN say for both is "opening a
+   browser / check your terminal for a code," not render a clickable link.
+2. **Grok is the second agent (after Codex, §12) confirmed to open a real
+   browser process for its OAuth method** — same shape as Codex's
+   `chat-gpt`: a `authenticate` call that blocks and a spawned browser, no
+   panel-side timeout allowed on it.
+3. **Kimi needs a capability the panel doesn't have yet: running a second,
+   separate, real interactive terminal for the agent binary, outside the ACP
+   connection.** This is not a variant of "wait longer" or "attach a pty" —
+   both were tried against the wrong channel. The actual fix has to open a
+   terminal (or terminal-emulator widget) running the exact `command`+`args`
+   from `_meta.terminal-auth`, which means the panel must read `field_meta`
+   on auth methods at all — today nothing in the codebase does.
+4. **Not every "terminal" auth method will look like kimi's.** Kimi doesn't
+   use the schema's own top-level `type: "terminal"` shape, it improvised a
+   `_meta` key. A client that only checks `method.type == "terminal"` will
+   silently miss kimi's method entirely and must special-case (or generically
+   scan `field_meta`) to catch it.
+
+### Not established
+
+- Whether gemini's `oauth-personal` or grok's `grok.com` succeed end-to-end
+  when a human actually completes the browser step — both probes ran
+  headless and unattended, by design (this is what "never configured"
+  means), so neither flow was carried to a real login.
+- Whether grok's Firefox spawn would show a real window given a `DISPLAY`
+  — inferred from the env passed to the agent (no `DISPLAY` key in the
+  allowlist) and the zombie process, not observed on a screen.
+- Whether `gemini-api-key`/`vertex-ai`/`gateway` do anything at real prompt
+  time when their expected env vars are actually absent — `authenticate`
+  itself returned OK instantly for all three without checking; the probe
+  didn't go on to prompt with each selected, so what backs the "OK" is
+  unmeasured.
+- Any agent besides Codex (client `create_terminal`, unrelated) actually
+  using the protocol's stock `TerminalAuthMethod` with a top-level `type`
+  field — kimi's variant is the only terminal-flavored one measured, and it
+  doesn't use that shape.
