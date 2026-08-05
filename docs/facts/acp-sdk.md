@@ -885,3 +885,32 @@ Three consequences the UI depends on:
 
 Not established: whether `gemini`, `grok` and `kimi` behave like Claude or
 like Codex — they were not installed on the machine this was measured on.
+
+---
+
+## 12. What `authenticate` actually does, per method
+
+Measured on the Linux machine, `codex-acp` 1.1.9, clean `HOME`
+(`scratchpad/loginprobe.py`):
+
+| method | result |
+|---|---|
+| `api-key` | fails at once: `Internal error: CODEX_API_KEY or OPENAI_API_KEY is not set` |
+| `chat-gpt` | **does not return** — still pending at 45s, while a browser window opens |
+
+So `authenticate` is not a request/response for the browser flow: it stays
+open until the human finishes in the browser, and returning without raising
+is the success signal. A client-side timeout on it would break a login that
+is working. The panel has none, and must not grow one.
+
+No URL is emitted anywhere the client can see it — nothing on stderr, nothing
+in session updates. The agent opens the browser itself, so a "click here to
+sign in" link cannot be offered for this agent: only an explanation that the
+window is coming and may take a few seconds.
+
+`api-key` cannot be completed from the panel at all. It reads the environment,
+which is why `shellenv.capture` matters: a key exported in `~/.zshrc` reaches
+the agent, one typed into a dialog would have nowhere to go.
+
+Not established: whether `claude-acp`, `gemini`, `grok` and `kimi` emit a URL
+their clients could open — only `codex-acp` was probed this way.

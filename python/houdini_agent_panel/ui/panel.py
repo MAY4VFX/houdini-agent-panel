@@ -1905,9 +1905,31 @@ class AgentPanel(QtWidgets.QWidget):
         )
         self._show_page(self.PAGE_AUTH)
 
+    #: What each measured sign-in method actually does, so the panel can say
+    #: it instead of leaving the artist watching a button. Keyed by the
+    #: method id the agent advertises; anything unknown gets the generic
+    #: line. Measured on a clean HOME (docs/facts/acp-sdk.md §12).
+    _AUTH_ADVICE = {
+        "chat-gpt": (
+            "Opening ChatGPT in your browser — it can take a few seconds to "
+            "appear. Sign in there and come back; the panel is waiting and "
+            "will say when it's through."
+        ),
+        "api-key": (
+            "Codex reads its API key from the environment: set CODEX_API_KEY "
+            "(or OPENAI_API_KEY) in your shell profile, then restart Houdini. "
+            "The panel picks up your login shell's variables at start."
+        ),
+    }
+
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._last_auth_method = method_id
-        self._note(f"Signing in with {method_id}… finish it in the browser if it opens.")
+        self._note(
+            self._AUTH_ADVICE.get(
+                method_id,
+                f"Signing in with {method_id}… if a browser window opens, finish it there.",
+            )
+        )
         shared_client(self._agent_id).authenticate(method_id)
 
     def _on_authenticated(self, method_id: str) -> None:

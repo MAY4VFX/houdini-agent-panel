@@ -282,3 +282,29 @@ def test_the_evidence_survives_a_restart(qapp, monkeypatch):
     widget.shutdown()
 
     assert "codex-acp" in settings_mod.load().signed_in_agents
+
+
+def test_each_sign_in_method_says_what_it_actually_does(qapp, monkeypatch):
+    """Measured on a clean HOME (facts/acp-sdk.md §12): `api-key` fails at
+    once with "CODEX_API_KEY or OPENAI_API_KEY is not set" — it is an
+    environment variable, not something the panel can ask for — while
+    `chat-gpt` does not return at all, staying open while a browser window
+    takes its time to appear. The artist reported both as "login doesn't
+    work"; one of them was working and said nothing."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id), "authenticate",
+        lambda *_: None, raising=False,
+    )
+
+    widget._on_auth_method_chosen("chat-gpt")
+    assert "few seconds" in notes[-1], "no warning that the browser is slow to appear"
+
+    widget._on_auth_method_chosen("api-key")
+    assert "CODEX_API_KEY" in notes[-1], "the variable it actually needs went unnamed"
+    widget.shutdown()
