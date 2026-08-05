@@ -84,3 +84,42 @@ def test_choosing_a_method_tells_the_artist_to_check_the_browser(qapp, monkeypat
 
     assert notes and "browser" in notes[0].lower()
     widget.shutdown()
+
+
+def test_sign_in_is_not_offered_to_an_agent_already_working(qapp, monkeypatch):
+    """Reported for Codex: the Sign in button sat in Settings while the agent
+    was answering questions, and pressing it led to a sign-in screen with a
+    Sign out at the bottom.
+
+    `authMethods` says which methods EXIST, not whether they have been used —
+    every agent lists them signed in or out. A session that opened is the
+    only proof the protocol offers, so that is what decides.
+    """
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel import sessions
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    info = client_mod.AgentInfo(
+        name="codex", version="1.1.9", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=True,
+        auth_methods=(client_mod.AuthMethod(id="chatgpt", name="ChatGPT"),),
+    )
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    offered: list[bool] = []
+    monkeypatch.setattr(
+        widget._settings_view, "set_current_agent_auth",
+        lambda _agent, can: offered.append(can), raising=False,
+    )
+
+    widget._sync_agent_auth_row(info)
+    assert offered[-1] is True, "no session yet — signing in is exactly what's needed"
+
+    widget._pool.add(sessions.SessionState(
+        session_id="live-1", title="chat", cwd="/tmp", created_at=0.0))
+    widget._sync_agent_auth_row(info)
+    assert offered[-1] is False, (
+        "a session is open, so the agent is signed in — offering sign-in is noise"
+    )
+    widget.shutdown()

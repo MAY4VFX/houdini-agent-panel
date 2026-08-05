@@ -614,7 +614,7 @@ class AgentPanel(QtWidgets.QWidget):
             # label and the chip fell back to "@agentclientprotocol/…".
             self._pending_agent_label = self._display_label(self._agent_id)
             self._header.set_agent(self._pending_agent_label or info.name, None)
-            self._settings_view.set_current_agent_auth(self._agent_id, bool(info.auth_methods))
+            self._sync_agent_auth_row(info)
             self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         self._refresh_sessions()
         current = self._current_session()
@@ -767,11 +767,33 @@ class AgentPanel(QtWidgets.QWidget):
                 pass
         self._client_wiring = ()
 
+    def _sync_agent_auth_row(self, info: Any) -> None:
+        """Offer "Sign in" only when signing in is what's needed.
+
+        `authMethods` from `initialize` says which methods EXIST, not whether
+        the artist has used one — every agent lists them signed in or out. So
+        keying the button on that offered sign-in to someone already working,
+        with a session open and answers coming back. Reported exactly that
+        way for Codex, and it is the same mistake fixed once in the agent
+        switcher and then reintroduced when the button moved to settings.
+
+        The honest signal is whether a session ever opened on this agent: the
+        protocol has no "am I authenticated", but a `session/new` that
+        succeeds is proof, and one that fails with auth_required is proof of
+        the opposite. Signing out stays reachable from the sign-in screen
+        itself, which is where someone who wants to switch accounts goes.
+        """
+        signed_in = any(
+            not state.session_id.startswith(_RESTORED_PREFIX) for state in self._pool.all()
+        )
+        can_sign_in = bool(getattr(info, "auth_methods", ())) and not signed_in
+        self._settings_view.set_current_agent_auth(self._agent_id, can_sign_in)
+
     def _on_connected(self, info: Any) -> None:
         # The chip shows the name the artist picked, not the npm package
         # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
-        self._settings_view.set_current_agent_auth(self._agent_id, bool(info.auth_methods))
+        self._sync_agent_auth_row(info)
         self._composer.set_capabilities(info, self._settings.whisper_endpoint)
         # What a CLI prints when it starts, and the thing that was missing
         # from a five-second gap: "Preparing…", "Launching…", then silence
@@ -854,6 +876,12 @@ class AgentPanel(QtWidgets.QWidget):
         state.busy = False
         self._models.setdefault(session_id, TranscriptModel())
         self._pool.add(state)
+        # A session opening is the proof that this agent is signed in — the
+        # protocol offers no other. Re-evaluate now, or the Sign in button
+        # stays offered to somebody already talking to it.
+        info = shared_client(self._agent_id).agent_info()
+        if info is not None:
+            self._sync_agent_auth_row(info)
         self._set_current_session(session_id)
         self._show_session(session_id)
         self._show_page(self.PAGE_TRANSCRIPT)

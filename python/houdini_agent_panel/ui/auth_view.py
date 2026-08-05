@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from . import theme
 from .qt import QtCore, QtWidgets, Signal
 
 if TYPE_CHECKING:
@@ -78,12 +79,23 @@ class AuthView(QtWidgets.QWidget):
         rail_layout.addWidget(self._empty_label)
         rail_layout.addWidget(self._error_label)
         rail_layout.addLayout(self._methods_layout)
-        rail_layout.addStretch(1)
+        # Sign out belongs with the choices, not pinned to the floor. The
+        # stretch used to sit here, which pushed it to the bottom of however
+        # tall the panel happened to be — on a docked panel the screen read
+        # as a title with two buttons at the top and one stray button an inch
+        # above the taskbar, related to nothing. A gap says "this one is
+        # different" without exiling it.
+        rail_layout.addSpacing(theme.SPACING * 4)
         rail_layout.addWidget(self._logout_button)
 
+        # The whole group is centred vertically as well as horizontally: a
+        # short list of buttons hugging the top of an empty screen looks like
+        # the page failed to finish loading.
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
+        layout.addStretch(1)
         layout.addWidget(rail, 0, QtCore.Qt.AlignHCenter)
+        layout.addStretch(1)
 
     def set_methods(self, methods: list["AuthMethod"], *, can_logout: bool) -> None:
         """Redraw the list of sign-in methods. An empty list isn't an error:
