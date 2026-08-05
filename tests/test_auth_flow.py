@@ -672,3 +672,59 @@ def test_stderr_is_not_surfaced_when_not_actually_pending(qapp):
 
     assert widget._auth_view._pending_detail_label.text() == ""
     widget.shutdown()
+
+
+def test_terminal_login_falls_back_to_the_raw_command_when_no_url_appears(qapp):
+    """docs/facts/acp-sdk.md §14: the `Verification URL:` line was sampled
+    exactly once, with no format contract — a run that ends without ever
+    matching it must not be a dead end."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_command = "/path/to/kimi login"
+    widget._terminal_login_url_shown = False
+
+    widget._on_terminal_login_exited(0)
+
+    text = widget._auth_view._pending_label.text()
+    assert "/path/to/kimi login" in text
+    assert "yourself" in text.lower()
+    widget.shutdown()
+
+
+def test_terminal_login_says_nothing_extra_once_a_url_was_already_shown(qapp, monkeypatch):
+    """The process ending AFTER it already printed a real link is not the
+    "nothing recognisable happened" case — no need to also dump the raw
+    command at that point."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_command = "/path/to/kimi login"
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/code", "ABC")
+
+    widget._on_terminal_login_exited(0)
+
+    text = widget._auth_view._pending_label.text()
+    assert "example.com" in text
+    assert "/path/to/kimi login" not in text
+    widget.shutdown()
+
+
+def test_terminal_login_spawn_failure_also_falls_back_to_the_command(qapp, monkeypatch):
+    """`work()` raising before ever spawning anything readable (e.g. the
+    command doesn't exist) gets the same fallback as a process that ran
+    and printed nothing recognisable — the artist is never left with only
+    an error and no way forward."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_command = "/path/to/kimi login"
+    widget._terminal_login_url_shown = False
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_terminal_login_failed("No such file or directory")
+
+    assert any("/path/to/kimi login" in n for n in notes)
+    widget.shutdown()
