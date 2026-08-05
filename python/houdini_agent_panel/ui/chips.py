@@ -111,7 +111,13 @@ class ChoiceButton(QtWidgets.QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        content = QtWidgets.QWidget()
+        # Parented at construction, not after. A parentless QWidget IS a
+        # top-level window in Qt, and on macOS it gets a native one the
+        # moment it is realised — `setWidget` below reparents it, but by
+        # then the window has been created and macOS never reclaims a native
+        # window once made. This is the same defect that filled the screen
+        # with stray panes from `transcript.py`, in a second place.
+        content = QtWidgets.QWidget(scroll)
         layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(2)
