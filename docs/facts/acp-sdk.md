@@ -1142,6 +1142,44 @@ the same "spawn it, parse the output" treatment as kimi has nothing to
 recover the command, and nothing about that sentence's format is a
 contract — the string is prose, not a schema field.
 
+### `opencode auth login`, run for real, killed before it could finish
+
+The follow-up question §14 originally left open: opencode describes the
+same "run this in the terminal" shape as kimi, but does it behave the same
+way if actually run? Ran the real binary directly,
+`~/.local/share/houdini-agent-panel/agents/opencode/1.18.12/opencode auth
+login`, pty attached, same method as the kimi capture
+(`scratchpad/opencode_login_capture.py`) — captured output, then `SIGTERM`'d
+the whole process group before any provider was selected or any credential
+typed.
+
+**It is not a URL/device-code flow. It's an interactive TUI menu that
+expects keystrokes.** Reconstructed from the captured escape sequences
+(cursor-positioning codes stripped, the meaning was unambiguous even in the
+raw capture):
+```
+┌  Add credential
+│
+◆  Select provider
+│  Search: _
+│  ↑/↓ to select • Enter: confirm • Type: to search
+└
+```
+A provider picker with a live-filtered search box, navigated with arrow keys
+and confirmed with Enter — the same class of UI as an interactive CLI
+wizard, not a client-parseable stream. No browser process appeared in the
+process tree in the ~8s window checked before the picker settled (`ps -ef`
+filtered for `firefox`/`chromium`/`brave`/`google-chrome`/`xdg-open` found
+nothing) — consistent with a browser only being relevant *after* a provider
+is chosen, a step this probe deliberately did not take.
+
+This is a hard "no" for the same treatment as kimi: a client that only reads
+a subprocess's output cannot drive this — it needs to send arrow-key and
+Enter keystrokes chosen from a live-rendered menu, which means either a real
+terminal-emulator widget with keyboard passthrough (a different, larger
+feature than "spawn and read"), or nothing — the artist runs it themselves in
+a real terminal and the panel just says so.
+
 ### Consequences for the UI
 
 1. **Kimi gets a real exception to "no clickable link is possible."** A
@@ -1156,10 +1194,15 @@ contract — the string is prose, not a schema field.
    protocol tag). The detector has to specifically look for a
    `terminal-auth`-shaped key (or whatever kimi's key is called) rather than
    branching on "any `_meta` at all."
-3. **Opencode cannot get the same treatment without extra, fragile work.**
-   Its own login instruction is text-only. Anything that shells out to
-   `opencode auth login` on the strength of parsing that sentence is
-   guessing at a contract the agent never actually offered.
+3. **Opencode cannot get the same treatment as kimi, and not only because
+   its instruction is prose.** Even knowing the exact command
+   (`opencode auth login`) changes nothing — it's measured now, not
+   inferred: the command opens an interactive menu that needs arrow-key
+   input, not a stream a client can read and turn into a link. Carrying the
+   command as data in a registry (as opposed to scraping the sentence) would
+   still not make this drivable from a panel that only reads output; the
+   honest UI is "run this yourself in a terminal," not a spawned, parsed
+   flow.
 
 ### Not established
 
@@ -1167,6 +1210,6 @@ contract — the string is prose, not a schema field.
   or runs — sampled once.
 - What either the URL or the polling loop resolves to on success — the
   process was killed well before that, by design.
-- Whether `opencode auth login`, run directly, produces the same
-  URL/device-code shape as kimi — not run; the task was to scan for
-  structured `_meta`, and opencode has none to act on.
+- What opencode's menu does after a provider is picked (does that step show
+  a URL, an API-key prompt, something else) — not reached; the probe was
+  killed at the first menu, deliberately, before selecting anything.
