@@ -1213,3 +1213,117 @@ a real terminal and the panel just says so.
 - What opencode's menu does after a provider is picked (does that step show
   a URL, an API-key prompt, something else) — not reached; the probe was
   killed at the first menu, deliberately, before selecting anything.
+
+### `claude setup-token` — the owner's own question, measured
+
+The owner asked directly why the panel can't spawn `claude setup-token` the
+way it now can spawn `kimi login`. Measured on the same machine, same
+method: `npx --yes @anthropic-ai/claude-code setup-token` (the `claude` CLI
+is not installed on this machine — no binary on `PATH`, no
+`~/.claude/.credentials.json` — so `npx` was used deliberately, nothing gets
+installed system-wide), pty attached, ~25s / ~40 lines captured, then
+`SIGTERM` to the whole process group before any code was pasted or any
+credential entered. Verified after: no `claude-code`/`setup-token` process
+left running.
+
+Reconstructed output (cursor-positioning escape codes stripped, content
+otherwise verbatim, the spinner frames collapsed):
+```
+Welcome to Claude Code v2.1.222
+
+· Opening browser to sign in…
+✢ * ✶ ✻ ✽ ✻ ✶ * ✢ · ✢ * ✶ ✻ ✽ ✻ ✶ * ✢
+Browser didn't open? Use the url below to sign in (c to copy)
+
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=NzsZ25WHsxGrQfve2qCgoKgudLvVHAXj3l_1n2FgBg4&code_challenge_method=S256&state=kaD3sxA7ljbkZpds_92UMQNm_koTDGz0kY_gVvNjwbQ
+
+Paste code here if prompted >
+```
+
+Answering each question in order:
+
+1. **A verification URL, yes — printed as a real, complete OAuth
+   authorize URL**, not a short device code like kimi's. It's a standard
+   OAuth2 PKCE authorization-code request (`code_challenge`/
+   `code_challenge_method=S256`, `scope=user:inference`, a `state` nonce) —
+   not an interactive menu. No separate short "user code" the way kimi has
+   one; the URL itself is the whole artifact.
+2. **It does not poll silently like kimi.** After printing the URL it shows
+   a literal input prompt, `Paste code here if prompted >`, and waits there
+   — this is a manual paste-back flow, not autonomous device-code polling.
+   The `redirect_uri` points at a hosted page
+   (`platform.claude.com/oauth/code/callback`), not a `localhost` port the
+   CLI itself is listening on (contrast Codex's `chat-gpt` method, whose
+   authorize URL — seen once already on this same machine, in an unrelated
+   leftover browser tab — redirects to `http://localhost:1455/auth/callback`
+   instead): completing this flow means the browser shows the user a code
+   on that hosted page, which they then have to copy and paste back into
+   the terminal running `setup-token`, not something that resolves itself
+   in the background.
+3. **No new browser process was observed spawned by `setup-token` itself.**
+   One `ps -ef` snapshot taken ~12s into the run (while the spinner was
+   likely still active) showed no new `firefox`/`chromium`/`brave`/
+   `google-chrome`/`xdg-open` process anywhere in this process's lineage —
+   only a large, already-running Brave instance on the machine, started
+   over 40 minutes earlier for an unrelated reason. This is a single
+   snapshot, not continuous monitoring, so treat "no browser" as inferred
+   rather than exhaustively ruled out — but the tool's own output agrees:
+   it explicitly says `Browser didn't open?` and falls back to the printed
+   URL, which is the same "no `DISPLAY` in the env this probe passed"
+   situation as gemini's and grok's methods in §13.
+4. **Not established** where the token gets written. Neither the captured
+   output (killed before reaching that point, by design) nor `claude
+   --help`/`claude setup-token --help` names a target file. (That
+   `~/.claude/.credentials.json` doesn't exist on this machine was already
+   confirmed independently before this probe ran — that's a fact about
+   this machine's current state, not something this measurement newly
+   established about where a completed run writes to.)
+5. **It needs something between kimi and opencode: no menu, but real input
+   forwarding.** Unlike kimi (spawn it, read its output, done — nothing
+   ever has to be typed back), completing this flow requires sending one
+   line of text (the pasted authorization code) into the process's stdin
+   after the human visits the URL and copies a code from the browser. A
+   client that only spawns and reads output — which is all today's kimi
+   treatment does — cannot finish this one; it additionally needs an input
+   box wired to the spawned process's stdin. That's a materially smaller
+   feature than opencode's full keystroke/arrow-key menu (§14, opencode
+   section) — one text field and Enter, not a live TUI — but it is still
+   something the "spawn kimi login and just read" design does not have
+   today.
+
+**Does the package expose a non-interactive path that would make any of
+this unnecessary?** `npx --yes @anthropic-ai/claude-code --help`, checked
+before running anything interactive: yes, but not from `setup-token`
+itself — the `--bare` flag's own help text states plainly: *"Anthropic auth
+is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper` via `--settings` (OAuth
+and keychain are never read)."* That's a property of `--bare` mode as a
+whole, not a flag on `setup-token` — there is no `setup-token --api-key` or
+similar (`setup-token --help` lists only `-h/--help`). If the artist already
+has `ANTHROPIC_API_KEY` in their shell environment, the whole
+spawn/URL/paste-back dance is beside the point for `--bare`-style
+invocations; it just isn't something `setup-token` itself exposes as an
+alternative — it's a wholly separate code path in the same package.
+
+### Consequences for the UI (claude setup-token)
+
+1. **This is a third shape, not a repeat of kimi or opencode.** Kimi: spawn,
+   read, show link, done. Opencode: cannot be driven from output alone at
+   all. Claude `setup-token`: spawn, read, show link — and then also accept
+   one line of pasted text and forward it to the process's stdin. Treating
+   it as "the kimi treatment" without the input box will get the URL onto
+   screen and then hang forever at the paste prompt with no way to finish.
+2. **The escape hatch is real, but it's a different code path, not a flag
+   on this command.** If the panel wants to skip the whole browser/paste
+   flow for artists who already export `ANTHROPIC_API_KEY`, that has to be
+   wired as its own thing (`--bare` plus the env var), not as an argument
+   to `setup-token`.
+
+### Not established (claude setup-token)
+
+- What the token artifact is or where it's written — not reached, not
+  documented in `--help`.
+- Whether the paste-back code, once entered, completes immediately or
+  itself polls — not reached.
+- Whether a real `DISPLAY` would make it open an actual browser window —
+  same caveat as gemini/grok in §13, inferred from the env passed and the
+  tool's own "Browser didn't open?" message, not observed on a screen.
