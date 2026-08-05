@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import theme
 from .chips import ChoiceButton, ModeChip
+from .boot_status import BootStatus
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import _BuddySprite
 from .voice import VoiceButton
@@ -483,6 +484,42 @@ def _parse_enum_hint(hint: str) -> list[str] | None:
     return parts
 
 
+class _BootScrim(QtWidgets.QWidget):
+    """The frosted pane laid over the input while an agent starts.
+
+    The input is not merely inert during a boot — there is no agent to send
+    anything to — and an inert control that looks live invites the artist to
+    type a paragraph into nothing. So it is covered rather than greyed: the
+    words underneath stay legible enough to be recognised, while nothing
+    about the pane invites a click.
+
+    Blur comes from `QGraphicsBlurEffect` on the surface itself, applied by
+    `Composer.set_booting`; this widget is the tint on top and the thing
+    that swallows the mouse.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, False)
+        self.setCursor(QtCore.Qt.ArrowCursor)
+        self.hide()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        tint = QtGui.QColor(theme.color(QtGui.QPalette.Window))
+        tint.setAlpha(190)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(tint)
+        # Same radius as the surface underneath, or the corners show a bright
+        # crescent of un-covered input.
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()), 18, 18)
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt
+        event.accept()  # absorbed, deliberately: there is nothing to click yet
+
+
 class Composer(QtWidgets.QWidget):
     """Bottom of the panel: growing field, "+", microphone, chips, counter, send/stop."""
 
@@ -613,6 +650,14 @@ class Composer(QtWidgets.QWidget):
         self._buddy.clicked.connect(self.buddy_selected.emit)
         self._buddy.raise_()
 
+        # The boot strip belongs to the composer, not to the panel: it has to
+        # line up with the input box, and only the composer knows where that
+        # is (the box is centred and width-clamped in `resizeEvent`). Placed
+        # as a free-floating child in the band above the box rather than in
+        # the layout, so an agent starting never moves the input.
+        self._boot_status = BootStatus(self)
+        self._boot_scrim = _BootScrim(self)
+
         self.setStyleSheet(
             "QFrame#composerSurface {"
             " background: palette(base);"
@@ -673,6 +718,7 @@ class Composer(QtWidgets.QWidget):
             surface_y - self._buddy.height() + 12,
         )
         self._buddy.raise_()
+        self._layout_boot_widgets(surface_x, surface_y)
 
     # --- public contract (docs/architecture.md §10) -----------------------
 
@@ -790,6 +836,46 @@ class Composer(QtWidgets.QWidget):
             )
 
         self._config_bar.setVisible(bool(self._config_chips))
+
+    def _layout_boot_widgets(self, surface_x: int, surface_y: int) -> None:
+        width = self._surface.width()
+        height = self._boot_status.sizeHint().height()
+        self._boot_status.setGeometry(
+            surface_x, max(0, surface_y - height - 4), width, height
+        )
+        self._boot_status.raise_()
+        self._boot_scrim.setGeometry(
+            surface_x, surface_y, width, self._surface.height()
+        )
+        self._boot_scrim.raise_()
+
+    def boot_status(self) -> BootStatus:
+        """The strip, for whoever drives the phases (the panel)."""
+        return self._boot_status
+
+    def set_booting(self, booting: bool) -> None:
+        """Cover the input, or uncover it.
+
+        The buddy goes away for the duration and comes back with the agent —
+        it sits in the same band as the strip, and more to the point it is
+        the panel's one sign of life, which should not be perched over a
+        dead input.
+        """
+        if booting:
+            blur = QtWidgets.QGraphicsBlurEffect(self._surface)
+            blur.setBlurRadius(4)
+            self._surface.setGraphicsEffect(blur)
+            self._boot_scrim.show()
+            self._boot_scrim.raise_()
+            self._buddy.hide()
+        else:
+            # `setGraphicsEffect(None)` deletes the previous effect — the
+            # widget owns it, so there is nothing to free here.
+            self._surface.setGraphicsEffect(None)
+            self._boot_scrim.hide()
+            self._buddy.show()
+            self._buddy.raise_()
+        self._text_edit.setReadOnly(booting)
 
     def set_buddy(self, key: str) -> None:
         self._buddy.set_buddy(key)

@@ -142,6 +142,14 @@ def mcp_servers() -> list[dict]:
             "will go out without HOUDINI_PORT, the agent will scan the "
             "range itself"
         )
+    # Houdini's plain CPython carries no packages of its own, so it is told
+    # where the panel's tree is. Set by the installer only when it chose
+    # such an interpreter — an ordinary Python that already has
+    # `fxhoudinimcp` installed must not be handed a tree of extensions
+    # compiled for a different Python version.
+    mcp_path = os.environ.get("HAP_MCP_PATH")
+    if mcp_path:
+        env.append({"name": "PYTHONPATH", "value": mcp_path})
     return [
         {
             "name": FX_SERVER_NAME,

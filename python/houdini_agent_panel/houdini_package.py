@@ -36,6 +36,7 @@ def package_json(
     installer_python: str,
     plugin: Path | None = None,
     source: Path | None = None,
+    mcp_path: Path | None = None,
 ) -> str:
     """Build the package json in exactly the format from architecture.md §0.
 
@@ -77,14 +78,20 @@ def package_json(
         path_value = (
             plugin.as_posix() if plugin is not None else "$HAP_DEPS/houdini_agent_panel/houdini"
         )
-    payload = {
-        "env": [
-            {"HAP_DEPS": deps.as_posix()},
-            {"HAP_PYTHON": installer_python},
-            {"PYTHONPATH": {"value": python_path, "method": "prepend"}},
-        ],
-        "path": path_value,
-    }
+    env: list[dict] = [
+        {"HAP_DEPS": deps.as_posix()},
+        {"HAP_PYTHON": installer_python},
+    ]
+    if mcp_path is not None:
+        # Where `HAP_PYTHON` finds `fxhoudinimcp`. Written only when the
+        # installer chose an interpreter that needs to be told — Houdini's
+        # plain CPython, which has nothing installed in it but is the exact
+        # version this tree was built for. An interpreter that carries its
+        # own copy (the uvx install path) must NOT be handed this: the tree's
+        # compiled extensions are built for one Python version only.
+        env.append({"HAP_MCP_PATH": mcp_path.as_posix()})
+    env.append({"PYTHONPATH": {"value": python_path, "method": "prepend"}})
+    payload = {"env": env, "path": path_value}
     return json.dumps(payload, indent=4) + "\n"
 
 

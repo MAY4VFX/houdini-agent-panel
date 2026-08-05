@@ -243,6 +243,23 @@ def _normalized(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def installed_version(target: Path, name: str) -> str | None:
+    """The version of `name` inside a `--target` tree, from its `dist-info`.
+
+    Used to pin the MCP server's own copy of `fxhoudinimcp` to the one the
+    panel was installed with, so the two cannot drift apart. Reliable only
+    because `prune_stale_metadata` runs first — before it, a tree could
+    hold six `dist-info` directories for one package and this would return
+    whichever the filesystem listed first.
+    """
+    wanted = _normalized(name)
+    for entry in sorted(target.glob("*.dist-info")):
+        match = _NAME_VERSION.match(entry.name[: -len(".dist-info")])
+        if match and _normalized(match.group("name")) == wanted:
+            return match.group("version")
+    return None
+
+
 def prune_stale_metadata(target: Path, pip_output: Sequence[str]) -> list[str]:
     """Delete `.dist-info` directories describing versions pip has replaced.
 

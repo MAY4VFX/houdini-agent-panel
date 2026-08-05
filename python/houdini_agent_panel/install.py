@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import deps as deps_mod
+from . import mcp_runtime
 from . import houdini_package
 from . import paths
 from .network import Fetcher
@@ -46,6 +47,7 @@ def _panel_version() -> str:
 
 
 _PACKAGE = "houdini-agent-panel"
+_FX_PACKAGE = "fxhoudinimcp"
 
 
 def _requirement_for(target: Path, panel_version: str) -> str:
@@ -77,6 +79,43 @@ def _requirement_for(target: Path, panel_version: str) -> str:
     except OSError:
         same_tree = False
     return _PACKAGE if same_tree else f"{_PACKAGE}=={panel_version}"
+
+
+def _mcp_python(
+    hython: Path, pyver: tuple[int, int], target: Path, installer_python: str, *, out, dry_run: bool
+) -> tuple[str, Path | None]:
+    """The interpreter to record as `HAP_PYTHON`, and where it finds the server.
+
+    The installer's own Python, unless that is Houdini's embedded one.
+    `hython` works — `scene.FX_BOOTSTRAP` repairs the asyncio policy it
+    installs — but it loads the whole of Houdini before running a line, and
+    the MCP server is started once per conversation. Measured on 22.0.368:
+    `hython -c pass` costs 8.9-16.5s and the entire server startup costs the
+    same 8.5-14.6s, so all of it is the interpreter.
+
+    Every Houdini also ships the stock CPython it is built on, without the
+    wrapper — the same version as this deps tree, since that tree was
+    installed by this Houdini's pip. On it the same server answers in 1.5s.
+    No download, no virtualenv, no dependency on what the artist happens to
+    have on PATH.
+
+    Falls back to `hython` if that interpreter is missing or cannot import
+    the server: slow beats broken, and the installer says which it chose.
+    """
+    if not mcp_runtime.is_houdini_python(installer_python):
+        return installer_python, None
+    if dry_run:
+        out("  [dry-run] would look for Houdini's plain CPython for the MCP server")
+        return installer_python, None
+    found = mcp_runtime.find(hython, pyver, target, out=out)
+    if found is None:
+        out(
+            "  Houdini's plain CPython not found — the MCP server will run on "
+            "hython, which adds about 10s to opening a conversation"
+        )
+        return installer_python, None
+    out(f"  MCP server interpreter: {found}")
+    return str(found), target
 
 
 def _resolve_package_dirs(explicit: str | None) -> tuple[list[Path], str]:
@@ -172,8 +211,11 @@ def install(
                 out(f"  dependency install failed: {exc}")
                 continue
 
+        mcp_python, mcp_path = _mcp_python(
+            hython, pyver, target, installer_python, out=out, dry_run=dry_run
+        )
         payload = houdini_package.package_json(
-            deps=target, installer_python=installer_python, source=source
+            deps=target, installer_python=mcp_python, source=source, mcp_path=mcp_path
         )
         package_path = package_dir / houdini_package.PACKAGE_NAME
         if dry_run:
