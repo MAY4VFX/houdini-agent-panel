@@ -86,17 +86,20 @@ def test_choosing_a_method_tells_the_artist_to_check_the_browser(qapp, monkeypat
     widget.shutdown()
 
 
-def test_sign_in_is_not_offered_to_an_agent_already_working(qapp, monkeypatch):
-    """Reported for Codex: the Sign in button sat in Settings while the agent
-    was answering questions, and pressing it led to a sign-in screen with a
-    Sign out at the bottom.
-
-    `authMethods` says which methods EXIST, not whether they have been used —
-    every agent lists them signed in or out. A session that opened is the
-    only proof the protocol offers, so that is what decides.
+def test_sign_in_capability_is_cached_regardless_of_believed_sign_in_state(qapp, monkeypatch):
+    """Used to gate the Settings row's Sign in on "no session has opened
+    yet" — reported for Codex: the button sat in Settings while the agent
+    was already answering questions. That traded one wrong belief for
+    another: whether a session is open, or whether a turn has completed,
+    is the panel's own GUESS about account state (`_is_signed_in`,
+    docs/facts/acp-sdk.md §11), and issue #33 is the guess going wrong the
+    other way — an artist stuck on a broken login with the panel convinced
+    they were already signed in, and the button that would let them retry
+    nowhere to be found. So caching is now unconditional: `authMethods` is
+    what decides, not a guess about whether it's currently needed.
     """
     from houdini_agent_panel import client as client_mod
-    from houdini_agent_panel import sessions
+    from houdini_agent_panel import settings as settings_mod
     from houdini_agent_panel.ui import panel as panel_mod
 
     info = client_mod.AgentInfo(
@@ -107,33 +110,31 @@ def test_sign_in_is_not_offered_to_an_agent_already_working(qapp, monkeypatch):
     )
     widget = panel_mod.AgentPanel()
     widget._rejoin_agent("codex-acp")
-    offered: list[bool] = []
-    monkeypatch.setattr(
-        widget._settings_view, "set_current_agent_auth",
-        lambda _agent, can: offered.append(can), raising=False,
-    )
 
     widget._sync_agent_auth_row(info)
-    assert offered[-1] is True, "no session yet — signing in is exactly what's needed"
+    cached = settings_mod.load().agent_auth_info["codex-acp"]
+    assert [m.id for m in cached.methods] == ["chatgpt"]
+    assert cached.supports_logout is True
 
-    # An open session used to stand in for this, and the measurement on the
-    # Linux machine refuted it: two agents out of three open a session while
-    # signed out. An answered prompt is what they all agree on.
+    # An answered prompt is what all three measured agents agree means
+    # "signed in" — but it must not erase what's cached, or the Settings
+    # row for a codex-acp that ISN'T the one connected right now would lose
+    # its Sign in button the moment THIS one happens to finish a turn.
     widget._on_turn_finished("live-1", "end_turn")
     widget._sync_agent_auth_row(info)
-    assert offered[-1] is False, (
-        "the agent has answered a prompt, so it is signed in — offering sign-in is noise"
-    )
+    cached = settings_mod.load().agent_auth_info["codex-acp"]
+    assert [m.id for m in cached.methods] == ["chatgpt"]
     widget.shutdown()
 
 
-def test_sign_out_is_not_offered_to_an_agent_never_signed_into(qapp, monkeypatch):
+def test_sign_out_reflects_capability_not_a_signed_in_guess(qapp, monkeypatch):
     """Reported on the Linux machine: a fresh Codex showed API Key, ChatGPT
-    *and* Sign out. It came from `supports_logout`, which says the method is
-    implemented, not that anyone has used it — the same confusion of
-    capability with state as the Sign in row, one screen along."""
+    *and* Sign out — that used `supports_logout`, which says the method is
+    IMPLEMENTED, gated on a further guess about whether anyone had used it.
+    Issue #33 asks for the opposite of that gate: Sign out reachable
+    whenever the agent can do it, not only when the panel guesses it's
+    needed — the guess is exactly what stranded people the other way."""
     from houdini_agent_panel import client as client_mod
-    from houdini_agent_panel import sessions
     from houdini_agent_panel.ui import panel as panel_mod
 
     info = client_mod.AgentInfo(
@@ -148,12 +149,18 @@ def test_sign_out_is_not_offered_to_an_agent_never_signed_into(qapp, monkeypatch
     widget = panel_mod.AgentPanel()
     widget._rejoin_agent("codex-acp")
 
-    assert widget._can_sign_out(info) is False, "offered a way out of a door never entered"
+    assert widget._can_sign_out(info) is True, "the agent CAN log out — that's all this checks"
 
     widget._on_turn_finished("live-1", "end_turn")
-    assert widget._can_sign_out(info) is True, (
-        "a working agent must still be able to switch accounts"
+    assert widget._can_sign_out(info) is True
+
+    # Still false with no methods at all — nothing to sign out OF.
+    no_methods = client_mod.AgentInfo(
+        name="codex", version="1.1.9", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=True, auth_methods=(),
     )
+    assert widget._can_sign_out(no_methods) is False
     widget.shutdown()
 
 
@@ -229,7 +236,10 @@ def test_an_open_session_is_not_evidence_of_being_signed_in(qapp, monkeypatch):
 
 def test_a_completed_turn_is_what_proves_it(qapp, monkeypatch):
     """The one signal all three agree on: none of them answers a prompt for
-    an account that is not signed in."""
+    an account that is not signed in. `_is_signed_in()` still tracks this
+    (issue #33 only stopped USING it to gate Sign in/out reachability, it
+    didn't remove the underlying record — see `_sync_agent_auth_row`'s own
+    docstring)."""
     from houdini_agent_panel import client as client_mod
     from houdini_agent_panel.ui import panel as panel_mod
 
@@ -237,19 +247,12 @@ def test_a_completed_turn_is_what_proves_it(qapp, monkeypatch):
     widget._rejoin_agent("codex-acp")
     monkeypatch.setattr(widget, "_note", lambda *_: None)
     method = client_mod.AuthMethod(id="chatgpt", name="ChatGPT")
-    offered: list[bool] = []
-    monkeypatch.setattr(
-        widget._settings_view, "set_current_agent_auth",
-        lambda _agent, can: offered.append(can), raising=False,
-    )
 
-    widget._sync_agent_auth_row(_info(auth_methods=(method,)))
-    assert offered[-1] is True, "nothing proved yet — offering the way in is right"
+    assert widget._is_signed_in() is False, "nothing proved yet"
 
     widget._on_turn_finished("s1", "end_turn")
-    widget._sync_agent_auth_row(_info(auth_methods=(method,)))
 
-    assert offered[-1] is False
+    assert widget._is_signed_in() is True
     assert widget._can_sign_out(_info(auth_methods=(method,))) is True
     widget.shutdown()
 
@@ -312,6 +315,37 @@ def test_each_sign_in_method_says_what_it_actually_does(qapp, monkeypatch):
     widget.shutdown()
 
 
+def test_the_agents_own_description_beats_the_guessed_advice(qapp, monkeypatch):
+    """Kimi's `login` method describes itself: "Run `kimi login` command in
+    the terminal, then follow the instructions to finish login."
+    (docs/facts/acp-sdk.md §13/§14) — more precise than this repo's own
+    guess, and it can't go stale the way a hardcoded id-keyed table would if
+    Kimi ever changed how its login works. The agent's word wins whenever
+    it bothers to give one (design.md: the agent decides what exists)."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("kimi")
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "authenticate", lambda *_: None, raising=False)
+    description = "Run `kimi login` command in the terminal, then follow the instructions to finish login."
+    monkeypatch.setattr(
+        client, "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="kimi", version="1.49.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(client_mod.AuthMethod(id="login", name="Login with Kimi account", description=description),),
+        ),
+    )
+
+    widget._on_auth_method_chosen("login")
+
+    assert widget._auth_view._pending_label.text() == description
+    widget.shutdown()
+
+
 def test_login_is_only_suggested_when_the_agent_has_it(qapp, monkeypatch):
     """The panel told a signed-out Claude Agent to type `/login`, and the
     agent answered "/login isn't available in this environment". The
@@ -342,4 +376,148 @@ def test_login_is_only_suggested_when_the_agent_has_it(qapp, monkeypatch):
         "still putting a command the agent does not have into the input"
     )
     assert "terminal" in notes[-1], "no route out was named at all"
+    widget.shutdown()
+
+
+def test_choosing_a_method_shows_a_pending_state_on_the_sign_in_screen(qapp, monkeypatch):
+    """Issue #33: the screen used to go quiet the instant a method was
+    picked, and a working Codex login (browser opens, artist finishes it
+    there) looked identical to a stuck one. The wait itself now shows on
+    the screen the artist is looking at, not only in the transcript."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    monkeypatch.setattr(panel_mod.shared_client(widget._agent_id), "authenticate", lambda _m: None)
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+
+    widget._on_auth_method_chosen("chat-gpt")
+
+    assert not widget._auth_view._pending_label.isHidden()
+    assert "browser" in widget._auth_view._pending_label.text()
+    widget.shutdown()
+
+
+def test_cancelling_the_wait_only_clears_the_screen_not_the_pending_call(qapp, monkeypatch):
+    """There is no protocol call to cancel `authenticate()` itself
+    (docs/facts/acp-sdk.md §12) — Cancel is UI-only, and a success arriving
+    later must still be honored even if the artist gave up watching."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(panel_mod.shared_client(widget._agent_id), "authenticate", lambda _m: None)
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+
+    widget._on_auth_method_chosen("chat-gpt")
+    widget._on_auth_cancel_pending()
+    assert widget._auth_view._pending_label.isHidden()
+
+    # A late `authenticated` must still work — cancelling the UI wait did
+    # not cancel the underlying request.
+    client = panel_mod.shared_client(widget._agent_id)
+    client.authenticated.emit("chat-gpt")
+    qapp.processEvents()
+    assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_TRANSCRIPT
+    widget.shutdown()
+
+
+def test_successful_sign_in_is_recorded_as_the_last_attempt(qapp, monkeypatch):
+    """"Show the last attempt's result beside the method" (issue #33) —
+    persisted so a Settings row can say it even for an agent that isn't
+    the one connected right now."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+
+    widget._on_auth_method_chosen("chat-gpt")
+    client.authenticated.emit("chat-gpt")
+    qapp.processEvents()
+
+    attempt = settings_mod.load().auth_attempts[widget._agent_id]
+    assert attempt.action == "sign_in"
+    assert attempt.ok is True
+    widget.shutdown()
+
+
+def test_failed_sign_in_is_recorded_as_the_last_attempt(qapp, monkeypatch):
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+
+    widget._on_auth_method_chosen("api-key")
+    widget._show_page(widget.PAGE_AUTH)
+    client.error.emit("", "CODEX_API_KEY or OPENAI_API_KEY is not set")
+    qapp.processEvents()
+
+    attempt = settings_mod.load().auth_attempts[widget._agent_id]
+    assert attempt.action == "sign_in"
+    assert attempt.ok is False
+    assert "CODEX_API_KEY" in attempt.message
+    widget.shutdown()
+
+
+def test_sign_out_from_settings_logs_out_the_current_agent_directly(qapp, monkeypatch):
+    """Issue #33: Sign out reachable from Settings at any time, not only
+    from the sign-in screen's own button."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    logged_out = []
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id), "logout", lambda: logged_out.append(True)
+    )
+
+    widget._on_agent_row_sign_out(widget._agent_id)
+
+    assert logged_out == [True]
+    assert widget._pending_logout_agent == widget._agent_id
+    widget.shutdown()
+
+
+def test_sign_out_success_from_settings_is_recorded(qapp, monkeypatch):
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "logout", lambda: None)
+
+    widget._on_agent_row_sign_out(widget._agent_id)
+    client.auth_required.emit([])
+    qapp.processEvents()
+
+    attempt = settings_mod.load().auth_attempts[widget._agent_id]
+    assert attempt.action == "sign_out"
+    assert attempt.ok is True
+    assert widget._pending_logout_agent is None
+    widget.shutdown()
+
+
+def test_sign_out_failure_from_settings_is_noted_not_lost(qapp, monkeypatch):
+    """No sign-in screen is guaranteed to be open when a Settings-triggered
+    logout's answer arrives — it must still reach the artist, and still be
+    recorded for the row that asked."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "logout", lambda: None)
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_agent_row_sign_out(widget._agent_id)
+    client.error.emit("", "the agent refused to log out")
+    qapp.processEvents()
+
+    assert any("Sign out failed" in n for n in notes)
+    attempt = settings_mod.load().auth_attempts[widget._agent_id]
+    assert attempt.action == "sign_out"
+    assert attempt.ok is False
     widget.shutdown()

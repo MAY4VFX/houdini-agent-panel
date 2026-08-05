@@ -196,12 +196,16 @@ def test_installed_agent_has_no_use_button(qapp, monkeypatch):
     assert buttons == {"Remove"}
 
 
-def test_sign_in_shows_only_on_the_currently_connected_agents_own_row(qapp, monkeypatch):
-    """Moved here from the header chip's switcher menu — a real complaint:
-    the button used to show for any agent that had declared auth methods,
-    not for whichever one was actually running, in the menu meant to answer
-    "which agent to talk to", not "manage this one". `set_current_agent_auth`
-    is how the panel says which single row, if any, gets it.
+def test_sign_in_shown_for_any_agent_with_cached_auth_methods(qapp, monkeypatch):
+    """Issue #33: reachable at any time, for every installed agent — not
+    only the one this tab happens to be connected to right now. `auth_
+    methods`/`supports_logout` are constants of the BUILD, not the account
+    (docs/facts/acp-sdk.md §11), so once the panel has ever seen them for
+    an agent (`settings.agent_auth_info`, written by `AgentPanel._remember_
+    agent_auth_capability`), that agent's row keeps offering Sign in even
+    after this tab switches to a different one. An agent never yet
+    connected has nothing cached and offers nothing — honest silence, not
+    an invented guess.
     """
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry_a = AgentEntry(
@@ -219,21 +223,87 @@ def test_sign_in_shows_only_on_the_currently_connected_agents_own_row(qapp, monk
     _mark_installed("agent-a", "1.0.0")
     _mark_installed("agent-b", "1.0.0")
 
+    current = settings_module.load()
+    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
+        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+        supports_logout=True,
+    )
+    settings_module.save(current)
+
     view = AgentsView()
     view.set_agents([entry_a, entry_b])
-    view.set_current_agent_auth("agent-a", True)
 
     row_a = view._rows_by_id["agent-a"]
     row_b = view._rows_by_id["agent-b"]
     assert "Sign in…" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
+    assert "Sign out" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
     assert "Sign in…" not in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
 
-    # Disconnecting (or switching to an agent with no auth methods at all)
-    # must take the button away again — it must not keep pointing at a dead
-    # connection.
-    view.set_current_agent_auth(None, False)
-    row_a = view._rows_by_id["agent-a"]
-    assert "Sign in…" not in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
+
+def test_sign_in_and_sign_out_requested_carry_the_agent_id(qapp, monkeypatch):
+    """Every row can send its OWN agent id — the panel is the one that
+    decides whether that means opening the sign-in screen directly or
+    switching this tab onto it first (`AgentPanel._on_agent_row_sign_in`).
+    """
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("agent-a", "1.0.0")
+    current = settings_module.load()
+    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
+        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+        supports_logout=True,
+    )
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["agent-a"]
+
+    sign_ins: list[str] = []
+    sign_outs: list[str] = []
+    view.sign_in_requested.connect(sign_ins.append)
+    view.sign_out_requested.connect(sign_outs.append)
+
+    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign in…").click()
+    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign out").click()
+
+    assert sign_ins == ["agent-a"]
+    assert sign_outs == ["agent-a"]
+
+
+def test_last_auth_attempt_shown_beside_the_row(qapp, monkeypatch):
+    """"Show the last attempt's result beside the method" (issue #33) — a
+    failure visible where the retry button is, not only in a transcript the
+    artist may not even be looking at."""
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("agent-a", "1.0.0")
+    current = settings_module.load()
+    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
+        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+        supports_logout=True,
+    )
+    current.auth_attempts["agent-a"] = settings_module.AuthAttempt(
+        action="sign_in", method_id="m", ok=False, message="No longer supported for individuals.",
+        at="2026-08-05T00:00:00+00:00",
+    )
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["agent-a"]
+    labels = [lbl.text() for lbl in row.findChildren(QtWidgets.QLabel)]
+    assert any("No longer supported for individuals." in text for text in labels)
 
 
 def test_update_available_shown_and_offers_update_button(qapp, monkeypatch):

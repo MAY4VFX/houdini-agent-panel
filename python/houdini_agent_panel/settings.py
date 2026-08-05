@@ -48,6 +48,57 @@ class InstalledAgent:
 
 
 @dataclass
+class AgentAuthMethod:
+    """One entry from `client.AgentInfo.auth_methods`, kept here as plain
+    data — `id`/`name`/`description` mirror `client.AuthMethod`'s own
+    fields exactly, so this module never has to import the client layer
+    just to remember what an agent offered (design.md's four layers)."""
+
+    id: str
+    name: str
+    description: str = ""
+
+
+@dataclass
+class AgentAuthInfo:
+    """What an agent's own `initialize` said about signing in, the last
+    time it actually connected — cached because `authMethods`/`supports_
+    logout` are constants of the BUILD, not the account
+    (docs/facts/acp-sdk.md §11), so unlike "is the artist actually signed
+    in right now" they don't go stale between one connection and the next.
+
+    This is what lets a Settings row offer Sign in/Sign out for an agent
+    that isn't the one currently connected in this tab, instead of only
+    ever the single agent a tab happens to be running right now (issue
+    #33) — without launching every installed agent just to ask it.
+    """
+
+    methods: list[AgentAuthMethod] = field(default_factory=list)
+    supports_logout: bool = False
+
+
+@dataclass
+class AuthAttempt:
+    """What the last sign-in or sign-out attempt on this agent actually
+    did. Shown right beside the Settings row that started it — a failure
+    that only ever lived on the sign-in screen's own `QLabel` was invisible
+    again the instant the artist left that screen, or was never visible at
+    all for an agent that isn't the one connected right now. Both are
+    exactly issue #33's report.
+    """
+
+    action: str = "sign_in"  # "sign_in" | "sign_out"
+    method_id: str = ""
+    ok: bool = False
+    message: str = ""
+    at: str = ""
+
+    @staticmethod
+    def now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass
 class Settings:
     version: int = SETTINGS_VERSION
     default_agent: str | None = None
@@ -87,12 +138,26 @@ class Settings:
     #: is what makes the pick survive a Houdini restart anyway, reapplied
     #: onto the next `session/new` (`AgentPanel._reapply_remembered_config`).
     config_options_by_agent: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: What each agent's own `initialize` said about signing in, the last
+    #: time it connected — see `AgentAuthInfo`. Read by every Settings row,
+    #: not only the one currently connected in this tab.
+    agent_auth_info: dict[str, AgentAuthInfo] = field(default_factory=dict)
+    #: The last sign-in/sign-out attempt per agent id — see `AuthAttempt`.
+    auth_attempts: dict[str, AuthAttempt] = field(default_factory=dict)
 
     # --- serialization
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["installed_agents"] = {k: asdict(v) for k, v in self.installed_agents.items()}
+        payload["agent_auth_info"] = {
+            agent_id: {
+                "methods": [asdict(m) for m in info.methods],
+                "supports_logout": info.supports_logout,
+            }
+            for agent_id, info in self.agent_auth_info.items()
+        }
+        payload["auth_attempts"] = {k: asdict(v) for k, v in self.auth_attempts.items()}
         return payload
 
     @classmethod
@@ -146,6 +211,38 @@ class Settings:
                         str(config_id): str(v) for config_id, v in mapping.items()
                     }
                 settings.config_options_by_agent = by_agent
+            elif name == "agent_auth_info":
+                auth_info: dict[str, AgentAuthInfo] = {}
+                for agent_id, item in (value or {}).items():
+                    if not isinstance(item, dict):
+                        continue
+                    methods = [
+                        AgentAuthMethod(
+                            id=str(m.get("id", "")),
+                            name=str(m.get("name", "")),
+                            description=str(m.get("description", "")),
+                        )
+                        for m in item.get("methods", []) or []
+                        if isinstance(m, dict) and m.get("id")
+                    ]
+                    auth_info[str(agent_id)] = AgentAuthInfo(
+                        methods=methods,
+                        supports_logout=bool(item.get("supports_logout", False)),
+                    )
+                settings.agent_auth_info = auth_info
+            elif name == "auth_attempts":
+                attempts: dict[str, AuthAttempt] = {}
+                for agent_id, item in (value or {}).items():
+                    if not isinstance(item, dict):
+                        continue
+                    attempts[str(agent_id)] = AuthAttempt(
+                        action=str(item.get("action", "sign_in")),
+                        method_id=str(item.get("method_id", "")),
+                        ok=bool(item.get("ok", False)),
+                        message=str(item.get("message", "")),
+                        at=str(item.get("at", "")),
+                    )
+                settings.auth_attempts = attempts
             elif name == "default_agent":
                 settings.default_agent = str(value) if value else None
             elif spec.type == "bool" or isinstance(getattr(settings, name), bool):

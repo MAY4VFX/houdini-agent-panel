@@ -386,6 +386,22 @@ class AgentPanel(QtWidgets.QWidget):
         self._restored: list = []
         self._adopting_restored: str | None = None
         self._last_auth_method: str = ""
+        #: Set by `_on_agent_row_sign_in`/`_on_agent_row_sign_out` when the
+        #: artist clicked Sign in/out on a Settings row for an agent that
+        #: ISN'T this tab's own — there is no way to hold a second live
+        #: connection open per tab (`_agent_id`), so the only route is to
+        #: switch onto it first and open the sign-in screen the moment it
+        #: connects. Consulted (and cleared) by `_complete_pending_auth_
+        #: switch`, called from both places a connect can end up (a brand
+        #: new session via `_on_session_started`, or reattaching to one
+        #: already live via `_on_connected`'s own tail).
+        self._pending_auth_target: str | None = None
+        #: Set for the duration of a `logout()` call so its outcome —
+        #: `auth_required` (success) or `error` (failure) on the SAME
+        #: signals a plain sign-in failure uses — can be told apart and
+        #: recorded as a sign-out attempt rather than a sign-in one
+        #: (`_record_auth_attempt`, issue #33's "last attempt" text).
+        self._pending_logout_agent: str | None = None
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -512,7 +528,8 @@ class AgentPanel(QtWidgets.QWidget):
         view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
         view.install_succeeded.connect(self._on_agent_install_succeeded)
         view.install_failed.connect(self._on_agent_install_failed)
-        view.sign_in_requested.connect(self._offer_sign_in)
+        view.sign_in_requested.connect(self._on_agent_row_sign_in)
+        view.sign_out_requested.connect(self._on_agent_row_sign_out)
         view.restart_agent_requested.connect(self._restart_agent)
         return view
 
@@ -530,6 +547,7 @@ class AgentPanel(QtWidgets.QWidget):
         # start talking to a corpse.
         view.method_chosen.connect(self._on_auth_method_chosen)
         view.logout_requested.connect(self._on_logout_requested)
+        view.cancel_pending.connect(self._on_auth_cancel_pending)
         return view
 
     def _show_page(self, index: int) -> None:
@@ -774,23 +792,82 @@ class AgentPanel(QtWidgets.QWidget):
         self._client_wiring = ()
 
     def _sync_agent_auth_row(self, info: Any) -> None:
-        """Offer "Sign in" only when signing in is what's needed.
+        """Cache what THIS connection's `initialize` said about signing in,
+        and let every Settings row redraw from it.
 
-        `authMethods` from `initialize` says which methods EXIST, not whether
-        the artist has used one — every agent lists them signed in or out. So
-        keying the button on that offered sign-in to someone already working,
-        with a session open and answers coming back. Reported exactly that
-        way for Codex, and it is the same mistake fixed once in the agent
-        switcher and then reintroduced when the button moved to settings.
-
-        The honest signal is whether a session ever opened on this agent: the
-        protocol has no "am I authenticated", but a `session/new` that
-        succeeds is proof, and one that fails with auth_required is proof of
-        the opposite. Signing out stays reachable from the sign-in screen
-        itself, which is where someone who wants to switch accounts goes.
+        Used to gate the Settings row's "Sign in" on `not self._is_signed_
+        in()` — reported for Codex: the row stayed offered while the agent
+        was already answering questions. That fix traded one wrong belief
+        for another: `_is_signed_in()` is itself a guess (the protocol has
+        no "am I authenticated" query — see its own docstring), and issue
+        #33 is the other side of the same coin — an artist stuck on a
+        broken Gemini/Vertex login with the panel silently convinced they
+        were already signed in, and no way back to the screen that would
+        have let them retry. `authMethods`/`supports_logout` cost nothing to
+        get wrong (they're just "does a button do anything"), while gating
+        reachability on a guess about account state can strand someone
+        entirely. So this only caches capability now, unconditionally.
         """
-        can_sign_in = bool(getattr(info, "auth_methods", ())) and not self._is_signed_in()
-        self._settings_view.set_current_agent_auth(self._agent_id, can_sign_in)
+        self._remember_agent_auth_capability(self._agent_id, info)
+        self._refresh_agent_auth_rows()
+
+    def _remember_agent_auth_capability(self, agent_id: str, info: Any) -> None:
+        """Persist what `agent_id`'s `initialize` just reported about
+        signing in — `authMethods`/`supports_logout` are constants of the
+        BUILD, not the account (docs/facts/acp-sdk.md §11), so this stays
+        valid long after the artist switches away from `agent_id`, which is
+        exactly what lets a Settings row for a DIFFERENT, not-currently-
+        connected agent still offer Sign in/Sign out (issue #33).
+        """
+        if not agent_id:
+            return
+        methods = [
+            settings_mod.AgentAuthMethod(id=m.id, name=m.name, description=m.description)
+            for m in getattr(info, "auth_methods", ()) or ()
+        ]
+        supports_logout = bool(getattr(info, "supports_logout", False))
+        current = settings_mod.load()
+        existing = current.agent_auth_info.get(agent_id)
+        if methods:
+            record = settings_mod.AgentAuthInfo(methods=methods, supports_logout=supports_logout)
+            if existing == record:
+                return
+            current.agent_auth_info[agent_id] = record
+        elif existing is not None:
+            # This build offers nothing the panel can manage any more (e.g.
+            # after an update) — drop the stale cache rather than keep
+            # offering a button for a method that no longer exists.
+            del current.agent_auth_info[agent_id]
+        else:
+            return
+        settings_mod.save(current)
+        self._settings = current
+
+    def _refresh_agent_auth_rows(self) -> None:
+        self._settings_view.refresh_agent_auth()
+
+    def _record_auth_attempt(
+        self, agent_id: str, *, action: str, ok: bool, message: str, method_id: str = ""
+    ) -> None:
+        """Persist what a sign-in/out attempt just did, so the Settings row
+        that started it can say so beside the button — even after Houdini
+        restarts, and even for an agent that isn't the one connected right
+        now (issue #33: "a failure is visible where the retry button is
+        rather than in the transcript").
+        """
+        if not agent_id:
+            return
+        current = settings_mod.load()
+        current.auth_attempts[agent_id] = settings_mod.AuthAttempt(
+            action=action,
+            method_id=method_id or self._last_auth_method,
+            ok=ok,
+            message=message,
+            at=settings_mod.AuthAttempt.now(),
+        )
+        settings_mod.save(current)
+        self._settings = current
+        self._refresh_agent_auth_rows()
 
     def _is_signed_in(self) -> bool:
         """Has this agent proved it is authenticated?
@@ -834,17 +911,26 @@ class AgentPanel(QtWidgets.QWidget):
             self._sync_agent_auth_row(info)
 
     def _can_sign_out(self, info: Any) -> bool:
-        """Reported on the Linux machine: the sign-in screen offered "Sign
-        out" on an agent that had never been signed into. It was drawn from
-        `supports_logout`, which Codex advertises either way — the same
-        mistake as the Sign in row, one screen along."""
+        """Whether Sign out is worth drawing at all: the agent has to
+        actually implement logout, and there has to be at least one method
+        to return to afterwards.
+
+        Used to also require `self._is_signed_in()` — reported on the Linux
+        machine: a fresh Codex showed Sign out before anyone had signed in.
+        That guard traded one wrong guess for another: `_is_signed_in()` is
+        itself only a guess (see its own docstring), and gating reachability
+        on it is exactly issue #33's report. `supports_logout`/`auth_
+        methods` are both constants of the BUILD, not the account
+        (docs/facts/acp-sdk.md §11), so this now reflects only what the
+        agent can do — never a guess about whether it's needed right now.
+        """
         if not getattr(info, "auth_methods", ()):
             # The panel only manages authentication it can see. An agent
             # that exposes no methods signs in and out through its own slash
             # commands, and a "Sign out" here would be a button that means
             # nothing — which is what a fresh Claude Agent showed.
             return False
-        return bool(getattr(info, "supports_logout", False)) and self._is_signed_in()
+        return bool(getattr(info, "supports_logout", False))
 
     def _on_connected(self, info: Any) -> None:
         # Third phase. The process answered `initialize`; what remains is the
@@ -881,6 +967,12 @@ class AgentPanel(QtWidgets.QWidget):
             # right away; `_on_session_started` carries the words over.
             self._adopting_restored = current.session_id
             self._start_new_session()
+        else:
+            # A session was already live (a reattach, not a fresh connect) —
+            # `_on_session_started` isn't coming to do this instead, so if
+            # switching here was in aid of signing in (`_on_agent_row_sign_
+            # in`/`_sign_out`), THIS is the last point that can honor it.
+            self._complete_pending_auth_switch()
 
     def _on_disconnected(self, reason: str) -> None:
         self._pending_permissions.clear()
@@ -898,22 +990,38 @@ class AgentPanel(QtWidgets.QWidget):
         if current is not None:
             self._finish_activity(current.session_id)
         self._composer.set_capabilities(None, self._settings.whisper_endpoint)
-        # No connected agent means no row should offer "Sign in…" either —
-        # otherwise it keeps pointing at a process that no longer exists.
-        self._settings_view.set_current_agent_auth(None, False)
+        # Nothing to un-cache here: `agent_auth_info` survives a disconnect
+        # deliberately (it's a build constant, not a live fact — see
+        # `_remember_agent_auth_capability`), and every OTHER agent's row
+        # was never touched by this one going away.
         # A boot that ended in a dead agent is not progress. The reason goes
         # to the feed; a bar frozen partway would read as "still coming".
         self._composer.cancel_boot()
         self._note(f"Agent disconnected: {reason}" if reason else "Agent stopped.")
+        # A switch that was in aid of signing in has nowhere left to land —
+        # the agent it was headed for just went away.
+        self._pending_auth_target = None
+        self._pending_logout_agent = None
 
     def _on_failed(self, message: str) -> None:
         self._composer.cancel_boot()
         self._note(f"Agent failed to start: {message}")
         self._open_agent_management()
+        self._pending_auth_target = None
+        self._pending_logout_agent = None
 
     def _on_auth_required(self, methods: list) -> None:
         # Whatever we thought, the agent has just said otherwise.
         self._remember_signed_in(False)
+        if self._pending_logout_agent == self._agent_id:
+            # `do_logout` reports success this way: the agent has nothing
+            # of its own to signal "logged out" with, so it just answers
+            # with the same auth_required it would after any other loss of
+            # credentials (`client.py::do_logout`'s own docstring).
+            self._pending_logout_agent = None
+            self._record_auth_attempt(
+                self._agent_id, action="sign_out", ok=True, message="Signed out."
+            )
         info = shared_client(self._agent_id).agent_info()
         if not methods:
             self._offer_login_command(info)
@@ -1001,15 +1109,20 @@ class AgentPanel(QtWidgets.QWidget):
         state.busy = False
         self._models.setdefault(session_id, TranscriptModel())
         self._pool.add(state)
-        # A session opening is the proof that this agent is signed in — the
-        # protocol offers no other. Re-evaluate now, or the Sign in button
-        # stays offered to somebody already talking to it.
+        # Re-cache this agent's auth capability now that we have a live
+        # `agent_info()` again — cheap, and keeps the Settings row current
+        # even though nothing about signing in actually depends on a
+        # session existing any more (see `_sync_agent_auth_row`).
         info = shared_client(self._agent_id).agent_info()
         if info is not None:
             self._sync_agent_auth_row(info)
         self._set_current_session(session_id)
         self._show_session(session_id)
         self._show_page(self.PAGE_TRANSCRIPT)
+        # If this tab switched agents in aid of signing in
+        # (`_on_agent_row_sign_in`/`_sign_out`), THIS is the point that
+        # honors it — after the page above, so it isn't immediately undone.
+        self._complete_pending_auth_switch()
         pending, self._pending_prompt = self._pending_prompt, None
         if pending:
             self._on_submitted(pending)
@@ -1157,12 +1270,29 @@ class AgentPanel(QtWidgets.QWidget):
             self._touch(session_id, entry.id)
 
     def _on_error(self, session_id: str, message: str) -> None:
+        if self._pending_logout_agent == self._agent_id:
+            # A `logout()` requested from a Settings row (rather than the
+            # sign-in screen's own button) has no screen guaranteed to be
+            # open when its answer arrives — the artist may already be back
+            # in Settings. Record it either way, and only ALSO show it on
+            # the auth screen if that's genuinely where it's being watched.
+            self._pending_logout_agent = None
+            self._record_auth_attempt(self._agent_id, action="sign_out", ok=False, message=message)
+            if self._pages.currentIndex() == self.PAGE_AUTH:
+                self._auth_view.show_error(message, self._last_auth_method)
+            else:
+                self._note(f"Sign out failed: {message}")
+            return
         # A failure while the artist is on the sign-in screen has to appear
         # THERE. Reporting it into a feed they cannot see is the same as not
         # reporting it: the screen just sits, which is indistinguishable from
         # a login that quietly did nothing.
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.show_error(message, self._last_auth_method)
+            self._record_auth_attempt(
+                self._agent_id, action="sign_in", ok=False, message=message,
+                method_id=self._last_auth_method,
+            )
             return
         target = session_id or (self._current_session().session_id if self._current_session() else "")
         if not target:
@@ -1948,17 +2078,90 @@ class AgentPanel(QtWidgets.QWidget):
             "(or OPENAI_API_KEY) in your shell profile, then restart Houdini. "
             "The panel picks up your login shell's variables at start."
         ),
+        # Kimi's own auth method id (`auth_required: ['login']`,
+        # docs/facts/acp-sdk.md §8) — falls back to this ONLY if the agent's
+        # own `description` is empty (`_auth_advice_for` prefers that first).
+        # Real Kimi never hits this: its method carries a description
+        # ("Run `kimi login` command in the terminal…", §13/§14) that is
+        # both more precise than this guess and guaranteed not to go stale.
+        # Like `chat-gpt`, `authenticate` stays pending indefinitely rather
+        # than returning quickly — but unlike `chat-gpt`'s browser, Kimi's
+        # `login` isn't answered over the ACP channel at all; it wants a
+        # SECOND, separate `kimi login` process the panel doesn't spawn yet
+        # (§13 consequence 3) — hence "check its own command-line window"
+        # rather than promising a browser that will never open here.
+        "login": (
+            "Waiting for the agent to finish signing in — this can take a "
+            "few seconds. If nothing opens in Houdini, this agent may be "
+            "expecting it in its OWN command-line window instead; check "
+            "there. The panel is watching either way and will move on the "
+            "moment it succeeds."
+        ),
     }
+    #: The fallback for any method id not in `_AUTH_ADVICE` above — still
+    #: names both places the rest of a browser-based sign-in could be
+    #: happening (docs/facts/acp-sdk.md §12-13: Codex and grok both spawn a
+    #: real browser process the client never sees a URL from; gemini emits
+    #: no URL at all, only a device code retried in stderr) — rather than
+    #: assuming a browser is the only possibility just because that's the
+    #: most-measured case.
+    _GENERIC_AUTH_ADVICE = (
+        "Signing in with {method}… if a browser window opens, finish it "
+        "there; some agents complete sign-in in their own command-line "
+        "tool instead. The panel is waiting either way."
+    )
+
+    def _auth_advice_for(self, method_id: str) -> str:
+        """What to say while `authenticate(method_id)` is in flight.
+
+        The agent's OWN `description` for this method, if it bothered to
+        set one, beats anything guessed here — this repo's rule is that the
+        agent decides what exists, and a description is the agent talking
+        directly to whoever is about to click. Measured proof this matters:
+        Kimi's `login` describes itself as "Run `kimi login` command in the
+        terminal, then follow the instructions to finish login."
+        (docs/facts/acp-sdk.md §13) — more precise than any static guess,
+        and it can never go stale the way a hardcoded id-keyed table would
+        if Kimi changed how its own login worked. `_AUTH_ADVICE`/`_GENERIC_
+        AUTH_ADVICE` only fill in for methods that describe themselves with
+        nothing at all — measured true of `chat-gpt`/`api-key`/`grok.com`.
+        """
+        info = shared_client(self._agent_id).agent_info()
+        if info is not None:
+            for method in info.auth_methods:
+                if method.id == method_id and method.description:
+                    return method.description
+        return self._AUTH_ADVICE.get(
+            method_id, self._GENERIC_AUTH_ADVICE.format(method=method_id)
+        )
 
     def _on_auth_method_chosen(self, method_id: str) -> None:
         self._last_auth_method = method_id
-        self._note(
-            self._AUTH_ADVICE.get(
-                method_id,
-                f"Signing in with {method_id}… if a browser window opens, finish it there.",
-            )
-        )
+        message = self._auth_advice_for(method_id)
+        self._note(message)
+        # On screen too, not only in a feed the artist may have already
+        # scrolled past by the time a browser actually appears (issue #33):
+        # before this, the sign-in screen went quiet the instant a method
+        # was picked, and a Codex login that was genuinely working looked
+        # identical to a Kimi one stuck for some other reason — both
+        # silence. `set_pending` also disables the buttons for the wait;
+        # `AuthView.cancel_pending`/`_on_auth_cancel_pending` is the way
+        # back if the artist gives up watching.
+        self._auth_view.set_pending(message)
         shared_client(self._agent_id).authenticate(method_id)
+
+    def _on_auth_cancel_pending(self) -> None:
+        """The artist gave up waiting on a pending `authenticate()` call.
+
+        UI-only: there is no protocol call to cancel `authenticate()`
+        itself (docs/facts/acp-sdk.md §12 — a client-side timeout would
+        break a login that's actually working, so the panel has none and
+        must not grow one here either). The call is simply left to resolve
+        on its own; `_on_authenticated`/`_on_error` still apply whenever it
+        does, even if the artist has since picked a different method or
+        left the screen entirely. This only gives the method list back.
+        """
+        self._auth_view.clear_pending()
 
     def _on_authenticated(self, method_id: str) -> None:
         """Sign-in worked — get out of the way and open a conversation.
@@ -1969,6 +2172,10 @@ class AgentPanel(QtWidgets.QWidget):
         """
         self._note("Signed in.")
         self._remember_signed_in(True)
+        self._record_auth_attempt(
+            self._agent_id, action="sign_in", ok=True, message="Signed in.", method_id=method_id
+        )
+        self._auth_view.clear_pending()
         self._show_page(self.PAGE_TRANSCRIPT)
         if self._current_session() is None:
             self._start_new_session()
@@ -1981,8 +2188,55 @@ class AgentPanel(QtWidgets.QWidget):
         shows up on its own, no separate branch needed here. If the agent
         couldn't log out, an `error` arrives instead and the human stays
         put: silently pretending the logout happened isn't an option.
+
+        Reachable from two places now: the sign-in screen's own Sign out
+        button, and (issue #33) a Settings row's Sign out, which can fire
+        with no sign-in screen open at all — `_pending_logout_agent` is how
+        `_on_auth_required`/`_on_error` tell a logout's own outcome apart
+        from an ordinary sign-in failure landing on the same two signals.
         """
+        self._pending_logout_agent = self._agent_id
         shared_client(self._agent_id).logout()
+
+    def _on_agent_row_sign_in(self, agent_id: str) -> None:
+        """"Sign in…" clicked on a Settings row — for ANY installed agent
+        with cached auth methods, not only the one this tab happens to be
+        connected to right now (issue #33). The current agent's own row
+        opens the sign-in screen directly; any other row switches this tab
+        onto that agent first — there is no way to hold a second live
+        connection open per tab (see `_agent_id`) — and opens it the moment
+        that agent actually connects (`_complete_pending_auth_switch`).
+        """
+        if agent_id == self._agent_id:
+            self._offer_sign_in()
+            return
+        self._pending_auth_target = agent_id
+        self._on_agent_chosen(agent_id)
+
+    def _on_agent_row_sign_out(self, agent_id: str) -> None:
+        """"Sign out" clicked on a Settings row. For the currently connected
+        agent this logs out immediately — no need to detour through the
+        sign-in screen just to press the same button that lives there. For
+        any other agent, same detour as Sign in: switch to it and land on
+        its sign-in screen, rather than firing a logout at an agent nobody
+        is looking at yet.
+        """
+        if agent_id == self._agent_id:
+            self._on_logout_requested()
+            return
+        self._pending_auth_target = agent_id
+        self._on_agent_chosen(agent_id)
+
+    def _complete_pending_auth_switch(self) -> None:
+        """The agent `_on_agent_row_sign_in`/`_sign_out` switched this tab
+        onto has just finished connecting — open its sign-in screen, the
+        whole reason the switch happened. Called from both places a connect
+        can end up: `_on_session_started` (a fresh session) and the tail of
+        `_on_connected` (reattaching to one that was already live, where no
+        new session — and so no `_on_session_started` — is coming)."""
+        if self._pending_auth_target and self._pending_auth_target == self._agent_id:
+            self._pending_auth_target = None
+            self._offer_sign_in()
 
     def _ask_telemetry_consent_once(self) -> None:
         """Ask about telemetry exactly once, ever.

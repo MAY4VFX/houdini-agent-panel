@@ -241,10 +241,14 @@ class SettingsView(QtWidgets.QWidget):
     #: generic `changed` (settings reload) doesn't carry enough to do.
     install_succeeded = Signal(str)
     install_failed = Signal(str, str)
-    #: Forwarded from `AgentsView` — the panel is the one that actually
-    #: knows how to open the sign-in screen (`AgentPanel._offer_sign_in`);
-    #: this view only knows registry/runtime/settings, never the connection.
-    sign_in_requested = Signal()
+    #: Forwarded from `AgentsView`, `agent_id` — the panel is the one that
+    #: actually knows how to act on it (open the sign-in screen directly for
+    #: the agent this tab is already connected to, or switch onto a
+    #: different one first — `AgentPanel._on_agent_row_sign_in`); this view
+    #: only knows registry/runtime/settings, never the connection.
+    sign_in_requested = Signal(str)
+    #: Same, for "Sign out" (`AgentPanel._on_agent_row_sign_out`).
+    sign_out_requested = Signal(str)
     #: Fired only by the three Network fields (proxy/no-proxy/CA bundle),
     #: never by any other field — an agent reads its environment once, at
     #: spawn (docs/2026-08-03-proxy-support.md), so ONLY these three leave a
@@ -313,6 +317,7 @@ class SettingsView(QtWidgets.QWidget):
         self._agents_view.install_succeeded.connect(self.install_succeeded.emit)
         self._agents_view.install_failed.connect(self.install_failed.emit)
         self._agents_view.sign_in_requested.connect(self.sign_in_requested.emit)
+        self._agents_view.sign_out_requested.connect(self.sign_out_requested.emit)
 
         self._autostart_checkbox = QtWidgets.QCheckBox("Autostart agent when the panel opens")
         self._autostart_checkbox.toggled.connect(self._on_field_changed)
@@ -587,9 +592,9 @@ class SettingsView(QtWidgets.QWidget):
         """Forwarded to the embedded `AgentsView` — see its `trigger_update`."""
         return self._agents_view.trigger_update(agent_id)
 
-    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None:
-        """Forwarded to the embedded `AgentsView` — see its `set_current_agent_auth`."""
-        self._agents_view.set_current_agent_auth(agent_id, can_sign_in)
+    def refresh_agent_auth(self) -> None:
+        """Forwarded to the embedded `AgentsView` — see its `refresh_auth_rows`."""
+        self._agents_view.refresh_auth_rows()
 
     def reload(self) -> None:
         """Re-read `settings.json` from disk and refresh the controls without

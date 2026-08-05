@@ -57,18 +57,56 @@ def test_sign_in_is_reachable_from_the_settings_agents_row(qapp, monkeypatch):
     """The manual entry point moved from the header chip's switcher menu to
     the Settings screen's agent row (an artist's complaint: "Claude is
     already signed in, why offer it there, and why not next to the agent
-    itself" — both fair, see `ui/agents.py::_AgentRow`'s `can_sign_in`).
+    itself" — both fair, see `ui/agents.py::_AgentRow`'s `has_auth`).
     `_offer_sign_in` itself — and the forced `auth_required` screen — are
-    unchanged; only who can reach it moved.
+    unchanged; only who can reach it moved. The signal now carries the
+    agent id (issue #33: any installed agent's row can send it, not only
+    the one this tab happens to be connected to) — this test's own agent
+    IS the current one, so `_on_agent_row_sign_in` routes it straight to
+    `_offer_sign_in` with no detour through switching agents.
     """
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "agent_info", lambda: _info())
 
-    widget._settings_view.sign_in_requested.emit()
+    widget._settings_view.sign_in_requested.emit(widget._agent_id)
     qapp.processEvents()
 
+    assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_AUTH
+    widget.shutdown()
+
+
+def test_sign_in_for_a_different_agent_switches_to_it_first(qapp, monkeypatch):
+    """Issue #33: Sign in is reachable from Settings for ANY installed
+    agent, not only the one this tab happens to be connected to. There is
+    no way to hold a second live connection open per tab (`_agent_id`), so
+    `_on_agent_row_sign_in` switches this tab onto the requested agent —
+    driven here directly rather than through a real subprocess launch,
+    same as `_on_agent_chosen` itself is exercised elsewhere in this
+    suite — and opens its sign-in screen the moment it actually connects.
+    """
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+
+    switched: list[str] = []
+    monkeypatch.setattr(widget, "_on_agent_chosen", switched.append)
+
+    widget._settings_view.sign_in_requested.emit("codex-acp")
+    qapp.processEvents()
+
+    assert switched == ["codex-acp"]
+    assert widget._pending_auth_target == "codex-acp"
+
+    # The switch this test stubbed out would normally end with THIS tab's
+    # `_agent_id` now being "codex-acp" and a live `agent_info()` for it —
+    # simulate exactly that much, then let the connect flow's own tail run.
+    widget._agent_id = "codex-acp"
+    client = panel_mod.shared_client("codex-acp")
+    monkeypatch.setattr(client, "agent_info", lambda: _info())
+    widget._complete_pending_auth_switch()
+
+    assert widget._pending_auth_target is None
     assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_AUTH
     widget.shutdown()
 

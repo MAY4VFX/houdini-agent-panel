@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 #: Same centred column width as the feed, the composer and settings.
 _RAIL_WIDTH = 736
+#: Floor for the centred rail — see `Composer._MIN_RAIL_WIDTH`.
+_MIN_RAIL_WIDTH = 180
 
 
 def _clear_layout(layout: "QtWidgets.QLayout") -> None:
@@ -35,6 +37,10 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
 class AuthView(QtWidgets.QWidget):
     method_chosen = Signal(str)
     logout_requested = Signal()
+    #: The artist gave up waiting on a pending `authenticate()` call and
+    #: wants the method list back — see `set_pending`'s docstring for why
+    #: this can't actually cancel anything on the protocol side.
+    cancel_pending = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -61,6 +67,37 @@ class AuthView(QtWidgets.QWidget):
         self._error_label.setVisible(False)
         self._buttons: dict[str, QtWidgets.QPushButton] = {}
 
+        # Shown while `authenticate()` is in flight for a method that opens
+        # a browser or waits on another CLI — these don't return until the
+        # human finishes elsewhere (docs/facts/acp-sdk.md §12: Codex
+        # `chat-gpt` and Kimi `login` both stay open indefinitely, and
+        # returning without raising IS the success signal). Before this
+        # existed, the screen went quiet the instant a method was picked —
+        # a Codex login that was genuinely working and a Kimi one stuck for
+        # some other reason looked identical: both silence. The method
+        # buttons are disabled rather than hidden — the list is still the
+        # true answer to "what are my choices", it's just not the moment to
+        # press one again — and Cancel gives the artist the list back
+        # without pretending the underlying call was actually stopped.
+        # Flat siblings of `_error_label` in `rail_layout` below, not one
+        # extra wrapper widget with its own nested layout: a `QWidget` that
+        # starts out hidden and only grows real (wrapped, multi-line)
+        # content once shown doesn't reliably tell its OWN parent layout to
+        # re-measure it under every Qt backend — the same word-wrapped
+        # `QLabel` sitting directly in `rail_layout`, exactly like `_error_
+        # label` two lines below, has no such extra hop and measures
+        # correctly the same way `_error_label` already does.
+        self._pending_label = QtWidgets.QLabel()
+        self._pending_label.setWordWrap(True)
+        self._pending_label.setVisible(False)
+        self._cancel_pending_button = QtWidgets.QPushButton("Cancel")
+        self._cancel_pending_button.setVisible(False)
+        self._cancel_pending_button.clicked.connect(self._on_cancel_pending)
+        self._cancel_pending_row = QtWidgets.QHBoxLayout()
+        self._cancel_pending_row.setContentsMargins(0, 0, 0, 0)
+        self._cancel_pending_row.addStretch(1)
+        self._cancel_pending_row.addWidget(self._cancel_pending_button)
+
         self.setStyleSheet(
             'QPushButton[signInFailed="true"] {'
             " color: palette(disabled, text);"
@@ -78,6 +115,8 @@ class AuthView(QtWidgets.QWidget):
         rail_layout.addWidget(title)
         rail_layout.addWidget(self._empty_label)
         rail_layout.addWidget(self._error_label)
+        rail_layout.addWidget(self._pending_label)
+        rail_layout.addLayout(self._cancel_pending_row)
         rail_layout.addLayout(self._methods_layout)
         # Sign out belongs with the choices, not pinned to the floor. The
         # stretch used to sit here, which pushed it to the bottom of however
@@ -96,6 +135,33 @@ class AuthView(QtWidgets.QWidget):
         layout.addStretch(1)
         layout.addWidget(rail, 0, QtCore.Qt.AlignHCenter)
         layout.addStretch(1)
+        self._rail = rail
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        """Don't let the rail's fixed width become this view's minimum —
+        same reason as `Composer.minimumSizeHint`/`SettingsView.
+        minimumSizeHint`: a `setFixedWidth` child propagates its width
+        upward as a minimum, which would pin the whole panel wide."""
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(min(hint.width(), _MIN_RAIL_WIDTH), hint.height())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """`rail` only had `setMaximumWidth` — its ACTUAL width was whatever
+        its narrowest content (a button, "Sign in") wanted, often far
+        narrower than 736px. That was invisible for a one-line error, but a
+        longer message (the pending-state text, docs/facts/acp-sdk.md §12)
+        needs several wrapped lines at that width — and a widget sized via
+        `addWidget(rail, 0, AlignHCenter)` computes its height from a
+        sizeHint fixed at THAT narrow width, which under-reserves height for
+        a WIDER rail's word-wrap and clips the last line. Same fix
+        `SettingsView.resizeEvent`/`Composer.resizeEvent` already use for
+        exactly this "centred rail, up to 736px" pattern: give it an
+        explicit, real width, so the wrapped labels measure themselves
+        against the width they will actually have — not a guess.
+        """
+        super().resizeEvent(event)
+        width = max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 32))
+        self._rail.setFixedWidth(width)
 
     def set_methods(self, methods: list["AuthMethod"], *, can_logout: bool) -> None:
         """Redraw the list of sign-in methods. An empty list isn't an error:
@@ -115,6 +181,10 @@ class AuthView(QtWidgets.QWidget):
             self._buttons[method.id] = button
 
         self._logout_button.setVisible(can_logout)
+        # A fresh method list means whatever was in flight before is moot —
+        # e.g. `auth_required` firing again after a failed attempt, or the
+        # artist switching to a different agent's sign-in screen entirely.
+        self.clear_pending()
 
     def show_error(self, message: str, method_id: str = "") -> None:
         """Report a failed sign-in on the screen the artist is looking at.
@@ -126,6 +196,7 @@ class AuthView(QtWidgets.QWidget):
         the working door shut. Marking says "this one just failed" without
         pretending to know it will fail forever.
         """
+        self.clear_pending()
         self._error_label.setText(message)
         self._error_label.setVisible(bool(message))
         for identifier, button in self._buttons.items():
@@ -142,6 +213,32 @@ class AuthView(QtWidgets.QWidget):
             button.setProperty("signInFailed", False)
             button.style().unpolish(button)
             button.style().polish(button)
+
+    def set_pending(self, message: str) -> None:
+        """`authenticate()` is now in flight for whichever method the artist
+        just picked. `message` is composed by the caller (`ui/panel.py`
+        knows what each method id actually does — browser vs. an agent's
+        own CLI, docs/facts/acp-sdk.md §12) — this view only draws it, same
+        division of labour as everywhere else in this file.
+        """
+        self.clear_error()
+        self._pending_label.setText(message)
+        self._pending_label.setVisible(True)
+        self._cancel_pending_button.setVisible(True)
+        for button in self._buttons.values():
+            button.setEnabled(False)
+        self._logout_button.setEnabled(False)
+
+    def clear_pending(self) -> None:
+        self._pending_label.setVisible(False)
+        self._cancel_pending_button.setVisible(False)
+        for button in self._buttons.values():
+            button.setEnabled(True)
+        self._logout_button.setEnabled(True)
+
+    def _on_cancel_pending(self) -> None:
+        self.clear_pending()
+        self.cancel_pending.emit()
 
 
 __all__ = ["AuthView"]

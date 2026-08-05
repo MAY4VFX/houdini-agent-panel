@@ -32,3 +32,59 @@ def test_config_options_by_agent_ignores_malformed_entries(tmp_path):
     )
     reloaded = settings_module.load(path)
     assert reloaded.config_options_by_agent == {"codex-acp": {"model": "5"}}
+
+
+def test_agent_auth_info_round_trips(tmp_path):
+    """`agent_auth_info` is what lets a Settings row offer Sign in/Sign out
+    for an agent that isn't the one connected right now (issue #33) — it
+    has to survive a Houdini restart, not just live in memory."""
+    path = tmp_path / "settings.json"
+    current = Settings()
+    current.agent_auth_info["codex-acp"] = settings_module.AgentAuthInfo(
+        methods=[
+            settings_module.AgentAuthMethod(id="chat-gpt", name="ChatGPT"),
+            settings_module.AgentAuthMethod(id="api-key", name="API key", description="env var"),
+        ],
+        supports_logout=True,
+    )
+    settings_module.save(current, path)
+
+    reloaded = settings_module.load(path)
+    info = reloaded.agent_auth_info["codex-acp"]
+    assert [m.id for m in info.methods] == ["chat-gpt", "api-key"]
+    assert info.methods[1].description == "env var"
+    assert info.supports_logout is True
+
+
+def test_agent_auth_info_ignores_malformed_entries(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"agent_auth_info": {"codex-acp": "not-a-dict", '
+        '"claude-acp": {"methods": [{"name": "no id"}, {"id": "m", "name": "ok"}], '
+        '"supports_logout": true}}}',
+        "utf-8",
+    )
+    reloaded = settings_module.load(path)
+    assert "codex-acp" not in reloaded.agent_auth_info
+    info = reloaded.agent_auth_info["claude-acp"]
+    # The entry with no "id" is dropped, same tolerance as every other field.
+    assert [m.id for m in info.methods] == ["m"]
+
+
+def test_auth_attempts_round_trip(tmp_path):
+    """The last sign-in/out attempt per agent — shown beside the Settings
+    row that started it (issue #33)."""
+    path = tmp_path / "settings.json"
+    current = Settings()
+    current.auth_attempts["codex-acp"] = settings_module.AuthAttempt(
+        action="sign_in", method_id="chat-gpt", ok=False,
+        message="Internal error: CODEX_API_KEY or OPENAI_API_KEY is not set",
+        at="2026-08-05T00:00:00+00:00",
+    )
+    settings_module.save(current, path)
+
+    reloaded = settings_module.load(path)
+    attempt = reloaded.auth_attempts["codex-acp"]
+    assert attempt.action == "sign_in"
+    assert attempt.ok is False
+    assert "CODEX_API_KEY" in attempt.message

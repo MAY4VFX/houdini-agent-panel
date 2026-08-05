@@ -77,6 +77,20 @@ def _installed_record(agent_id: str, current_settings) -> "settings_module.Insta
     return settings_module.InstalledAgent(agent_id=agent_id, version=version, kind="binary")
 
 
+def _auth_status_text(attempt: "settings_module.AuthAttempt | None") -> str:
+    """What a Settings row says about the last sign-in/out attempt on this
+    agent — right beside the button that would retry it, not left behind in
+    a transcript the artist may no longer be looking at, or on a sign-in
+    screen for an agent that isn't even the one connected right now. Both
+    are exactly issue #33's report."""
+    if attempt is None:
+        return ""
+    if attempt.ok:
+        return "Signed in." if attempt.action == "sign_in" else "Signed out."
+    verb = "Sign-in failed" if attempt.action == "sign_in" else "Sign-out failed"
+    return f"{verb}: {attempt.message}" if attempt.message else verb
+
+
 def _state_text(installed, update: "Update | None") -> str:
     """What this agent's row says about itself.
 
@@ -110,13 +124,25 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
 
 
 class _AgentRow(QtWidgets.QWidget):
-    """One row: a registry agent, or a "custom agent" entry."""
+    """One row: a registry agent, or a "custom agent" entry.
+
+    Two lines when the agent has anything to say about signing in: the
+    usual name/state/install-update-remove line, and a second line beneath
+    it — Sign in, Sign out (if the agent implements logout), and whatever
+    the last attempt did. Both buttons are offered whenever the agent has
+    ever reported auth methods, for ANY installed agent, not gated on
+    whether the panel currently believes this one is signed in or out —
+    that belief is a guess (`AgentPanel._is_signed_in`, docs/facts/acp-
+    sdk.md §11), and gating reachability on a guess is exactly how someone
+    got stranded (issue #33).
+    """
 
     install_requested = Signal()
     update_requested = Signal()
     uninstall_requested = Signal()
     remove_custom_requested = Signal()
     sign_in_requested = Signal()
+    sign_out_requested = Signal()
 
     #: Fixed width for the state column and the actions column. Letting them
     #: size to content made every row's buttons land at a different x —
@@ -137,13 +163,19 @@ class _AgentRow(QtWidgets.QWidget):
         is_installed: bool = False,
         has_update: bool = False,
         is_custom: bool = False,
-        can_sign_in: bool = False,
+        has_auth: bool = False,
+        can_sign_out: bool = False,
+        auth_status: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
-        layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(8)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(4, 2, 4, 2)
+        outer.setSpacing(2)
+
+        top = QtWidgets.QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
 
         name_box = QtWidgets.QWidget(self)
         name_layout = QtWidgets.QHBoxLayout(name_box)
@@ -157,19 +189,19 @@ class _AgentRow(QtWidgets.QWidget):
             version_label.setStyleSheet("color: palette(disabled, text);")
             name_layout.addWidget(version_label)
         name_layout.addStretch(1)
-        layout.addWidget(name_box, 1)
+        top.addWidget(name_box, 1)
 
         self._state_label = QtWidgets.QLabel(unavailable_reason or state_text, self)
         self._state_label.setMinimumWidth(self._STATE_COLUMN_WIDTH)
         self._state_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         if unavailable_reason:
             self._state_label.setStyleSheet("color: palette(disabled, text);")
-        layout.addWidget(self._state_label)
+        top.addWidget(self._state_label)
 
         self._progress = QtWidgets.QProgressBar(self)
         self._progress.setVisible(False)
         self._progress.setMaximumWidth(120)
-        layout.addWidget(self._progress)
+        top.addWidget(self._progress)
 
         self._actions = QtWidgets.QWidget(self)
         self._actions.setFixedWidth(self._ACTIONS_COLUMN_WIDTH)
@@ -177,7 +209,8 @@ class _AgentRow(QtWidgets.QWidget):
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(6)
         actions_layout.addStretch(1)
-        layout.addWidget(self._actions)
+        top.addWidget(self._actions)
+        outer.addLayout(top)
 
         self.unavailable = bool(unavailable_reason)
         if self.unavailable:
@@ -186,17 +219,32 @@ class _AgentRow(QtWidgets.QWidget):
             # agent is shown, not hidden).
             return
 
-        if can_sign_in:
-            # Only ever true for whichever row is the currently connected
-            # agent (`AgentsView.set_current_agent_auth`, driven by the
-            # panel's own `agent_info()`) — moved here from the header
-            # chip's switcher menu, which used to show "Sign in…" next to
-            # every agent regardless of which one was actually running, or
-            # whether the artist had already signed in. This is a setting
-            # of the agent, not a choice about which agent to talk to.
-            sign_in_btn = QtWidgets.QPushButton("Sign in…", self._actions)
+        if has_auth:
+            # A second line, not squeezed into the actions column above:
+            # Sign in, Sign out (only if this agent implements logout) and
+            # whatever the last attempt actually did — reachable here at
+            # any time, for any installed agent, whether or not it's the
+            # one this tab is connected to right now (`AgentPanel.
+            # _on_agent_row_sign_in`/`_sign_out` handle switching to it
+            # first when it isn't).
+            auth_row = QtWidgets.QHBoxLayout()
+            auth_row.setContentsMargins(0, 0, 0, 0)
+            auth_row.setSpacing(6)
+            sign_in_btn = QtWidgets.QPushButton("Sign in…", self)
             sign_in_btn.clicked.connect(self.sign_in_requested.emit)
-            actions_layout.addWidget(sign_in_btn)
+            auth_row.addWidget(sign_in_btn)
+            if can_sign_out:
+                sign_out_btn = QtWidgets.QPushButton("Sign out", self)
+                sign_out_btn.clicked.connect(self.sign_out_requested.emit)
+                auth_row.addWidget(sign_out_btn)
+            if auth_status:
+                status_label = QtWidgets.QLabel(auth_status, self)
+                status_label.setStyleSheet("color: palette(disabled, text);")
+                status_label.setWordWrap(True)
+                auth_row.addWidget(status_label, 1)
+            else:
+                auth_row.addStretch(1)
+            outer.addLayout(auth_row)
 
         if is_custom:
             remove_btn = QtWidgets.QPushButton("Remove", self._actions)
@@ -252,11 +300,15 @@ class AgentsView(QtWidgets.QWidget):
     #: panel) needs the fact too: a silent failure here is exactly what a
     #: broken button looks like from the artist's side.
     install_failed = Signal(str, str)
-    #: The artist clicked "Sign in…" on whichever row is the currently
-    #: connected agent (see `set_current_agent_auth`) — this view knows
-    #: nothing about the agent connection itself (design.md's four layers),
-    #: so opening the actual sign-in screen is entirely the panel's call.
-    sign_in_requested = Signal()
+    #: `agent_id` — the artist clicked "Sign in…" on that agent's row. Any
+    #: installed agent can send this, not only the one currently connected
+    #: in this tab (issue #33) — this view knows nothing about agent
+    #: connections themselves (design.md's four layers), so acting on it
+    #: (open the sign-in screen directly, or switch this tab onto that
+    #: agent first) is entirely the panel's call.
+    sign_in_requested = Signal(str)
+    #: `agent_id` — same, for "Sign out".
+    sign_out_requested = Signal(str)
 
     def __init__(
         self,
@@ -291,11 +343,6 @@ class AgentsView(QtWidgets.QWidget):
         # Guards a rapid double-click (row AND banner both reachable for the
         # same agent) from starting two installs onto the same files at once.
         self._installing: set[str] = set()
-        # Which agent id is the one actually connected right now, and
-        # whether ITS `initialize` declared any auth methods — the only row
-        # that ever gets a "Sign in…" button (`set_current_agent_auth`).
-        self._current_agent_id: str | None = None
-        self._current_agent_can_sign_in = False
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
@@ -351,18 +398,14 @@ class AgentsView(QtWidgets.QWidget):
         self._updates_by_target = {u.target: u for u in (updates or []) if u.kind == "agent"}
         self._rebuild_registry_rows()
 
-    def set_current_agent_auth(self, agent_id: str | None, can_sign_in: bool) -> None:
-        """Which agent is actually connected right now, and whether ITS
-        `initialize` declared any auth methods at all.
-
-        Not "needs to sign in" — an agent declares its methods whether or
-        not the artist is already signed in (design.md/architecture.md have
-        no protocol signal for "currently authenticated" to check instead).
-        Only the row for `agent_id` ever gets the button; every other row
-        must not have one, registry or custom.
+    def refresh_auth_rows(self) -> None:
+        """Redraw every row's sign-in section from `settings.agent_auth_info`
+        /`auth_attempts` — called whenever either changes (a fresh connect
+        cached new methods, or a sign-in/out attempt just resolved), for
+        ANY agent, not only whichever one this tab happens to be connected
+        to right now (issue #33). Both rebuilders already re-read settings
+        from disk on every call, so there is nothing else to pass in here.
         """
-        self._current_agent_id = agent_id
-        self._current_agent_can_sign_in = can_sign_in
         self._rebuild_registry_rows()
         self._load_custom_agents()
 
@@ -396,6 +439,8 @@ class AgentsView(QtWidgets.QWidget):
             reason = entry.unavailable_reason()
             installed = _installed_record(entry.id, current_settings)
             update = self._updates_by_target.get(entry.id)
+            auth_info = current_settings.agent_auth_info.get(entry.id)
+            attempt = current_settings.auth_attempts.get(entry.id)
             row = _AgentRow(
                 name=entry.name,
                 version=entry.version,
@@ -410,13 +455,16 @@ class AgentsView(QtWidgets.QWidget):
                     and installed is not None
                     and is_newer(update.latest, installed.version)
                 ),
-                can_sign_in=(entry.id == self._current_agent_id and self._current_agent_can_sign_in),
+                has_auth=bool(auth_info and auth_info.methods),
+                can_sign_out=bool(auth_info and auth_info.supports_logout),
+                auth_status=_auth_status_text(attempt),
                 parent=self,
             )
             row.install_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
-            row.sign_in_requested.connect(self.sign_in_requested.emit)
+            row.sign_in_requested.connect(lambda checked=False, aid=entry.id: self.sign_in_requested.emit(aid))
+            row.sign_out_requested.connect(lambda checked=False, aid=entry.id: self.sign_out_requested.emit(aid))
             self._rows_layout.addWidget(row)
             self._rows_by_id[entry.id] = row
 
@@ -507,16 +555,21 @@ class AgentsView(QtWidgets.QWidget):
         _clear_layout(self._custom_rows_layout)
         current = settings_module.load()
         for agent in current.custom_agents:
+            auth_info = current.agent_auth_info.get(agent.id)
+            attempt = current.auth_attempts.get(agent.id)
             row = _AgentRow(
                 name=agent.name,
                 version=agent.command,
                 state_text="custom agent",
                 is_custom=True,
-                can_sign_in=(agent.id == self._current_agent_id and self._current_agent_can_sign_in),
+                has_auth=bool(auth_info and auth_info.methods),
+                can_sign_out=bool(auth_info and auth_info.supports_logout),
+                auth_status=_auth_status_text(attempt),
                 parent=self,
             )
             row.remove_custom_requested.connect(lambda checked=False, a=agent: self._remove_custom(a.id))
-            row.sign_in_requested.connect(self.sign_in_requested.emit)
+            row.sign_in_requested.connect(lambda checked=False, aid=agent.id: self.sign_in_requested.emit(aid))
+            row.sign_out_requested.connect(lambda checked=False, aid=agent.id: self.sign_out_requested.emit(aid))
             self._custom_rows_layout.addWidget(row)
 
     def _on_add_custom(self) -> None:
