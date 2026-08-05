@@ -358,3 +358,20 @@ def test_the_last_frame_is_pixel_identical_to_the_sprite(qapp):
         f"{len(differing)} pixels differ between the animation's last frame and the "
         f"sprite it hands over to, first at {differing[0]}"
     )
+
+
+def test_phases_from_a_rejoin_do_not_raise_the_strip(qapp):
+    """Reported from Houdini: with the agent already up, closing the panel
+    tab and opening it again showed the strip full at 4/4 over a live input
+    with the model chips already populated. Reopening a tab replays connect
+    and `session/new` against the running agent, and `set_phase` used to
+    show the strip on its own — a progress report for a start that had
+    happened minutes earlier."""
+    strip = BootStatus()
+
+    strip.set_phase(PHASE_CONNECTING)
+    strip.set_phase(PHASE_SESSION)
+
+    assert strip.isHidden() is True
+    assert strip.is_booting() is False
+    assert strip.fraction() == 0.0

@@ -164,6 +164,13 @@ class BootStatus(QtWidgets.QWidget):
         """
         if phase not in _LABELS:
             return
+        if not self._active:
+            # No boot is running, so there is nothing to report. The phases
+            # are also entered by a panel REJOINING an agent that is already
+            # up — reopening the tab replays connect and session/new — and
+            # this used to show the strip anyway, full at 4/4, over a live
+            # input with the chips already populated. Reported from Houdini.
+            return
         self._phase = phase
         self._detail = detail
         if phase == PHASE_READY:
@@ -187,6 +194,12 @@ class BootStatus(QtWidgets.QWidget):
         an hour, and flashing "ready" at them there would mean nothing.
         """
         if not self._active:
+            # Nothing of ours is running — but if a strip is somehow on
+            # screen it does not get to linger while we decide that. "It
+            # does go away, just not straight away" was the second half of
+            # the report.
+            self._hide_timer.stop()
+            self.hide()
             return
         self.set_phase(PHASE_READY)
 
