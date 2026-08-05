@@ -24,19 +24,24 @@ def _touch(path: Path) -> Path:
 # --- find_hython -------------------------------------------------------
 
 
-def test_find_hython_prefers_hfs_env(tmp_path, monkeypatch):
-    hfs = tmp_path / "custom_hfs"
+def test_find_hython_uses_hfs_env(tmp_path, monkeypatch):
+    """A version-bearing `$HFS` answers directly, without touching the disk
+    search — `_LINUX_OPT_ROOT` is pointed at nothing to prove it."""
+    hfs = tmp_path / "hfs20.5.445"
     hython = _touch(hfs / "bin" / "hython")
     monkeypatch.setenv("HFS", str(hfs))
+    monkeypatch.setattr(deps, "_system", lambda: "linux")
+    monkeypatch.setattr(deps, "_LINUX_OPT_ROOT", tmp_path / "nothing")
 
     assert deps.find_hython("20.5") == hython
 
 
 def test_find_hython_hfs_windows_style(tmp_path, monkeypatch):
-    hfs = tmp_path / "custom_hfs"
+    hfs = tmp_path / "Houdini 20.5.445"
     hython = _touch(hfs / "bin" / "hython.exe")
     monkeypatch.setenv("HFS", str(hfs))
     monkeypatch.setattr(deps, "_system", lambda: "windows")
+    monkeypatch.setattr(deps, "_WINDOWS_PROGRAM_FILES", tmp_path / "nothing")
 
     assert deps.find_hython("20.5") == hython
 
@@ -367,3 +372,53 @@ def test_panel_version_ignores_stale_metadata_and_reports_the_running_code():
 
     assert _panel_version() == __version__
     assert _current_panel_version() == __version__
+
+
+# --- $HFS must not answer for a Houdini it isn't -----------------------------
+
+
+def test_hfs_is_not_used_for_a_different_houdini_version(tmp_path, monkeypatch):
+    """Run from Houdini 22's hython, the 20.5 pass used to pick up 22's
+    hython — because `$HFS` won unconditionally — and installed Python 3.13
+    wheels into the 20.5 package, `pydantic_core` among them. 20.5 runs
+    Python 3.11 and cannot load that binary at all."""
+    from houdini_agent_panel import deps as deps_mod
+
+    hfs22 = tmp_path / "hfs22.0.368"
+    (hfs22 / "bin").mkdir(parents=True)
+    (hfs22 / "bin" / "hython").touch()
+    root = tmp_path / "opt"
+    hfs205 = root / "hfs20.5.445"
+    (hfs205 / "bin").mkdir(parents=True)
+    (hfs205 / "bin" / "hython").touch()
+
+    monkeypatch.setenv("HFS", str(hfs22))
+    monkeypatch.setattr(deps_mod, "_system", lambda: "linux")
+    monkeypatch.setattr(deps_mod, "_LINUX_OPT_ROOT", root)
+
+    assert deps_mod.find_hython("20.5") == hfs205 / "bin" / "hython"
+    assert deps_mod.find_hython("22.0") == hfs22 / "bin" / "hython"
+
+
+def test_hfs_still_wins_when_nothing_is_found_on_disk(tmp_path, monkeypatch):
+    """A studio install in a non-standard location is what the variable is for."""
+    from houdini_agent_panel import deps as deps_mod
+
+    hfs = tmp_path / "studio" / "houdini-build"
+    (hfs / "bin").mkdir(parents=True)
+    (hfs / "bin" / "hython").touch()
+    monkeypatch.setenv("HFS", str(hfs))
+    monkeypatch.setattr(deps_mod, "_system", lambda: "linux")
+    monkeypatch.setattr(deps_mod, "_LINUX_OPT_ROOT", tmp_path / "empty")
+
+    assert deps_mod.find_hython("20.5") == hfs / "bin" / "hython"
+
+
+def test_version_match_is_not_fooled_by_a_longer_number(tmp_path, monkeypatch):
+    from houdini_agent_panel.deps import _mentions_version
+    from pathlib import Path
+
+    assert _mentions_version(Path("/opt/hfs20.5.445"), "20.5") is True
+    assert _mentions_version(Path("/x/Houdini22.0.368/Versions/22.0"), "22.0") is True
+    assert _mentions_version(Path("/opt/hfs20.55"), "20.5") is False
+    assert _mentions_version(Path("/opt/hfs120.5"), "20.5") is False

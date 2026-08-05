@@ -78,23 +78,51 @@ def _hfs_hython(hfs: Path) -> Path:
     return hfs / "bin" / name
 
 
+def _mentions_version(path: Path, houdini_version: str) -> bool:
+    """Does this path belong to `houdini_version`?
+
+    Every layout that exists names the version in the path —
+    `/opt/hfs20.5.445`, `/Applications/Houdini/Houdini22.0.368/…/Versions/22.0`,
+    `C:/Program Files/Side Effects Software/Houdini 20.5.445`. We look for
+    `major.minor` at a boundary, so "20.5" matches "20.5.445" but not
+    "120.5" or "20.55".
+    """
+    pattern = rf"(?<![\d.]){re.escape(houdini_version)}(?![\d])"
+    return re.search(pattern, path.as_posix()) is not None
+
+
 def find_hython(houdini_version: str) -> Path | None:
     """Find `hython` for a given Houdini version (e.g. "20.5").
 
-    `$HFS` is honored first: if the artist (or the Houdini the installer
-    itself is running under) has already pointed at an install directory
-    explicitly, we trust that more than guessing from standard paths. If
-    there are several candidates, we take the newest build.
+    `$HFS` is consulted first, but only when it is an install of the version
+    being asked about — which is not how this started, and the difference
+    cost a broken install.
+
+    `$HFS` used to win unconditionally, reasoning that an explicitly pointed
+    directory beats guessing from standard paths. True for a single Houdini;
+    wrong the moment the installer walks several. Run from Houdini 22's
+    hython (or from inside Houdini itself, where `$HFS` is always set), the
+    pass for Houdini 20.5 also picked up 22's hython, so the 20.5 package
+    got a deps tree of Python 3.13 wheels — including `pydantic_core`, a
+    binary that 20.5's Python 3.11 cannot load at all. Measured here: both
+    passes printed `python 3.13 -> py3.13` and wrote the same `--target`.
+
+    So `$HFS` now has to agree about the version. It still wins outright as
+    a last resort when nothing is found on disk, because a studio install in
+    a non-standard location is exactly what the variable is for.
     """
     hfs = os.environ.get("HFS")
+    hfs_hython: Path | None = None
     if hfs:
         candidate = _hfs_hython(Path(hfs))
         if candidate.is_file():
-            return candidate
+            hfs_hython = candidate
+            if _mentions_version(Path(hfs), houdini_version):
+                return candidate
 
     candidates = _candidate_hythons(houdini_version)
     if not candidates:
-        return None
+        return hfs_hython
     return max(candidates, key=_version_key)
 
 
