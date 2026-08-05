@@ -26,7 +26,7 @@ from . import theme
 from .chips import ChoiceButton, ModeChip
 from .boot_status import BootStatus
 from .qt import QtCore, QtGui, QtWidgets, Signal
-from .thinking import _BuddySprite
+from .thinking import BuddyEntrance, _BuddySprite
 from .voice import VoiceButton
 
 if TYPE_CHECKING:
@@ -657,6 +657,8 @@ class Composer(QtWidgets.QWidget):
         # the layout, so an agent starting never moves the input.
         self._boot_status = BootStatus(self)
         self._boot_scrim = _BootScrim(self)
+        self._entrance = BuddyEntrance(self)
+        self._entrance.finished.connect(self._on_entrance_finished)
 
         self.setStyleSheet(
             "QFrame#composerSurface {"
@@ -848,12 +850,23 @@ class Composer(QtWidgets.QWidget):
             surface_x, surface_y, width, self._surface.height()
         )
         self._boot_scrim.raise_()
+        # Centred on where the buddy stands, with the hole at its feet: the
+        # creature has to come out of the floor it already lives on, not out
+        # of some other spot that happens to be free.
+        buddy = self._buddy.geometry()
+        self._entrance.setGeometry(
+            buddy.center().x() - 60,
+            buddy.y() - 16,
+            120,
+            buddy.height() + 16 + BuddyEntrance._HOLE_H,
+        )
+        self._entrance.raise_()
 
     def boot_status(self) -> BootStatus:
         """The strip, for whoever drives the phases (the panel)."""
         return self._boot_status
 
-    def set_booting(self, booting: bool) -> None:
+    def set_booting(self, booting: bool, *, show_buddy: bool = True) -> None:
         """Cover the input, or uncover it.
 
         The buddy goes away for the duration and comes back with the agent —
@@ -873,8 +886,9 @@ class Composer(QtWidgets.QWidget):
             # widget owns it, so there is nothing to free here.
             self._surface.setGraphicsEffect(None)
             self._boot_scrim.hide()
-            self._buddy.show()
-            self._buddy.raise_()
+            if show_buddy:
+                self._buddy.show()
+                self._buddy.raise_()
         self._text_edit.setReadOnly(booting)
 
     # --- the boot strip, driven by the panel -----------------------------
@@ -887,13 +901,26 @@ class Composer(QtWidgets.QWidget):
         self._boot_status.set_phase(phase, detail)
 
     def finish_boot(self) -> None:
-        """Uncover the input only if it was this boot that covered it."""
+        """Uncover the input only if it was this boot that covered it.
+
+        The buddy does not simply reappear: it climbs back out of a hole
+        (`BuddyEntrance`), and only becomes the real, ticking sprite when
+        that has played. The input is live throughout — the animation is
+        the ending of the boot, not a further wait.
+        """
         was_booting = self._boot_status.is_booting()
         self._boot_status.finish()
-        if was_booting:
-            self.set_booting(False)
+        if not was_booting:
+            return
+        self.set_booting(False, show_buddy=False)
+        self._entrance.play(self._buddy.idle_pixmap())
+
+    def _on_entrance_finished(self) -> None:
+        self._buddy.show()
+        self._buddy.raise_()
 
     def cancel_boot(self) -> None:
+        self._entrance.skip()
         self._boot_status.cancel()
         self.set_booting(False)
 

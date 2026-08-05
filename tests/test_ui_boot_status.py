@@ -156,3 +156,85 @@ def test_finish_does_nothing_when_no_boot_was_running(qapp):
 
     assert strip.phase() == ""
     assert strip.isHidden() is True
+
+
+# --- the buddy's entrance ---------------------------------------------------
+
+
+def test_the_buddy_grows_past_full_size_on_the_way_out_and_settles_back(qapp):
+    """Asked for: it should climb out and swell a little, not merely appear.
+    The swell has to resolve — a companion left permanently 14% too big is
+    a bug, not a flourish."""
+    from houdini_agent_panel.ui.thinking import BuddyEntrance
+
+    entrance = BuddyEntrance()
+    scales = []
+    for i in range(41):
+        entrance._t = i / 40
+        scales.append(entrance._state()[2])
+
+    assert max(scales) > 1.0, "it never grew past its resting size"
+    assert scales[-1] == 1.0, f"it settled at {scales[-1]}, not at full size"
+
+
+def test_the_hole_opens_before_the_buddy_moves_and_closes_after(qapp):
+    from houdini_agent_panel.ui.thinking import BuddyEntrance
+
+    entrance = BuddyEntrance()
+    entrance._t = 0.10
+    hole, rise, _ = entrance._state()
+    assert 0 < hole < 1 and rise == 0, "the buddy started climbing through a shut hole"
+
+    entrance._t = 0.50
+    hole, rise, _ = entrance._state()
+    assert hole == 1.0 and 0 < rise < 1
+
+    entrance._t = 1.0
+    hole, rise, _ = entrance._state()
+    assert hole == 0.0 and rise == 1.0, "the hole was left open behind it"
+
+
+def test_reduced_motion_finishes_at_once_rather_than_never(qapp, monkeypatch):
+    """The caller shows the real buddy on `finished`. Skipping the animation
+    without emitting would leave the panel with no companion at all."""
+    from houdini_agent_panel.ui.qt import QtGui
+    from houdini_agent_panel.ui.thinking import BuddyEntrance
+
+    monkeypatch.setenv("HOUDINI_AGENT_REDUCED_MOTION", "1")
+    entrance = BuddyEntrance()
+    done: list[int] = []
+    entrance.finished.connect(lambda: done.append(1))
+
+    entrance.play(QtGui.QPixmap(8, 8))
+
+    assert done == [1]
+    assert entrance.isHidden() is True
+
+
+def test_an_empty_sprite_still_finishes(qapp):
+    """A missing image is not a reason to withhold the companion forever."""
+    from houdini_agent_panel.ui.qt import QtGui
+    from houdini_agent_panel.ui.thinking import BuddyEntrance
+
+    entrance = BuddyEntrance()
+    done: list[int] = []
+    entrance.finished.connect(lambda: done.append(1))
+
+    entrance.play(QtGui.QPixmap())
+
+    assert done == [1]
+
+
+def test_a_cancelled_boot_stops_the_entrance_without_pretending_it_ended(qapp):
+    from houdini_agent_panel.ui.qt import QtGui
+    from houdini_agent_panel.ui.thinking import BuddyEntrance
+
+    entrance = BuddyEntrance()
+    done: list[int] = []
+    entrance.finished.connect(lambda: done.append(1))
+    entrance.play(QtGui.QPixmap(8, 8))
+
+    entrance.skip()
+
+    assert done == [], "a cancelled boot announced a companion that never arrived"
+    assert entrance.isHidden() is True

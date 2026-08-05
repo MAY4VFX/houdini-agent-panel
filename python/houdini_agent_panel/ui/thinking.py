@@ -106,6 +106,176 @@ class _ShimmerText(QtWidgets.QWidget):
         painter.drawText(self.rect(), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self._text)
 
 
+class BuddyEntrance(QtWidgets.QWidget):
+    """The companion climbing out of a hole, once an agent has finished
+    starting.
+
+    A nod to Houdini's own blackhole: a dark ellipse opens where the buddy
+    stands, the buddy rises through it — clipped by the rim until it is
+    clear — grows a little past its resting size as it pops free, and the
+    hole closes behind it.
+
+    Drawn rather than played from a sprite sheet, because the hole has to
+    match whatever theme is live and the buddy is whichever of the four the
+    artist picked. Runs once, at the end of a boot, and then hands the
+    screen back to the real `_BuddySprite`: nothing here ticks afterwards.
+    """
+
+    finished = Signal()
+
+    #: The whole thing, start to settled. Long enough to read as an event,
+    #: short enough that nobody waits for it — the input is already live
+    #: underneath by the time it plays.
+    DURATION_MS = 1400
+
+    _HOLE_W, _HOLE_H = 70, 22
+    #: How far past its resting size the buddy swells on the way out.
+    _PEAK_SCALE = 1.14
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._sprite = QtGui.QPixmap()
+        self._t = 0.0
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._animation = QtCore.QVariantAnimation(self)
+        self._animation.setDuration(self.DURATION_MS)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.valueChanged.connect(self._on_value)
+        self._animation.finished.connect(self._on_finished)
+        self.hide()
+
+    def play(self, sprite: QtGui.QPixmap) -> None:
+        """Run it for `sprite`. Emits `finished` when the buddy has settled.
+
+        With motion reduced, or with nothing to draw, it finishes at once
+        rather than not at all — the caller shows the real buddy on that
+        signal, and it must never be left waiting for an animation that was
+        skipped.
+        """
+        self._sprite = sprite
+        reduced = os.environ.get("HOUDINI_AGENT_REDUCED_MOTION") == "1"
+        if reduced or sprite.isNull():
+            self.finished.emit()
+            return
+        self._t = 0.0
+        self.show()
+        self.raise_()
+        self._animation.stop()
+        self._animation.start()
+
+    def skip(self) -> None:
+        """Stop without emitting: the boot was cancelled out from under it."""
+        self._animation.stop()
+        self.hide()
+
+    def _on_value(self, value) -> None:
+        self._t = float(value)
+        self.update()
+
+    def _on_finished(self) -> None:
+        self.hide()
+        self.finished.emit()
+
+    # --- the curves ------------------------------------------------------
+
+    @staticmethod
+    def _ease_out(t: float) -> float:
+        return 1 - (1 - t) ** 3
+
+    @staticmethod
+    def _ease_in(t: float) -> float:
+        return t**3
+
+    @staticmethod
+    def _back_out(t: float) -> float:
+        c1 = 1.70158
+        return 1 + (c1 + 1) * (t - 1) ** 3 + c1 * (t - 1) ** 2
+
+    def _state(self) -> tuple[float, float, float]:
+        """`(hole, rise, scale)` for the current moment."""
+        t = self._t
+        open_end, rise_end, close_end = 0.24, 0.70, 0.88
+        if t < open_end:
+            return self._ease_out(t / open_end), 0.0, 0.0
+        if t < rise_end:
+            rise = self._ease_out((t - open_end) / (rise_end - open_end))
+        else:
+            rise = 1.0
+        if t < rise_end:
+            hole = 1.0
+        elif t < close_end:
+            hole = 1.0 - self._ease_in((t - rise_end) / (close_end - rise_end))
+        else:
+            hole = 0.0
+        # Grows past full size while climbing out, then settles back — the
+        # "вылез и чуть увеличился" the artist asked for, resolved rather
+        # than left inflated.
+        growth = 0.34 + (self._PEAK_SCALE - 0.34) * self._back_out(min(1.0, rise / 0.85))
+        if t > close_end:
+            settle = self._ease_out((t - close_end) / (1.0 - close_end))
+            growth = self._PEAK_SCALE + (1.0 - self._PEAK_SCALE) * settle
+        return hole, rise, growth
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        hole, rise, scale = self._state()
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+
+        centre_x = self.width() / 2
+        ground = self.height() - self._HOLE_H / 2 - 1
+
+        if hole > 0.001:
+            width = self._HOLE_W * hole
+            height = self._HOLE_H * hole
+            rect = QtCore.QRectF(centre_x - width / 2, ground - height / 2, width, height)
+            gradient = QtGui.QRadialGradient(rect.center(), max(1.0, width / 2))
+            # theme-exception: a hole is an absence, not a surface. Depth
+            # reads as near-black in light and dark themes alike — the same
+            # reasoning the permission popover's shadow is exempt under —
+            # and a hole tinted to follow a pink theme stops being a hole.
+            # Only the void is fixed; the rim below comes from the theme.
+            gradient.setColorAt(0.0, QtGui.QColor(5, 7, 13))  # theme-exception: see above
+            gradient.setColorAt(0.72, QtGui.QColor(11, 16, 32))  # theme-exception: as above
+            gradient.setColorAt(1.0, QtGui.QColor(27, 42, 68))  # theme-exception: as above
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(gradient)
+            painter.drawEllipse(rect)
+            # The far rim catches light, which is what makes it read as a
+            # hole in a surface rather than a dark blob painted on one. This
+            # one IS themed: it is light falling on the artist's own UI.
+            rim = QtGui.QColor(theme.accent_color())
+            rim.setAlpha(int(120 * hole))
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.setPen(QtGui.QPen(rim, 1.4))
+            painter.drawArc(rect, 200 * 16, 140 * 16)
+
+        if rise > 0 and not self._sprite.isNull():
+            size = self._sprite.width() * scale
+            top = ground + self._HOLE_H * 0.35 - (size + self._HOLE_H * 0.3) * rise
+            target = QtCore.QRectF(centre_x - size / 2, top, size, size)
+            painter.save()
+            if hole > 0.02:
+                # Clipped by the rim while still coming through: everything
+                # above the hole, plus the mouth of the hole itself.
+                clip = QtGui.QPainterPath()
+                clip.addRect(QtCore.QRectF(0, 0, self.width(), ground))
+                mouth = QtGui.QPainterPath()
+                mouth.addEllipse(
+                    QtCore.QRectF(
+                        centre_x - self._HOLE_W * hole / 2,
+                        ground - self._HOLE_H * hole / 2,
+                        self._HOLE_W * hole,
+                        self._HOLE_H * hole,
+                    )
+                )
+                painter.setClipPath(clip.united(mouth))
+            painter.drawPixmap(target, self._sprite, QtCore.QRectF(self._sprite.rect()))
+            painter.restore()
+        painter.end()
+
+
 class _BuddySprite(QtWidgets.QWidget):
     """Pixel-art companion with the idle/action state cadence from OpenClaude."""
 
@@ -166,6 +336,12 @@ class _BuddySprite(QtWidgets.QWidget):
             f"Houdini Test Geometry: {key.replace('-', ' ').title()} — click to change"
         )
         self.update()
+
+    def idle_pixmap(self) -> QtGui.QPixmap:
+        """The buddy at rest — what `BuddyEntrance` climbs out of the hole
+        with, so the two never show different creatures."""
+        frames = self._frames.get("idle") or ()
+        return frames[0] if frames else QtGui.QPixmap()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         if event.button() != QtCore.Qt.LeftButton:
