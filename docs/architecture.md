@@ -265,7 +265,9 @@ def mcp_servers() -> list[dict]
 
     [{"name": "fxhoudini",
       "command": "/opt/homebrew/bin/python3.12",
-      "args": ["-m", "fxhoudinimcp"],
+      "args": ["-c", scene.FX_BOOTSTRAP],   # restores the stock asyncio policy first,
+                                            # because hython installs haio and mcp cannot
+                                            # start on it (facts/houdini.md §17)
       "env": [{"name": "HOUDINI_HOST", "value": "127.0.0.1"},
               {"name": "HOUDINI_PORT", "value": "8101"}]}]
 

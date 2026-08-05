@@ -820,3 +820,22 @@ trustworthy answer to "what version is running". `__version__` on the
 imported module is, because it is a line in the file Python actually
 loaded. Anything that decides an install or an upgrade from a version
 number must use the latter.
+
+## 17. `hython` installs `haio` as asyncio's policy, and `mcp` cannot start on it
+
+Measured on 22.0.368 (Python 3.13) and 20.5.445 (3.11):
+`asyncio.get_event_loop_policy()` is `haio.HoudiniEventLoopPolicy`, its
+loop is `haio.HoudiniEventLoop`, and `loop.get_task_factory()` raises
+`NotImplementedError`. anyio calls exactly that while opening the task
+group `mcp` runs in, so `hython -m fxhoudinimcp` dies during startup with
+an `ExceptionGroup` before reading a byte of the protocol.
+
+`asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())` before
+importing the server fixes it on both versions: `initialize` then answers
+normally, 188 tools and all. Startup costs 12-16s, which is Houdini's
+Python loading, not the server.
+
+Consequence: anything asyncio-based that the panel launches through a
+Houdini interpreter needs the stock policy restored first. This is not
+hypothetical — `HAP_PYTHON` is whatever python ran the installer, and
+running it through `hython` is the documented way to update.

@@ -1722,3 +1722,56 @@ def test_a_half_downloaded_npx_package_is_named_as_the_cause(qapp, monkeypatch):
     assert notes, "the artist was left with a bare shell error"
     assert "_npx" in notes[-1], f"the fix must be spelled out: {notes[-1]!r}"
     widget.shutdown()
+
+
+def test_the_boot_strip_follows_the_panel_through_a_real_start(qapp, monkeypatch):
+    """Wiring test: the phases must come from the code paths that do the
+    work, not from a timer. Reported as "во время загрузки агентов никак не
+    оповещается, что агент ещё грузится" — two lines flashed past in the
+    feed and then the chips appeared out of nowhere."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import boot_status as boot_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    strip = widget._boot_status
+
+    strip.begin("Codex")
+    assert strip.phase() == boot_mod.PHASE_PREPARING
+
+    monkeypatch.setattr(panel_mod.shared_client(widget._agent_id), "start", lambda *a, **k: None)
+    widget._on_launch_ready(object(), "Codex")
+    assert strip.phase() == boot_mod.PHASE_LAUNCHING
+
+    info = client_mod.AgentInfo(
+        name="codex", version="1.1.9", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=False, auth_methods=(),
+    )
+    monkeypatch.setattr(widget, "_start_new_session", lambda: None)
+    widget._on_connected(info)
+    assert strip.phase() == boot_mod.PHASE_CONNECTING
+
+    widget._on_session_started("s1", sessions.SessionState("s1", "chat", "/tmp", 0.0))
+    assert strip.phase() == boot_mod.PHASE_READY
+    assert strip.is_booting() is False
+    widget.shutdown()
+
+
+def test_a_failed_start_leaves_no_progress_bar_behind(qapp, monkeypatch):
+    """A bar frozen partway reads as "still coming"."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    monkeypatch.setattr(widget, "_open_agent_management", lambda: None)
+    widget._boot_status.begin("Codex")
+
+    widget._on_launch_prep_failed("npx: command not found")
+
+    assert widget._boot_status.isHidden() is True
+    assert widget._boot_status.is_booting() is False
+    widget.shutdown()

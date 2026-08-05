@@ -87,6 +87,40 @@ def fx_python() -> str:
     return os.environ.get("HAP_PYTHON") or sys.executable
 
 
+#: How the fx server is started, instead of a plain `-m fxhoudinimcp`.
+#:
+#: `hython` installs `haio.HoudiniEventLoopPolicy` as asyncio's default, and
+#: `haio.HoudiniEventLoop.get_task_factory` raises `NotImplementedError`.
+#: anyio calls it while starting its task group, so `mcp` — and therefore
+#: the fx server — dies during startup with an `ExceptionGroup` before it
+#: ever reads a byte of the protocol. Measured on 22.0.368 (Python 3.13) and
+#: 20.5.445 (3.11): both policies are haio, both crash, and both start
+#: cleanly with the stock policy restored.
+#:
+#: That only matters when the interpreter is Houdini's own, which is not the
+#: intended case (`HAP_PYTHON` is meant to be an ordinary Python) but is
+#: exactly what the installer records when it is run through `hython` — the
+#: documented way to update. Reported as Codex showing
+#: `mcp__fxhoudini__startup ✗ failed`; Claude failed the same way and said
+#: nothing about it.
+#:
+#: The check is made at runtime, in the child, because that is the only
+#: place the answer is known — the panel cannot tell from a path what
+#: asyncio policy an interpreter will install. Under an ordinary Python it
+#: finds no haio and changes nothing.
+FX_BOOTSTRAP = """
+import sys, asyncio, runpy
+try:
+    policy = asyncio.get_event_loop_policy()
+except Exception:
+    policy = None
+if policy is not None and type(policy).__module__.split(".")[0] == "haio":
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+sys.argv = ["fxhoudinimcp"]
+runpy.run_module("fxhoudinimcp", run_name="__main__")
+"""
+
+
 def mcp_servers() -> list[dict]:
     """Exactly what goes into session/new as mcpServers.
 
@@ -112,7 +146,7 @@ def mcp_servers() -> list[dict]:
         {
             "name": FX_SERVER_NAME,
             "command": fx_python(),
-            "args": ["-m", "fxhoudinimcp"],
+            "args": ["-c", FX_BOOTSTRAP],
             "env": env,
         }
     ]

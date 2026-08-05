@@ -79,7 +79,7 @@ def test_mcp_servers_pins_port_when_known(monkeypatch):
         {
             "name": "fxhoudini",
             "command": "/opt/python3.12",
-            "args": ["-m", "fxhoudinimcp"],
+            "args": ["-c", scene.FX_BOOTSTRAP],
             "env": [
                 {"name": "HOUDINI_HOST", "value": "127.0.0.1"},
                 {"name": "HOUDINI_PORT", "value": "8101"},
@@ -166,3 +166,79 @@ def test_is_fx_available_true_when_port_known(monkeypatch):
 def test_is_fx_available_false_when_no_port(monkeypatch):
     monkeypatch.setattr(scene, "fx_port", lambda: None)
     assert scene.is_fx_available() is False
+
+
+# --- haio ------------------------------------------------------------------
+
+
+def _run_bootstrap(tmp_path, *, policy_module: str) -> dict:
+    """Run `FX_BOOTSTRAP` for real, in a child interpreter.
+
+    Not `exec()` in-process: the bootstrap's own `import sys, asyncio,
+    runpy` rebinds those names, so any stub handed to `exec` is discarded —
+    the first attempt at this test imported the REAL fxhoudinimcp and hung
+    on a live server. A child process with a fake `fxhoudinimcp` ahead of it
+    on `sys.path` measures the actual code instead.
+    """
+    import json
+    import subprocess
+    import sys
+
+    package = tmp_path / "fxhoudinimcp"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "__main__.py").write_text(
+        "import sys, asyncio, json\n"
+        "print(json.dumps({'argv': sys.argv,"
+        " 'policy': type(asyncio.get_event_loop_policy()).__module__}))\n"
+    )
+
+    preamble = (
+        "import asyncio\n"
+        "class _Policy(asyncio.DefaultEventLoopPolicy): pass\n"
+        f"_Policy.__module__ = {policy_module!r}\n"
+        "asyncio.set_event_loop_policy(_Policy())\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", preamble + scene.FX_BOOTSTRAP],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={"PYTHONPATH": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_fx_bootstrap_replaces_the_haio_policy(tmp_path):
+    """`hython` installs `haio.HoudiniEventLoopPolicy`, whose loop raises
+    `NotImplementedError` from `get_task_factory`. anyio calls exactly that
+    while opening its task group, so `mcp` — and with it the fx server —
+    dies during startup, before reading a byte of the protocol. Measured on
+    Houdini 22.0.368 (Python 3.13) and 20.5.445 (3.11): both crash, both
+    start cleanly once the stock policy is restored.
+
+    Reported as Codex showing `mcp__fxhoudini__startup ✗ failed`. Claude
+    failed the same way and said nothing about it.
+    """
+    seen = _run_bootstrap(tmp_path, policy_module="haio")
+
+    assert seen["policy"].split(".")[0] == "asyncio", (
+        f"the haio policy was left in place: {seen['policy']}"
+    )
+
+
+def test_fx_bootstrap_leaves_an_ordinary_python_alone(tmp_path):
+    """Under a normal interpreter there is no haio and nothing to repair."""
+    seen = _run_bootstrap(tmp_path, policy_module="somewhere_else")
+
+    assert seen["policy"] == "somewhere_else"
+
+
+def test_fx_bootstrap_fixes_argv_for_the_server(tmp_path):
+    """fxhoudinimcp parses `sys.argv` and rejects `-c` — measured:
+    "unknown command: -m", followed by its usage text and no server."""
+    seen = _run_bootstrap(tmp_path, policy_module="haio")
+
+    assert seen["argv"] == ["fxhoudinimcp"]
