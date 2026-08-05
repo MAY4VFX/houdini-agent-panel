@@ -1075,3 +1075,98 @@ convention; there's nothing in the schema forcing that key's name or shape.
   using the protocol's stock `TerminalAuthMethod` with a top-level `type`
   field — kimi's variant is the only terminal-flavored one measured, and it
   doesn't use that shape.
+
+---
+
+## 14. What `kimi login` actually prints, and who else carries `_meta` on an auth method
+
+Two follow-ups to §13, both measured on the same Linux machine.
+
+### `kimi login`, run for real, killed before it could finish
+
+§13 established that kimi's one auth method points the client at a second,
+separate command (`kimi login`) instead of anything on the ACP channel. This
+runs that exact command directly — the real binary,
+`~/.local/share/houdini-agent-panel/agents/kimi/1.49.0/kimi login`, attached
+to a pty (`scratchpad/kimi_login_capture.py`) — captured its first ~25s of
+output, then `SIGTERM`'d the whole process group before it could complete
+anything. No credential was entered, no login was completed.
+
+It prints a real URL and a device code, verbatim (control codes/spinner
+frames trimmed for readability, the URL itself is untouched):
+```
+Please visit the following URL to finish authorization.
+Verification URL: https://www.kimi.com/code/authorize_device?user_code=14OI-AX7F
+⠋ Waiting for user authorization...
+```
+then sits polling with a spinner, unbounded, until killed.
+
+This is the one exception worth having, exactly as hypothesized before
+measuring it: kimi's flow is not opaque like gemini's or grok's — a client
+that runs `kimi login` in a terminal it owns (a pty it reads, not necessarily
+one a human types into) can parse this exact `Verification URL: <url>` line
+and show the artist a real, clickable link, instead of just "check your
+terminal." The user code (`14OI-AX7F` here — presumably regenerated per run)
+is also right there in the same line if a client prefers to show it
+separately from the URL, device-code style.
+
+**Not established:** whether the URL/user-code always appears on this same
+line/format across runs (this is one run, one code, not a repeated sample),
+and what kimi prints on success (killed before that point, deliberately).
+
+### `_meta` on `authMethods`, raw JSON, no SDK parsing in the way
+
+`scratchpad/rawinit.py` sends a hand-written `initialize` request over plain
+pipes and prints the response before any pydantic model touches it — the
+same blind spot that hid kimi's payload in §13 (the typed `auth_methods`
+falls back to `AuthMethodAgent`, which has no field for arbitrary `_meta`
+content beyond the raw dict). Re-probed the five reachable agents:
+
+| agent | authMethods (raw) | `_meta` present? |
+|---|---|---|
+| `claude-acp` 0.64.2 | `[]` | n/a — no methods to carry one |
+| `codex-acp` 1.1.9 | `api-key` (has `_meta`), `chat-gpt` (none) | **yes**, on `api-key`: `{"api-key":{"provider":"openai"}}` |
+| `opencode` 1.18.12 | `opencode-login` | **no** — none at all |
+| `gemini` 0.53.1 | `oauth-personal` (none), `gemini-api-key` (has `_meta`), `vertex-ai` (none), `gateway` (has `_meta`) | **yes**, on two of four: `gemini-api-key` → `{"api-key":{"provider":"google"}}`, `gateway` → `{"gateway":{"protocol":"google","restartRequired":"false"}}` |
+| `grok-build` 0.2.120 | `grok.com` | **no** |
+
+So `_meta` on an auth method is real, already-in-production infrastructure —
+not a kimi-only quirk — but everyone except kimi uses it for a small typed
+hint (which credential provider an `api-key` method is for, which protocol a
+gateway speaks), never for kimi's "spawn this command" payload. **`opencode`
+describes the identical shape of flow as kimi in plain text only** —
+`"description": "Run \`opencode auth login\` in the terminal"` — **with no
+structured data backing it at all.** A client that wants to offer opencode
+the same "spawn it, parse the output" treatment as kimi has nothing to
+`_meta`-scan for; it would have to regex a human-readable sentence to
+recover the command, and nothing about that sentence's format is a
+contract — the string is prose, not a schema field.
+
+### Consequences for the UI
+
+1. **Kimi gets a real exception to "no clickable link is possible."** A
+   client that spawns `kimi login` itself (in a pty it owns, reading rather
+   than asking a human to type into it) can extract the `Verification URL:`
+   line and render an actual link plus the device code, closing the gap
+   flagged as a consequence in §13.
+2. **A generic "does this method have a spawnable terminal command"
+   detector cannot rely on `_meta` alone being present** — three of five
+   agents attach a `_meta` to at least one method, for reasons that have
+   nothing to do with terminal auth (`api-key`'s provider tag, gateway's
+   protocol tag). The detector has to specifically look for a
+   `terminal-auth`-shaped key (or whatever kimi's key is called) rather than
+   branching on "any `_meta` at all."
+3. **Opencode cannot get the same treatment without extra, fragile work.**
+   Its own login instruction is text-only. Anything that shells out to
+   `opencode auth login` on the strength of parsing that sentence is
+   guessing at a contract the agent never actually offered.
+
+### Not established
+
+- Whether kimi's `Verification URL:` line format is stable across versions
+  or runs — sampled once.
+- What either the URL or the polling loop resolves to on success — the
+  process was killed well before that, by design.
+- Whether `opencode auth login`, run directly, produces the same
+  URL/device-code shape as kimi — not run; the task was to scan for
+  structured `_meta`, and opencode has none to act on.
