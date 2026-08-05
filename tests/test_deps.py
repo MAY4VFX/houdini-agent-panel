@@ -301,3 +301,69 @@ def test_the_version_probe_allows_for_a_cold_hython():
     assert deps._VERSION_TIMEOUT >= 120.0, (
         f"{deps._VERSION_TIMEOUT}s leaves no room over a ~20s cold start"
     )
+
+
+# --- stale metadata in a --target tree --------------------------------------
+
+
+def test_prune_removes_dist_info_for_versions_pip_replaced(tmp_path):
+    """`pip install --target` overwrites the package and leaves the previous
+    `dist-info` in place. Six panel releases left six of them, and
+    `importlib.metadata` answered with 0.1.6 while the imported code was
+    0.2.0 — which made the installer reinstall 0.1.6 over 0.2.0."""
+    from houdini_agent_panel.deps import prune_stale_metadata
+
+    for name in (
+        "houdini_agent_panel-0.1.6.dist-info",
+        "houdini_agent_panel-0.2.0.dist-info",
+        "houdini_agent_panel-0.2.1.dist-info",
+        "pydantic-2.13.4.dist-info",
+    ):
+        (tmp_path / name).mkdir()
+
+    removed = prune_stale_metadata(
+        tmp_path, ["Successfully installed houdini-agent-panel-0.2.1 pydantic-2.13.4"]
+    )
+
+    assert sorted(removed) == [
+        "houdini_agent_panel-0.1.6.dist-info",
+        "houdini_agent_panel-0.2.0.dist-info",
+    ]
+    assert (tmp_path / "houdini_agent_panel-0.2.1.dist-info").is_dir()
+    assert (tmp_path / "pydantic-2.13.4.dist-info").is_dir()
+
+
+def test_prune_leaves_alone_what_pip_did_not_install(tmp_path):
+    """Metadata for a package this run never touched is somebody else's — an
+    old-looking version is not evidence that the files beside it are dead."""
+    from houdini_agent_panel.deps import prune_stale_metadata
+
+    (tmp_path / "unrelated-0.0.1.dist-info").mkdir()
+
+    removed = prune_stale_metadata(tmp_path, ["Successfully installed pydantic-2.13.4"])
+
+    assert removed == []
+    assert (tmp_path / "unrelated-0.0.1.dist-info").is_dir()
+
+
+def test_prune_matches_names_across_underscore_and_dash_spelling(tmp_path):
+    """pip reports `houdini-agent-panel`, writes `houdini_agent_panel-*.dist-info`."""
+    from houdini_agent_panel.deps import prune_stale_metadata
+
+    (tmp_path / "houdini_agent_panel-0.1.6.dist-info").mkdir()
+
+    removed = prune_stale_metadata(
+        tmp_path, ["Successfully installed houdini-agent-panel-0.2.1"]
+    )
+
+    assert removed == ["houdini_agent_panel-0.1.6.dist-info"]
+
+
+def test_panel_version_ignores_stale_metadata_and_reports_the_running_code():
+    """The number that goes into `houdini-agent-panel==<version>`."""
+    from houdini_agent_panel import __version__
+    from houdini_agent_panel.install import _panel_version
+    from houdini_agent_panel.updates import _current_panel_version
+
+    assert _panel_version() == __version__
+    assert _current_panel_version() == __version__

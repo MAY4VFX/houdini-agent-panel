@@ -22,14 +22,27 @@ from .network import Fetcher
 
 
 def _panel_version() -> str:
-    try:
-        from importlib.metadata import version
+    """The version of the code that is running, which is what we reinstall.
 
-        return version("houdini-agent-panel")
-    except Exception:  # noqa: BLE001 - metadata may be missing when run from a --target tree
-        from . import __version__
+    `__version__`, not `importlib.metadata` — the reverse of the obvious
+    choice, and it was the obvious choice here first. Metadata describes a
+    directory on disk; `__version__` is a line in the module Python actually
+    imported. Those agree until a `--target` tree accumulates several
+    `dist-info` directories (pip never removes the old ones), and then
+    metadata answers with whichever the filesystem happens to list first.
+    Measured on a machine updated four times: metadata said 0.1.6, the
+    imported code said 0.2.0.
 
-        return __version__
+    The consequence was not a wrong number in a log. This value goes
+    straight into `houdini-agent-panel==<version>` below, so a stale answer
+    made the installer reinstall an OLD panel over a new one — an update
+    that silently undid itself. `deps.prune_stale_metadata` now cleans the
+    tree as well, but the version a running process reports about itself
+    should never have depended on that.
+    """
+    from . import __version__
+
+    return __version__
 
 
 def _resolve_package_dirs(explicit: str | None) -> tuple[list[Path], str]:

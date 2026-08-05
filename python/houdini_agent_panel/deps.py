@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -195,7 +196,77 @@ def install_deps(
             out(line)
         raise DepsError(f"pip install exited with code {result.returncode}")
 
+    for removed in prune_stale_metadata(target, lines):
+        out(f"  removed stale metadata: {removed}")
+
     return lines
+
+
+#: `Successfully installed acp-0.12.0 houdini-agent-panel-0.2.1 ...` — pip's
+#: own report of what it just wrote. Name and version run together with a
+#: hyphen, and names contain hyphens too, so the split is on the LAST hyphen
+#: that starts a digit.
+_INSTALLED_LINE = "Successfully installed "
+_NAME_VERSION = re.compile(r"^(?P<name>.+)-(?P<version>\d[^-]*)$")
+
+
+def _normalized(name: str) -> str:
+    """PEP 503 name normalisation — `Foo_Bar` and `foo-bar` are one package."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def prune_stale_metadata(target: Path, pip_output: Sequence[str]) -> list[str]:
+    """Delete `.dist-info` directories describing versions pip has replaced.
+
+    `pip install --target` does not uninstall: it overwrites the package
+    directory and writes a NEW `<name>-<version>.dist-info` beside the old
+    one, which it leaves behind. After six panel releases the tree here held
+    six of them, and `importlib.metadata.version("houdini-agent-panel")`
+    returned whichever the filesystem listed first — measured as 0.1.6 while
+    the code actually imported was 0.2.0.
+
+    That is not a cosmetic wrong number. `install.py` asks metadata what
+    version is running and then installs exactly that
+    (`houdini-agent-panel==<answer>`), so a stale answer makes the installer
+    DOWNGRADE the panel; and `updates.py` compares the same answer against
+    PyPI, so the banner offered an update that, once applied, changed
+    nothing. Reported as "the update button does nothing and the old version
+    is still showing", on a machine that had been updated four times.
+
+    Only directories whose package name pip just reported are touched, and
+    only inside `target`: metadata for something we did not install is none
+    of our business, however old it looks.
+    """
+    installed: dict[str, str] = {}
+    for line in pip_output:
+        if not line.startswith(_INSTALLED_LINE):
+            continue
+        for token in line[len(_INSTALLED_LINE):].split():
+            match = _NAME_VERSION.match(token)
+            if match:
+                installed[_normalized(match.group("name"))] = match.group("version")
+    if not installed:
+        return []
+
+    removed: list[str] = []
+    for entry in sorted(target.glob("*.dist-info")):
+        if not entry.is_dir():
+            continue
+        match = _NAME_VERSION.match(entry.name[: -len(".dist-info")])
+        if not match:
+            continue
+        name = _normalized(match.group("name"))
+        current = installed.get(name)
+        if current is None or _normalized(match.group("version")) == _normalized(current):
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError:
+            # A metadata directory we could not delete is untidy, not fatal
+            # — the install itself already succeeded.
+            continue
+        removed.append(entry.name)
+    return removed
 
 
 def deps_ready(target: Path) -> bool:

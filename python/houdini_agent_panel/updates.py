@@ -180,17 +180,17 @@ def pypi_latest(name: str, *, fetch: Fetcher | None = None) -> str | None:
 
 
 def _current_panel_version() -> str | None:
+    """What this process is running — see `install._panel_version` for why
+    this asks the module and not `importlib.metadata`. Here the stale answer
+    showed up as a banner offering an update that had already been applied,
+    every day, because the number it compared against PyPI belonged to a
+    `dist-info` directory four releases old."""
     try:
-        from importlib.metadata import version
+        from . import __version__
 
-        return version(_PANEL_PACKAGE)
-    except Exception:  # noqa: BLE001 - metadata may be missing in a --target tree
-        try:
-            from . import __version__
-
-            return __version__
-        except Exception:  # noqa: BLE001
-            return None
+        return __version__
+    except Exception:  # noqa: BLE001 - a version number is never worth an exception
+        return None
 
 
 def _current_fx_version() -> str | None:
