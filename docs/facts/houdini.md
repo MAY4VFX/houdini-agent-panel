@@ -781,3 +781,42 @@ exit. The thread needs to be stopped from more than one place: on the
 panel's own teardown AND on `QCoreApplication.aboutToQuit`, AND as a last
 resort in an `atexit` handler — whichever of those actually fires first for
 a given exit path is what saves the process.
+
+---
+
+## 15. `hython` reads Houdini's package files, so the deps tree shadows site-packages
+
+Measured on Linux (Houdini 22.0, `/opt/hfs22.0/bin/hython`) and macOS
+(20.5.445 and 22.0.368): a bare `hython -m pip install --upgrade
+houdini-agent-panel` succeeded and put 0.2.3 in site-packages, while
+`hython -c "import houdini_agent_panel as m; print(m.__file__)"` in the
+same shell answered from
+`~/.local/share/houdini-agent-panel/deps/py3.13/`, still on 0.2.2.
+`hython` honours `$HOUDINI_PACKAGE_DIR`/`packages/*.json` exactly as the
+GUI does, and ours prepends the deps tree to `PYTHONPATH`.
+
+Consequences, all of which were live bugs:
+
+- pip cannot update the panel. Only a `--target` install into the deps
+  tree changes what Houdini imports.
+- `hython -m houdini_agent_panel install` runs the copy inside the tree it
+  is about to overwrite, so anything it reads about "the current version"
+  describes the thing being replaced.
+- `$HFS` is set for every `hython`, and points at the Houdini running it —
+  not at the Houdini the installer is currently iterating over.
+
+## 16. `pip install --target` never removes the old `.dist-info`
+
+Measured: six releases installed in sequence into one `--target` tree left
+`houdini_agent_panel-0.1.4/0.1.6/0.1.7/0.1.8/0.1.9/0.2.0.dist-info` side
+by side, all describing the same, once-overwritten package directory.
+`importlib.metadata.version("houdini-agent-panel")` returned **0.1.6** —
+the first one `os.scandir` happened to yield — while the imported code was
+0.2.0. Dependencies accumulate the same way (`starlette-1.3.1` and
+`1.4.0`, `sse_starlette-3.4.6` and `3.4.7`).
+
+Consequence: inside a `--target` tree, `importlib.metadata` is not a
+trustworthy answer to "what version is running". `__version__` on the
+imported module is, because it is a line in the file Python actually
+loaded. Anything that decides an install or an upgrade from a version
+number must use the latter.
