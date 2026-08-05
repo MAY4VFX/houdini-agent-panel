@@ -1860,3 +1860,22 @@ def test_a_stalled_new_session_gives_the_input_back(qapp, monkeypatch):
     assert composer._text_edit.isReadOnly() is False, "the input was left read-only"
     assert composer.boot_status().isHidden() is True, "the strip was left at 4/4 forever"
     widget.shutdown()
+
+
+def test_switching_agent_from_settings_returns_to_the_conversation(qapp, monkeypatch):
+    """The agent chip lives in the header, which stays put while Settings is
+    open — so an agent can be switched from that screen, and the artist was
+    then left looking at preferences while the thing they asked for happened
+    out of sight."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    monkeypatch.setattr(widget, "_start_agent", lambda *_: None)
+    widget._show_page(widget.PAGE_SETTINGS)
+    assert widget._pages.currentIndex() == widget.PAGE_SETTINGS
+
+    widget._on_agent_chosen("codex-acp")
+
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
+    widget.shutdown()

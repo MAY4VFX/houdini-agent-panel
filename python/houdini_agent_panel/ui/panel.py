@@ -952,11 +952,14 @@ class AgentPanel(QtWidgets.QWidget):
         # ignored: `claude-acp` reports an EMPTY command list.
         self._note(
             f"{label} isn't signed in, and it has no sign-in the panel can "
-            f"run: no auth method, no /login command. Sign in to its own CLI "
-            f"in a terminal (for Claude Agent that is `claude`, then /login "
-            f"inside it), or export its API key in your shell profile — the "
-            f"panel passes your login shell's environment to the agent. Then "
-            f"restart it from Settings."
+            f"run: no auth method, no /login command. It reads credentials "
+            f"the machine already has. For Claude Agent, in a terminal:\n"
+            f"    claude setup-token\n"
+            f"which writes ~/.claude/.credentials.json (the macOS Keychain "
+            f"on a Mac) — the adapter picks that up. An ANTHROPIC_API_KEY "
+            f"exported in your shell profile works too; the panel passes "
+            f"your login shell's environment to the agent. Then restart it "
+            f"from Settings."
         )
 
     def _has_login_command(self) -> bool:
@@ -2045,6 +2048,13 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_agent_chosen(self, agent_id: str) -> None:
         """Switch THIS tab's agent — called from the header chip's menu.
 
+        Leaves Settings on the way. The chip lives in the header, which
+        stays put while Settings is open, so an agent can be switched from
+        that screen — and then the artist is looking at preferences while
+        the thing they just asked for happens somewhere they cannot see.
+        Picking an agent is a decision about the conversation, so the
+        conversation is what to show.
+
         Reload from disk BEFORE writing — mandatory. self._settings is a
         snapshot from when the panel opened, and the agents section writes a
         freshly-added custom agent straight to the file. Saving the stale
@@ -2069,6 +2079,8 @@ class AgentPanel(QtWidgets.QWidget):
         one tab's agent used to silently drop a sibling tab's own
         conversation and connection.
         """
+        if self._pages.currentIndex() == self.PAGE_SETTINGS:
+            self._show_page(self.PAGE_TRANSCRIPT)
         if agent_id == self._agent_id:
             return  # already this one
         old_agent_id = self._agent_id
