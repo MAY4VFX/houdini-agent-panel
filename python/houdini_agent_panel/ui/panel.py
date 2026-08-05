@@ -789,11 +789,62 @@ class AgentPanel(QtWidgets.QWidget):
         the opposite. Signing out stays reachable from the sign-in screen
         itself, which is where someone who wants to switch accounts goes.
         """
-        signed_in = any(
-            not state.session_id.startswith(_RESTORED_PREFIX) for state in self._pool.all()
-        )
-        can_sign_in = bool(getattr(info, "auth_methods", ())) and not signed_in
+        can_sign_in = bool(getattr(info, "auth_methods", ())) and not self._is_signed_in()
         self._settings_view.set_current_agent_auth(self._agent_id, can_sign_in)
+
+    def _is_signed_in(self) -> bool:
+        """Has this agent proved it is authenticated?
+
+        The protocol offers no way to ask, and every capability flag answers
+        a different question: `authMethods` lists what EXISTS,
+        `supports_logout` says the method is implemented. Both are constant
+        per agent, signed in or out.
+
+        An open session looked like proof and is not. Measured on the Linux
+        machine, where none of the agents had ever been configured:
+        `claude-acp` advertises no methods and opens a session happily, then
+        fails at the first prompt; `opencode` advertises one and also opens
+        a session; only `codex-acp` refuses `session/new` with
+        "Authentication required". So a session proves nothing on two agents
+        out of three — which is precisely how a never-configured Claude came
+        to be offered a "Sign out" button.
+
+        A completed turn is what all three agree on: none of them will
+        answer a prompt for an account that is not signed in. That is what
+        gets recorded, and it is recorded persistently — otherwise the row
+        returns on every Houdini restart until the artist types something.
+        """
+        return self._agent_id in self._settings.signed_in_agents
+
+    def _remember_signed_in(self, signed_in: bool) -> None:
+        """Record what a turn (or a sign-out) just proved about this agent."""
+        if not self._agent_id:
+            return
+        known = list(self._settings.signed_in_agents)
+        if signed_in and self._agent_id not in known:
+            known.append(self._agent_id)
+        elif not signed_in and self._agent_id in known:
+            known.remove(self._agent_id)
+        else:
+            return
+        self._settings.signed_in_agents = known
+        settings_mod.save(self._settings)
+        info = shared_client(self._agent_id).agent_info()
+        if info is not None:
+            self._sync_agent_auth_row(info)
+
+    def _can_sign_out(self, info: Any) -> bool:
+        """Reported on the Linux machine: the sign-in screen offered "Sign
+        out" on an agent that had never been signed into. It was drawn from
+        `supports_logout`, which Codex advertises either way — the same
+        mistake as the Sign in row, one screen along."""
+        if not getattr(info, "auth_methods", ()):
+            # The panel only manages authentication it can see. An agent
+            # that exposes no methods signs in and out through its own slash
+            # commands, and a "Sign out" here would be a button that means
+            # nothing — which is what a fresh Claude Agent showed.
+            return False
+        return bool(getattr(info, "supports_logout", False)) and self._is_signed_in()
 
     def _on_connected(self, info: Any) -> None:
         # Third phase. The process answered `initialize`; what remains is the
@@ -861,11 +912,38 @@ class AgentPanel(QtWidgets.QWidget):
         self._open_agent_management()
 
     def _on_auth_required(self, methods: list) -> None:
+        # Whatever we thought, the agent has just said otherwise.
+        self._remember_signed_in(False)
         info = shared_client(self._agent_id).agent_info()
-        self._auth_view.set_methods(
-            methods, can_logout=bool(info and info.supports_logout)
-        )
+        if not methods:
+            self._offer_login_command(info)
+            return
+        self._auth_view.set_methods(methods, can_logout=self._can_sign_out(info))
         self._show_page(self.PAGE_AUTH)
+
+    def _offer_login_command(self, info: Any) -> None:
+        """The way in for an agent that lists no sign-in methods.
+
+        Reported on the Linux machine: a fresh Claude Agent sent the artist
+        to a screen headed "Sign in", reading "The agent offered no sign-in
+        methods", with a Sign out button under it. Three untruths in one
+        screen and no way forward from any of them.
+
+        Agents that advertise no `authMethods` are not agents without a
+        login — they are agents whose login is a slash command inside the
+        session, which is what Zed's own documentation says to use. So say
+        that, and put the command in the composer where it costs a keystroke.
+        Same treatment `_report_stalled_new_session` gives, for the same
+        reason: the screen the protocol suggests is a dead end here.
+        """
+        label = self._pending_agent_label or getattr(info, "name", "") or "This agent"
+        self._note(
+            f"{label} isn't signed in, and offers no sign-in method to the "
+            f"panel — it uses its own /login command instead. It's ready in "
+            f"the input box below."
+        )
+        self._composer.set_text("/login")
+        self._show_page(self.PAGE_TRANSCRIPT)
 
     def _on_session_started(self, session_id: str, state: Any) -> None:
         # There is a session: the agent is up, its tools are loaded, and the
@@ -1036,6 +1114,10 @@ class AgentPanel(QtWidgets.QWidget):
             self._composer.set_usage(usage)
 
     def _on_turn_finished(self, session_id: str, stop_reason: str) -> None:
+        if stop_reason == "end_turn":
+            # An answered prompt is the one thing every agent agrees means
+            # "signed in" — see `_is_signed_in` for what does not.
+            self._remember_signed_in(True)
         state = self._pool.get(session_id)
         if state is not None:
             state.busy = False
@@ -1819,7 +1901,7 @@ class AgentPanel(QtWidgets.QWidget):
         if self._pages.currentIndex() == self.PAGE_AUTH:
             return
         self._auth_view.set_methods(
-            list(info.auth_methods), can_logout=bool(info.supports_logout)
+            list(info.auth_methods), can_logout=self._can_sign_out(info)
         )
         self._show_page(self.PAGE_AUTH)
 
@@ -1836,6 +1918,7 @@ class AgentPanel(QtWidgets.QWidget):
         sign it had noticed, so it looked like the login had failed.
         """
         self._note("Signed in.")
+        self._remember_signed_in(True)
         self._show_page(self.PAGE_TRANSCRIPT)
         if self._current_session() is None:
             self._start_new_session()

@@ -852,3 +852,36 @@ Nothing has to be merged or suppressed on our side.
 Consequence for support: a missing tool has two possible homes. Ours goes
 out on every `session/new` (`scene.mcp_servers`); the agent's live in its
 own config file, which the panel never reads or writes.
+
+---
+
+## 11. What each agent actually says about signing in
+
+Measured on the Linux machine, each agent launched with a throwaway `HOME`
+so none of them had ever been configured (`scratchpad/authprobe.py`, run
+through the deps tree's own `acp`):
+
+| agent | `initialize.authMethods` | `session/new` |
+|---|---|---|
+| `claude-acp` 0.64.2 | `[]` — none at all | **succeeds**, then fails at the first prompt |
+| `codex-acp` 1.1.9 | `api-key`, `chat-gpt` | **fails**: `Authentication required` |
+| `opencode` 1.18.12 | `opencode-login` | **succeeds** |
+
+Three consequences the UI depends on:
+
+1. **An open session is not evidence of being signed in.** Two agents out
+   of three open one while signed out. Anything drawn from "a session
+   exists" is wrong for those two — this is how a never-configured Claude
+   came to be shown a "Sign out" button.
+2. **`authMethods` empty does not mean "no login".** It means the login is
+   a slash command inside the session (`/login`), which is what Zed's own
+   documentation tells people to use. Sending the artist to a sign-in
+   screen there produces a page headed "Sign in" that reads "The agent
+   offered no sign-in methods" — a dead end.
+3. **A completed turn is the one signal all three agree on.** None of them
+   answers a prompt for an account that is not signed in. That is what the
+   panel records, and it records it persistently, because otherwise the
+   evidence is lost on every Houdini restart.
+
+Not established: whether `gemini`, `grok` and `kimi` behave like Claude or
+like Codex — they were not installed on the machine this was measured on.

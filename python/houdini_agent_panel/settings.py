@@ -68,6 +68,16 @@ class Settings:
     custom_agents: list[CustomAgent] = field(default_factory=list)
     installed_agents: dict[str, InstalledAgent] = field(default_factory=dict)
     seen_announcements: list[str] = field(default_factory=list)
+    #: Agents this machine has actually used without hitting `auth_required`
+    #: — the only evidence the protocol leaves that somebody is signed in.
+    #: Measured on a machine where none of them had ever been configured:
+    #: `claude-acp` advertises no methods and opens a session anyway (it
+    #: fails at the first prompt), `opencode` advertises one and also opens
+    #: a session, `codex-acp` refuses `session/new` outright. So a session
+    #: proves nothing on two agents out of three, and a completed turn is
+    #: what all three agree on. Persisted, or the Sign in row would come
+    #: back on every Houdini restart until the artist typed something.
+    signed_in_agents: list[str] = field(default_factory=list)
     #: The artist's last pick for each agent's own `configOptions` (model,
     #: reasoning effort, …) — `{agent_id: {config_id: value}}`. Per AGENT,
     #: not per conversation: a conversation survives switching agents, but
