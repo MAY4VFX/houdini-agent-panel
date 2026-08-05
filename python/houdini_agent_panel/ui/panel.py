@@ -416,6 +416,10 @@ class AgentPanel(QtWidgets.QWidget):
         #: running after the artist has moved on is a real leak, the same
         #: hazard `orphans.py` exists for on the agent process itself.
         self._terminal_login_worker: Any = None
+        #: Set alongside `_terminal_login_worker` — see `_on_terminal_login_
+        #: exited`/`_terminal_login_fallback_message` for what they're for.
+        self._terminal_login_url_shown: bool = False
+        self._terminal_login_command: str = ""
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -2234,6 +2238,15 @@ class AgentPanel(QtWidgets.QWidget):
         )
         self._note(message)
         self._auth_pending = True
+        # Whether `url_found` has fired yet THIS attempt — read by
+        # `_on_terminal_login_exited` to tell "it printed a link and then
+        # ended" (nothing more to say) from "it never did" (fall back to
+        # the raw command, per §14: the `Verification URL:` line was
+        # sampled once, with no format contract, so a future version — or
+        # a different agent's terminal-auth command entirely — printing
+        # something this regex doesn't recognise must never be a dead end).
+        self._terminal_login_url_shown = False
+        self._terminal_login_command = " ".join([ta.command or "", *ta.args])
         self._auth_view.set_pending(message)
 
         worker = TerminalLoginWorker(self._agent_id, ta, cwd=scene.hip_dir(), parent=self)
@@ -2249,9 +2262,21 @@ class AgentPanel(QtWidgets.QWidget):
             self._auth_view.set_pending_detail(line)
 
     def _on_terminal_login_url(self, url: str, code: str) -> None:
+        self._terminal_login_url_shown = True
         self._note(f"Sign in at: {url}" + (f" (code {code})" if code else ""))
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_terminal_login_link(url, code)
+
+    def _terminal_login_fallback_message(self) -> str:
+        """"No line → fall back to showing the command. Never a blank
+        screen" — the format `_URL_RE` looks for was measured exactly once
+        (docs/facts/acp-sdk.md §14), with no contract that it stays that
+        way, so a run that never matches it is an expected outcome to
+        handle, not a bug to fix by tightening the regex."""
+        return (
+            "This didn't produce a recognisable sign-in link. Run it "
+            f"yourself in a terminal:\n    {self._terminal_login_command}"
+        )
 
     def _on_terminal_login_exited(self, exit_code: int) -> None:
         """The spawned process is gone — ended on its own, or `_stop_
@@ -2268,16 +2293,27 @@ class AgentPanel(QtWidgets.QWidget):
         """
         self._terminal_login_worker = None
         self._auth_pending = False
-        if self._pages.currentIndex() == self.PAGE_AUTH:
-            self._note(f"Terminal login process ended (exit {exit_code}).")
+        if self._pages.currentIndex() != self.PAGE_AUTH:
+            return
+        if not self._terminal_login_url_shown:
+            message = self._terminal_login_fallback_message()
+            self._note(message)
+            self._auth_view.set_pending(message)
+            return
+        self._note(f"Terminal login process ended (exit {exit_code}).")
 
     def _on_terminal_login_failed(self, message: str) -> None:
+        """`work()` raised before ever spawning anything readable — e.g. the
+        command doesn't exist. Same fallback as a process that ran and
+        said nothing useful: the artist still gets the exact command."""
         self._terminal_login_worker = None
         self._auth_pending = False
-        if self._pages.currentIndex() == self.PAGE_AUTH:
-            self._auth_view.show_error(message, self._last_auth_method)
-        else:
+        if self._pages.currentIndex() != self.PAGE_AUTH:
             self._note(f"Terminal login failed: {message}")
+            return
+        self._auth_view.show_error(message, self._last_auth_method)
+        if not self._terminal_login_url_shown:
+            self._note(self._terminal_login_fallback_message())
 
     def _stop_terminal_login(self) -> None:
         """Ends whatever login was in progress in the spawned process —
