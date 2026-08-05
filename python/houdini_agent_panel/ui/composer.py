@@ -877,6 +877,26 @@ class Composer(QtWidgets.QWidget):
             self._buddy.raise_()
         self._text_edit.setReadOnly(booting)
 
+    # --- the boot strip, driven by the panel -----------------------------
+
+    def begin_boot(self, agent_name: str) -> None:
+        self._boot_status.begin(agent_name)
+        self.set_booting(True)
+
+    def set_boot_phase(self, phase: str, detail: str = "") -> None:
+        self._boot_status.set_phase(phase, detail)
+
+    def finish_boot(self) -> None:
+        """Uncover the input only if it was this boot that covered it."""
+        was_booting = self._boot_status.is_booting()
+        self._boot_status.finish()
+        if was_booting:
+            self.set_booting(False)
+
+    def cancel_boot(self) -> None:
+        self._boot_status.cancel()
+        self.set_booting(False)
+
     def set_buddy(self, key: str) -> None:
         self._buddy.set_buddy(key)
 

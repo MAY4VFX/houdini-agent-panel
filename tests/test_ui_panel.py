@@ -1736,9 +1736,9 @@ def test_the_boot_strip_follows_the_panel_through_a_real_start(qapp, monkeypatch
     widget = panel_mod.AgentPanel()
     widget._rejoin_agent("codex-acp")
     monkeypatch.setattr(widget, "_note", lambda *_: None)
-    strip = widget._boot_status
+    strip = widget._composer.boot_status()
 
-    strip.begin("Codex")
+    widget._composer.begin_boot("Codex")
     assert strip.phase() == boot_mod.PHASE_PREPARING
 
     monkeypatch.setattr(panel_mod.shared_client(widget._agent_id), "start", lambda *a, **k: None)
@@ -1768,10 +1768,62 @@ def test_a_failed_start_leaves_no_progress_bar_behind(qapp, monkeypatch):
     widget._rejoin_agent("codex-acp")
     monkeypatch.setattr(widget, "_note", lambda *_: None)
     monkeypatch.setattr(widget, "_open_agent_management", lambda: None)
-    widget._boot_status.begin("Codex")
+    widget._composer.begin_boot("Codex")
 
     widget._on_launch_prep_failed("npx: command not found")
 
-    assert widget._boot_status.isHidden() is True
-    assert widget._boot_status.is_booting() is False
+    assert widget._composer.boot_status().isHidden() is True
+    assert widget._composer.boot_status().is_booting() is False
+    assert widget._composer._boot_scrim.isHidden() is True, (
+        "the input stayed covered after the agent failed to start"
+    )
+    widget.shutdown()
+
+
+def test_the_input_is_covered_while_an_agent_starts_and_uncovered_after(qapp, monkeypatch):
+    """Asked for: the input should be visually blocked during a boot, not
+    left looking live. There is no agent to send anything to yet, and an
+    inert control that looks ready invites the artist to type a paragraph
+    into nothing."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    monkeypatch.setattr(widget, "_start_new_session", lambda: None)
+    composer = widget._composer
+
+    composer.begin_boot("Codex")
+    assert composer._boot_scrim.isHidden() is False
+    assert composer._text_edit.isReadOnly() is True
+    assert composer._buddy.isHidden() is True, "the buddy sat over a dead input"
+
+    info = client_mod.AgentInfo(
+        name="codex", version="1.1.9", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=False, auth_methods=(),
+    )
+    widget._on_connected(info)
+    widget._on_session_started("s1", sessions.SessionState("s1", "chat", "/tmp", 0.0))
+
+    assert composer._boot_scrim.isHidden() is True
+    assert composer._text_edit.isReadOnly() is False
+    widget.shutdown()
+
+
+def test_a_new_chat_on_a_running_agent_does_not_cover_the_input(qapp, monkeypatch):
+    """`session/new` fires there too. Covering the input for it would block
+    typing every time somebody presses "+"."""
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    composer = widget._composer
+
+    widget._on_session_started("s1", sessions.SessionState("s1", "chat", "/tmp", 0.0))
+
+    assert composer._boot_scrim.isHidden() is True
+    assert composer._text_edit.isReadOnly() is False
     widget.shutdown()

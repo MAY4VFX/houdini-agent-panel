@@ -34,12 +34,7 @@ from .. import refresh, scene, sessions, settings as settings_mod
 from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
-from .boot_status import (
-    PHASE_CONNECTING,
-    PHASE_LAUNCHING,
-    PHASE_SESSION,
-    BootStatus,
-)
+from .boot_status import PHASE_CONNECTING, PHASE_LAUNCHING, PHASE_PREPARING, PHASE_SESSION
 from .composer import Composer
 from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
@@ -431,7 +426,6 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer = Composer(self)
         self._composer.set_buddy(self._settings.buddy)
         self._blocking = BlockingNotice(self)
-        self._boot_status = BootStatus(self)
 
         self._transcript = TranscriptView(self)
         self._pages.insertWidget(self.PAGE_TRANSCRIPT, self._transcript)
@@ -466,9 +460,6 @@ class AgentPanel(QtWidgets.QWidget):
         self._body_layout.addWidget(self._consent)
         self._body_layout.addWidget(self._pages, 1)
         self._body_layout.addWidget(self._blocking)
-        # Above the composer, not in the feed: the feed scrolls, and a
-        # progress report that scrolls away is the thing being fixed here.
-        self._body_layout.addWidget(self._boot_status)
         self._body_layout.addWidget(self._composer)
 
         layout.addWidget(self._header)
@@ -659,13 +650,13 @@ class AgentPanel(QtWidgets.QWidget):
         # landed, and a failed launch used to leave the chip naming the
         # previous agent — which reads as "nothing happened".
         self._header.set_agent(self._pending_agent_label, None)
-        self._boot_status.begin(self._pending_agent_label)
+        self._composer.begin_boot(self._pending_agent_label)
         worker = _LaunchPrepWorker(agent_id, self._settings, self)
         worker.note.connect(self._note)
         # The prep worker knows things the phase name cannot: which package
         # is being fetched, how big it is. Shown in place of the generic
         # step name for as long as it has something to say.
-        worker.note.connect(lambda text: self._boot_status.set_phase(PHASE_PREPARING, text))
+        worker.note.connect(lambda text: self._composer.set_boot_phase(PHASE_PREPARING, text))
         worker.ready.connect(self._on_launch_ready)
         worker.prep_failed.connect(self._on_launch_prep_failed)
         self._launch_worker = worker
@@ -675,12 +666,12 @@ class AgentPanel(QtWidgets.QWidget):
         self._launch_worker = None
         if label:
             self._pending_agent_label = label
-        self._boot_status.set_phase(PHASE_LAUNCHING)
+        self._composer.set_boot_phase(PHASE_LAUNCHING)
         shared_client(self._agent_id).start(spec, cwd=scene.hip_dir())
 
     def _on_launch_prep_failed(self, message: str) -> None:
         self._launch_worker = None
-        self._boot_status.cancel()
+        self._composer.cancel_boot()
         self._note(message)
         self._open_agent_management()
 
@@ -809,7 +800,7 @@ class AgentPanel(QtWidgets.QWidget):
         # session, which is where the agent's MCP servers come up — measured
         # at 12-16s for the fx server alone under a Houdini interpreter, and
         # the longest silence of the whole boot.
-        self._boot_status.set_phase(PHASE_CONNECTING)
+        self._composer.set_boot_phase(PHASE_CONNECTING)
         # The chip shows the name the artist picked, not the npm package
         # name from initialize ("@agentclientprotocol/claude-agent-acp").
         self._header.set_agent(self._pending_agent_label or info.name, None)
@@ -861,11 +852,11 @@ class AgentPanel(QtWidgets.QWidget):
         self._settings_view.set_current_agent_auth(None, False)
         # A boot that ended in a dead agent is not progress. The reason goes
         # to the feed; a bar frozen partway would read as "still coming".
-        self._boot_status.cancel()
+        self._composer.cancel_boot()
         self._note(f"Agent disconnected: {reason}" if reason else "Agent stopped.")
 
     def _on_failed(self, message: str) -> None:
-        self._boot_status.cancel()
+        self._composer.cancel_boot()
         self._note(f"Agent failed to start: {message}")
         self._open_agent_management()
 
@@ -880,7 +871,7 @@ class AgentPanel(QtWidgets.QWidget):
         # There is a session: the agent is up, its tools are loaded, and the
         # chips below are about to appear. This is the end of the boot and
         # the strip says so before removing itself.
-        self._boot_status.finish()
+        self._composer.finish_boot()
         adopted = self._adopting_restored
         self._adopting_restored = None
         if adopted is not None:
@@ -1353,7 +1344,7 @@ class AgentPanel(QtWidgets.QWidget):
         # here. Only reported while a boot is on screen: pressing "+" in a
         # running agent is a different, much shorter wait that the busy
         # indicator already covers.
-        self._boot_status.set_phase(PHASE_SESSION)
+        self._composer.set_boot_phase(PHASE_SESSION)
         client.new_session(cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers())
         QtCore.QTimer.singleShot(
             _NEW_SESSION_GRACE_MS, lambda: self._report_stalled_new_session(before)
