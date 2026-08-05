@@ -420,6 +420,12 @@ class AgentPanel(QtWidgets.QWidget):
         #: exited`/`_terminal_login_fallback_message` for what they're for.
         self._terminal_login_url_shown: bool = False
         self._terminal_login_command: str = ""
+        #: Which agent id `_terminal_login_worker` was started for — see
+        #: `_start_terminal_login`'s own comment for the residual race
+        #: this guards even `_stop_terminal_login`'s signal-disconnect
+        #: doesn't fully close (a Qt cross-thread signal already queued at
+        #: the moment of disconnect still gets delivered).
+        self._terminal_login_agent_id: str = ""
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -1092,17 +1098,33 @@ class AgentPanel(QtWidgets.QWidget):
         # what this used to do, and the agent answered "/login isn't
         # available in this environment" — which was measured beforehand and
         # ignored: `claude-acp` reports an EMPTY command list.
-        self._note(
-            f"{label} isn't signed in, and it has no sign-in the panel can "
-            f"run: no auth method, no /login command. It reads credentials "
-            f"the machine already has. For Claude Agent, in a terminal:\n"
-            f"    claude setup-token\n"
-            f"which writes ~/.claude/.credentials.json (the macOS Keychain "
-            f"on a Mac) — the adapter picks that up. An ANTHROPIC_API_KEY "
-            f"exported in your shell profile works too; the panel passes "
-            f"your login shell's environment to the agent. Then restart it "
-            f"from Settings."
-        )
+        self._note(f"{label} isn't signed in. {self._no_methods_advice()}")
+
+    #: Static, per-agent advice for when `initialize` reports NO sign-in
+    #: methods at all — the agent still has a real way in, the panel just
+    #: can't drive it (docs/facts/acp-sdk.md §9/§11). Keyed by agent id;
+    #: `_GENERIC_NO_METHODS_ADVICE` covers anything not listed here.
+    _NO_METHODS_ADVICE = {
+        "claude-acp": (
+            "No auth method, no /login command (measured: claude-acp "
+            "reports an empty command list) — it reads credentials the "
+            "machine already has. In a terminal:\n    claude setup-token\n"
+            "which writes ~/.claude/.credentials.json (the macOS Keychain "
+            "on a Mac) — the adapter picks that up. An ANTHROPIC_API_KEY "
+            "exported in your shell profile works too; the panel passes "
+            "your login shell's environment to the agent. Then restart it "
+            "from Settings."
+        ),
+    }
+    _GENERIC_NO_METHODS_ADVICE = (
+        "No sign-in method the panel can act on, and no /login command "
+        "either. It likely reads credentials from its own configuration "
+        "or environment — check its own documentation for how to sign "
+        "in, then restart it from Settings."
+    )
+
+    def _no_methods_advice(self) -> str:
+        return self._NO_METHODS_ADVICE.get(self._agent_id, self._GENERIC_NO_METHODS_ADVICE)
 
     def _has_login_command(self) -> bool:
         """Does the open session actually offer a login command?
@@ -2101,12 +2123,39 @@ class AgentPanel(QtWidgets.QWidget):
         on the agent asking first.
         """
         info = shared_client(self._agent_id).agent_info()
-        if info is None or not info.auth_methods:
+        if info is None:
             return
         if self._pages.currentIndex() == self.PAGE_AUTH:
             return
+        if not info.auth_methods:
+            # Reported for real: Claude Agent's Settings row could be
+            # clicked, and clicking it did nothing — this used to return
+            # right here. Zero methods is not the same as nothing to do
+            # (`_no_methods_advice`); the row must lead SOMEWHERE.
+            self._offer_sign_in_with_no_methods(info)
+            return
         self._auth_view.set_methods(
             list(info.auth_methods), can_logout=self._can_sign_out(info)
+        )
+        self._show_page(self.PAGE_AUTH)
+
+    def _offer_sign_in_with_no_methods(self, info: Any) -> None:
+        """The way in from Settings for an agent that lists no sign-in
+        methods at all.
+
+        If a live session already knows about a real `/login` command,
+        that's the more specific, already-established answer
+        (`_offer_login_command`, also reached automatically from
+        `auth_required`). Otherwise this shows the SAME static advice
+        directly on the sign-in screen — Settings just sent the artist
+        here, they should not need to already be mid-conversation and hit
+        a failure first to see it.
+        """
+        if self._has_login_command():
+            self._offer_login_command(info)
+            return
+        self._auth_view.set_methods(
+            [], can_logout=False, no_methods_help=self._no_methods_advice()
         )
         self._show_page(self.PAGE_AUTH)
 
@@ -2157,6 +2206,16 @@ class AgentPanel(QtWidgets.QWidget):
         "there; some agents complete sign-in in their own command-line "
         "tool instead. The panel is waiting either way."
     )
+    #: Methods measured to return `authenticate` OK INSTANTLY without
+    #: checking anything (docs/facts/acp-sdk.md §13: gemini's three
+    #: environment-backed methods all did — "no validation happens at
+    #: `authenticate` time — nothing was set in the environment for it to
+    #: check"). `_on_authenticated` firing is real, but for these it is
+    #: proof the CALL succeeded, not proof the credential works — reported
+    #: for real: an artist read Gemini's normal "Signed in." as a green
+    #: light, then hit "Could not load the default credentials" on the
+    #: first prompt with no idea why a "successful" sign-in had failed.
+    _UNVALIDATED_AUTH_METHODS = frozenset({"gemini-api-key", "vertex-ai", "gateway"})
 
     def _auth_advice_for(self, method_id: str) -> str:
         """What to say while `authenticate(method_id)` is in flight.
@@ -2247,6 +2306,15 @@ class AgentPanel(QtWidgets.QWidget):
         # something this regex doesn't recognise must never be a dead end).
         self._terminal_login_url_shown = False
         self._terminal_login_command = " ".join([ta.command or "", *ta.args])
+        # A belt-and-suspenders check alongside `_stop_terminal_login`'s
+        # signal-disconnect: Qt does not retract an already-QUEUED cross-
+        # thread signal delivery just because `disconnect()` ran before it
+        # was processed — a line already on its way from the worker thread
+        # at the exact moment of a switch can still arrive after. Each
+        # handler below checks this against `self._agent_id` and ignores
+        # anything that no longer matches, so even that narrow leftover
+        # race can't paint a stale result onto a different agent's screen.
+        self._terminal_login_agent_id = self._agent_id
         self._auth_view.set_pending(message)
 
         worker = TerminalLoginWorker(self._agent_id, ta, cwd=scene.hip_dir(), parent=self)
@@ -2258,10 +2326,14 @@ class AgentPanel(QtWidgets.QWidget):
         worker.start()
 
     def _on_terminal_login_line(self, line: str) -> None:
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_pending_detail(line)
 
     def _on_terminal_login_url(self, url: str, code: str) -> None:
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
         self._terminal_login_url_shown = True
         self._note(f"Sign in at: {url}" + (f" (code {code})" if code else ""))
         if self._pages.currentIndex() == self.PAGE_AUTH:
@@ -2290,7 +2362,15 @@ class AgentPanel(QtWidgets.QWidget):
         The one honest signal the rest of this file already relies on for
         every agent still applies here: a completed turn
         (`_remember_signed_in`, via `_on_turn_finished`).
+
+        Checks the stale-worker guard BEFORE touching any state: a worker
+        for an agent this tab has since left behind isn't just irrelevant
+        to show — clearing `_terminal_login_worker`/`_auth_pending` here
+        would wipe out whatever the CURRENT agent's own, newer attempt
+        already set them to.
         """
+        if self._terminal_login_agent_id != self._agent_id:
+            return
         self._terminal_login_worker = None
         self._auth_pending = False
         if self._pages.currentIndex() != self.PAGE_AUTH:
@@ -2305,7 +2385,12 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_terminal_login_failed(self, message: str) -> None:
         """`work()` raised before ever spawning anything readable — e.g. the
         command doesn't exist. Same fallback as a process that ran and
-        said nothing useful: the artist still gets the exact command."""
+        said nothing useful: the artist still gets the exact command.
+
+        Same stale-worker guard as `_on_terminal_login_exited`, first.
+        """
+        if self._terminal_login_agent_id != self._agent_id:
+            return
         self._terminal_login_worker = None
         self._auth_pending = False
         if self._pages.currentIndex() != self.PAGE_AUTH:
@@ -2317,15 +2402,37 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _stop_terminal_login(self) -> None:
         """Ends whatever login was in progress in the spawned process —
-        called when the artist cancels, leaves the sign-in screen, or the
-        panel closes. Not a courtesy: `kimi login` polls indefinitely on
-        its own (§14), so leaving it running is a real leak, the same
-        hazard `orphans.py`'s own module docstring describes for the agent
-        process itself.
+        called when the artist cancels, leaves the sign-in screen, switches
+        this tab to a different agent, or the panel closes. Not a
+        courtesy: `kimi login` polls indefinitely on its own (§14), so
+        leaving it running is a real leak, the same hazard `orphans.py`'s
+        own module docstring describes for the agent process itself.
+
+        Disconnects the worker's signals BEFORE asking it to stop, and
+        before forgetting it — `stop()` only sends a terminate signal, it
+        does not wait for the process to actually exit, so a line already
+        buffered in the pipe (or a URL match already mid-emit on the
+        worker thread) can still fire AFTER this call returns. Reported for
+        real: switching from Kimi's sign-in screen to a different agent's
+        (through Settings, which doesn't pass back through PAGE_AUTH on
+        the way — see `_switch_agent_process`) left the old worker running
+        long enough for its `url_found` to land on the NEW agent's screen,
+        painting Kimi's link over it and disabling ITS buttons. A
+        `_terminal_login_worker` that's been told to stop must never be
+        able to reach these handlers again, no matter when its thread
+        actually winds down.
         """
         worker = self._terminal_login_worker
         if worker is None:
             return
+        for signal, slot in (
+            (worker.line_received, self._on_terminal_login_line),
+            (worker.url_found, self._on_terminal_login_url),
+            (worker.exited, self._on_terminal_login_exited),
+            (worker.failed, self._on_terminal_login_failed),
+        ):
+            with contextlib.suppress(RuntimeError, TypeError):
+                signal.disconnect(slot)
         worker.stop()
         self._terminal_login_worker = None
         self._auth_pending = False
@@ -2354,11 +2461,25 @@ class AgentPanel(QtWidgets.QWidget):
         Leaving the artist on the sign-in screen after a successful sign-in
         was the bug: they approved it in the browser and the panel gave no
         sign it had noticed, so it looked like the login had failed.
+
+        For `_UNVALIDATED_AUTH_METHODS`, "worked" only means the CALL
+        returned without an error — the credential itself was never
+        checked (§13). Saying "Signed in." for those would read as a
+        promise the panel cannot back up; say what's actually true
+        instead, and let the first prompt be the real test.
         """
-        self._note("Signed in.")
+        if method_id in self._UNVALIDATED_AUTH_METHODS:
+            message = (
+                "Reading the credential from the environment — nothing was "
+                "checked yet, so whether it actually works shows at the "
+                "first prompt."
+            )
+        else:
+            message = "Signed in."
+        self._note(message)
         self._remember_signed_in(True)
         self._record_auth_attempt(
-            self._agent_id, action="sign_in", ok=True, message="Signed in.", method_id=method_id
+            self._agent_id, action="sign_in", ok=True, message=message, method_id=method_id
         )
         self._auth_pending = False
         self._auth_view.clear_pending()
@@ -2554,6 +2675,18 @@ class AgentPanel(QtWidgets.QWidget):
         pool is cleared just the same, so `_restore_conversations()` is
         called directly to refill it from disk before relaunching.
         """
+        # A terminal-auth worker belongs to `old_agent_id`'s login attempt
+        # specifically — reported for real: switching agents from Settings
+        # while Kimi's spawned login was still running left it alive, and
+        # its LATE `url_found` signal painted Kimi's link over the new
+        # agent's own sign-in screen and disabled ITS buttons. The page-
+        # based guard in `_show_page` doesn't catch this path: switching
+        # from Settings goes PAGE_SETTINGS -> PAGE_TRANSCRIPT, never
+        # touching PAGE_AUTH in between, so its "leaving PAGE_AUTH" check
+        # never fires. Stopping unconditionally here, at the one place
+        # every agent switch actually passes through, is what closes it.
+        self._stop_terminal_login()
+
         # The CONVERSATION is not the session id: it is what the artist
         # wrote and read, and wiping it on every switch (or restart) was
         # the bug, not the feature. Written to disk before anything about
@@ -2795,22 +2928,16 @@ class AgentPanel(QtWidgets.QWidget):
             launch.wait(3000)
             self._launch_worker = None
 
+        # Same reasoning as `_switch_agent_process`/`_show_page`: this
+        # process polls indefinitely on its own (docs/facts/acp-sdk.md
+        # §14) — the panel closing must not leave it running.
+        # `_stop_terminal_login` disconnects its signals before asking it
+        # to stop; `.wait()` here just gives the thread a real chance to
+        # actually join before this widget starts getting torn down.
         terminal_login = self._terminal_login_worker
+        self._stop_terminal_login()
         if terminal_login is not None:
-            # Same reasoning as `_show_page`: this process polls
-            # indefinitely on its own (docs/facts/acp-sdk.md §14) — the
-            # panel closing must not leave it running.
-            for signal, slot in (
-                (terminal_login.line_received, self._on_terminal_login_line),
-                (terminal_login.url_found, self._on_terminal_login_url),
-                (terminal_login.exited, self._on_terminal_login_exited),
-                (terminal_login.failed, self._on_terminal_login_failed),
-            ):
-                with contextlib.suppress(RuntimeError, TypeError):
-                    signal.disconnect(slot)
-            terminal_login.stop()
             terminal_login.wait(2000)
-            self._terminal_login_worker = None
 
         for signal, slot in (
             *getattr(self, "_client_wiring", ()),

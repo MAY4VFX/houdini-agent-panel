@@ -49,7 +49,18 @@ class AuthView(QtWidgets.QWidget):
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._methods_layout = QtWidgets.QVBoxLayout()
+        #: Shown instead of an empty method list. Plain "no sign-in
+        #: methods" used to be the only thing this ever said — technically
+        #: true, useless in practice for an agent like Claude Agent that
+        #: DOES have a real way in, just not one the panel can drive
+        #: (docs/facts/acp-sdk.md §9/§11). `set_methods`'s `no_methods_help`
+        #: replaces it with that agent's own instructions when the caller
+        #: has them (`AgentPanel._no_methods_advice`); word-wrapped and
+        #: selectable so a command in it can be copied, same as the error
+        #: label below.
         self._empty_label = QtWidgets.QLabel("The agent offered no sign-in methods.")
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self._empty_label.setVisible(False)
 
         self._logout_button = QtWidgets.QPushButton("Sign out")
@@ -175,11 +186,19 @@ class AuthView(QtWidgets.QWidget):
         width = max(_MIN_RAIL_WIDTH, min(_RAIL_WIDTH, self.width() - 32))
         self._rail.setFixedWidth(width)
 
-    def set_methods(self, methods: list["AuthMethod"], *, can_logout: bool) -> None:
+    def set_methods(
+        self, methods: list["AuthMethod"], *, can_logout: bool, no_methods_help: str = ""
+    ) -> None:
         """Redraw the list of sign-in methods. An empty list isn't an error:
-        we say so in words rather than show a blank screen with no explanation."""
+        we say so in words rather than show a blank screen with no
+        explanation — `no_methods_help`, when the caller has it, replaces
+        the generic "no sign-in methods" line with that agent's own real
+        instructions (`AgentPanel._no_methods_advice`)."""
         _clear_layout(self._methods_layout)
         methods = list(methods)
+        self._empty_label.setText(
+            no_methods_help if (not methods and no_methods_help) else "The agent offered no sign-in methods."
+        )
         self._empty_label.setVisible(not methods)
         self.clear_error()
 

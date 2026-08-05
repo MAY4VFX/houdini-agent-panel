@@ -118,10 +118,12 @@ def test_install_flow_runs_in_background_and_updates_row(qapp, monkeypatch, fetc
     assert current.installed_agents["agent-a"].version == "1.0.0"
     assert changed == [True]
 
-    # After install the row is redrawn: no more "Use" button, just "Remove".
+    # After install the row is redrawn: no more "Use" button, "Remove" plus
+    # "Sign in…" — offered unconditionally for any installed agent now
+    # (issue #33 follow-up), not only once the panel has connected to it.
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert buttons == {"Remove"}
+    assert buttons == {"Remove", "Sign in…"}
 
 
 def test_install_failure_not_an_installerror_still_reports_and_unlocks(qapp, monkeypatch):
@@ -193,19 +195,19 @@ def test_installed_agent_has_no_use_button(qapp, monkeypatch):
     view.set_agents([entry])
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert buttons == {"Remove"}
+    assert buttons == {"Remove", "Sign in…"}
 
 
-def test_sign_in_shown_for_any_agent_with_cached_auth_methods(qapp, monkeypatch):
-    """Issue #33: reachable at any time, for every installed agent — not
-    only the one this tab happens to be connected to right now. `auth_
-    methods`/`supports_logout` are constants of the BUILD, not the account
-    (docs/facts/acp-sdk.md §11), so once the panel has ever seen them for
-    an agent (`settings.agent_auth_info`, written by `AgentPanel._remember_
-    agent_auth_capability`), that agent's row keeps offering Sign in even
-    after this tab switches to a different one. An agent never yet
-    connected has nothing cached and offers nothing — honest silence, not
-    an invented guess.
+def test_sign_in_is_offered_for_every_installed_agent_from_the_start(qapp, monkeypatch):
+    """Reported for real: the button only appeared for an agent once the
+    artist had clicked through to it and the panel connected — a Settings
+    screen that grows controls as a reward for poking around. There is no
+    way to know an agent's methods before `initialize`, so this doesn't
+    wait for the cache to fill: every installed agent's row offers
+    "Sign in…" immediately. Cached info (`settings.agent_auth_info`,
+    written by `AgentPanel._remember_agent_auth_capability`) only ever
+    ADDS to the row afterward — Sign out, once `supports_logout` is
+    actually known, and the last attempt's result.
     """
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry_a = AgentEntry(
@@ -235,9 +237,13 @@ def test_sign_in_shown_for_any_agent_with_cached_auth_methods(qapp, monkeypatch)
 
     row_a = view._rows_by_id["agent-a"]
     row_b = view._rows_by_id["agent-b"]
+    # Cached: gets Sign in AND Sign out.
     assert "Sign in…" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
     assert "Sign out" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
-    assert "Sign in…" not in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
+    # Never connected: still gets Sign in — just not Sign out, since
+    # `supports_logout` isn't known yet.
+    assert "Sign in…" in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
+    assert "Sign out" not in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
 
 
 def test_sign_in_and_sign_out_requested_carry_the_agent_id(qapp, monkeypatch):
@@ -365,7 +371,7 @@ def test_custom_agent_add_and_remove(qapp):
     assert view._custom_rows_layout.count() == 1
     row = view._custom_rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert buttons == {"Remove"}
+    assert buttons == {"Remove", "Sign in…"}
     remove_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Remove")
     remove_button.click()
 

@@ -8,10 +8,27 @@ returned in silence.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from houdini_agent_panel import sessions
 from houdini_agent_panel.ui import panel as panel_mod
+
+
+def _fake_terminal_worker(stopped: list) -> SimpleNamespace:
+    """A stand-in for `TerminalLoginWorker` with real signal objects (a
+    plain `stop=lambda: ...` used to be enough, until `_stop_terminal_
+    login` started disconnecting each signal before calling `stop()` —
+    see its own docstring for the stale-worker bug that made that
+    necessary)."""
+    return SimpleNamespace(
+        stop=lambda: stopped.append(True),
+        line_received=SimpleNamespace(disconnect=lambda *_a: None),
+        url_found=SimpleNamespace(disconnect=lambda *_a: None),
+        exited=SimpleNamespace(disconnect=lambda *_a: None),
+        failed=SimpleNamespace(disconnect=lambda *_a: None),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -610,13 +627,11 @@ def test_terminal_login_url_found_shows_a_link_on_the_sign_in_screen(qapp):
 def test_leaving_the_sign_in_screen_stops_a_running_terminal_login(qapp):
     """Real `kimi login` polls indefinitely on its own (docs/facts/acp-sdk.md
     §14) — walking away from the screen must not leave it running."""
-    from types import SimpleNamespace
-
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     widget._show_page(widget.PAGE_AUTH)
     stopped: list[bool] = []
-    widget._terminal_login_worker = SimpleNamespace(stop=lambda: stopped.append(True))
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
 
     widget._show_page(widget.PAGE_TRANSCRIPT)
 
@@ -626,12 +641,10 @@ def test_leaving_the_sign_in_screen_stops_a_running_terminal_login(qapp):
 
 
 def test_cancel_pending_stops_a_running_terminal_login(qapp):
-    from types import SimpleNamespace
-
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     stopped: list[bool] = []
-    widget._terminal_login_worker = SimpleNamespace(stop=lambda: stopped.append(True))
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
 
     widget._on_auth_cancel_pending()
 
@@ -727,4 +740,184 @@ def test_terminal_login_spawn_failure_also_falls_back_to_the_command(qapp, monke
     widget._on_terminal_login_failed("No such file or directory")
 
     assert any("/path/to/kimi login" in n for n in notes)
+    widget.shutdown()
+
+
+def test_stale_terminal_login_worker_cannot_paint_over_a_new_agents_screen(qapp):
+    """Reported for real: switching agents while Kimi's spawned login was
+    still running left it alive, and its late `url_found` painted Kimi's
+    link over the sign-in screen of the agent the artist had switched TO,
+    disabling ITS method buttons. `worker.stop()` alone doesn't guarantee
+    nothing already in flight on the worker's own thread fires afterward
+    — `_stop_terminal_login` has to disconnect the signals too."""
+    from houdini_agent_panel.client import TerminalAuth
+    from houdini_agent_panel.ui.terminal_login import TerminalLoginWorker
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    ta = TerminalAuth(command="/bin/true", args=[], env={})
+    worker = TerminalLoginWorker("kimi", ta, cwd="/tmp")
+    worker.line_received.connect(widget._on_terminal_login_line)
+    worker.url_found.connect(widget._on_terminal_login_url)
+    worker.exited.connect(widget._on_terminal_login_exited)
+    worker.failed.connect(widget._on_terminal_login_failed)
+    widget._terminal_login_worker = worker
+
+    widget._stop_terminal_login()
+    # Simulate the race directly: the worker's thread was already mid-emit
+    # when asked to stop, and only fires afterward.
+    worker.url_found.emit(
+        "https://www.kimi.com/code/authorize_device?user_code=STALE", "STALE"
+    )
+    qapp.processEvents()
+
+    assert "STALE" not in widget._auth_view._pending_label.text()
+    widget.shutdown()
+
+
+def test_switching_agents_stops_a_running_terminal_login(qapp):
+    """The exact path the bug above went through: leaving Kimi's sign-in
+    screen for a DIFFERENT agent via Settings goes PAGE_SETTINGS ->
+    PAGE_TRANSCRIPT, never passing back through PAGE_AUTH — so the
+    page-based guard in `_show_page` never sees "leaving PAGE_AUTH" fire.
+    `_switch_agent_process` is the one place every agent switch actually
+    passes through, which is why the stop lives there now too."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+
+    widget._switch_agent_process("kimi", "kimi", rejoin=False)
+
+    assert stopped == [True]
+    assert widget._terminal_login_worker is None
+    widget.shutdown()
+
+
+def test_geminis_unvalidated_methods_do_not_claim_to_be_signed_in(qapp, monkeypatch):
+    """docs/facts/acp-sdk.md §13: `gemini-api-key`/`vertex-ai`/`gateway` all
+    return OK instantly without checking anything — "Signed in." would be
+    a promise the panel cannot back up. Reported for real: an artist read
+    it as a green light, then hit "Could not load the default credentials"
+    on the very next prompt with no idea why."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("gemini")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_authenticated("vertex-ai")
+
+    assert "Signed in." not in notes
+    assert any("checked yet" in n or "first prompt" in n for n in notes)
+    widget.shutdown()
+
+
+def test_an_ordinary_methods_success_still_says_signed_in(qapp, monkeypatch):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_authenticated("chat-gpt")
+
+    assert "Signed in." in notes
+    widget.shutdown()
+
+
+def test_claude_agents_no_methods_screen_shows_the_real_instructions(qapp):
+    """Reported for real: Claude Agent's Settings row had "Sign in…", and
+    clicking it did nothing — zero `authMethods` used to mean the panel
+    gave up. It still has a real way in (`claude setup-token` /
+    `ANTHROPIC_API_KEY`, docs/facts/acp-sdk.md §9/§11) — the sign-in
+    screen has to say so, not just report that there is nothing to show.
+    """
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+
+    assert widget._pages.currentIndex() == widget.PAGE_AUTH
+    text = widget._auth_view._empty_label.text()
+    assert "claude setup-token" in text
+    assert "ANTHROPIC_API_KEY" in text
+    widget.shutdown()
+
+
+def test_an_unknown_agents_no_methods_screen_gets_generic_advice(qapp):
+    """Not every agent with zero methods is Claude — an id not in
+    `_NO_METHODS_ADVICE` still gets SOMETHING actionable, not a blank
+    "no sign-in methods" dead end."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("some-future-agent")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="some future agent")
+
+    widget._offer_sign_in()
+
+    assert widget._pages.currentIndex() == widget.PAGE_AUTH
+    text = widget._auth_view._empty_label.text()
+    assert text != "The agent offered no sign-in methods."
+    assert "Settings" in text
+    widget.shutdown()
+
+
+def test_opencodes_own_description_is_shown_not_a_tooltip(qapp, monkeypatch):
+    """OpenCode's `auth login` is an interactive arrow-key TUI menu the
+    panel cannot drive (docs/facts/acp-sdk.md §14) — it also carries no
+    `_meta` at all, so it never qualifies for the Kimi-style spawn
+    treatment (`client._terminal_auth_from`). Its own description ("Run
+    `opencode auth login` in the terminal") is the only honest answer,
+    and it has to reach the screen the artist is looking at, not just a
+    hover tooltip nobody finds."""
+    from houdini_agent_panel import client as client_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("opencode")
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "authenticate", lambda *_: None)
+    description = "Run `opencode auth login` in the terminal"
+    client.agent_info = lambda: client_mod.AgentInfo(
+        name="opencode", version="1.18.12", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=False,
+        auth_methods=(
+            client_mod.AuthMethod(id="opencode-login", name="opencode login", description=description),
+        ),
+    )
+
+    widget._on_auth_method_chosen("opencode-login")
+
+    assert widget._auth_view._pending_label.text() == description
+    # Never spawned — no `terminal-auth` metadata at all to act on.
+    assert widget._terminal_login_worker is None
+    widget.shutdown()
+
+
+def test_terminal_login_handlers_ignore_a_mismatched_agent_id(qapp):
+    """Belt-and-suspenders alongside `_stop_terminal_login`'s signal-
+    disconnect: Qt does not retract an already-QUEUED cross-thread signal
+    delivery just because `disconnect()` ran first, so each handler also
+    checks the agent id `_start_terminal_login` recorded the worker
+    against — a second, independent guard for the exact bug in
+    `test_stale_terminal_login_worker_cannot_paint_over_a_new_agents_screen`.
+    """
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_agent_id = "kimi"
+    widget._agent_id = "gemini"
+
+    widget._on_terminal_login_url(
+        "https://www.kimi.com/code/authorize_device?user_code=STALE", "STALE"
+    )
+
+    assert "STALE" not in widget._auth_view._pending_label.text()
     widget.shutdown()

@@ -127,8 +127,13 @@ def test_agent_switcher_menu_no_longer_offers_sign_in(qapp):
     widget.shutdown()
 
 
-def test_agent_without_auth_methods_gets_no_sign_in(qapp, monkeypatch):
-    """The rule holds: the agent doesn't offer it, the control isn't drawn."""
+def test_agent_without_auth_methods_still_gets_a_way_in(qapp, monkeypatch):
+    """Used to do nothing at all — reported for real on Claude Agent
+    (zero methods): the Settings row could be clicked, and clicking it
+    was a dead end. Zero methods is not the same as nothing to do
+    (`AgentPanel._no_methods_advice`); the sign-in screen now shows
+    whatever real, agent-specific instructions exist instead of silently
+    staying wherever the artist already was."""
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     client = panel_mod.shared_client(widget._agent_id)
@@ -137,7 +142,8 @@ def test_agent_without_auth_methods_gets_no_sign_in(qapp, monkeypatch):
     widget._offer_sign_in()
     qapp.processEvents()
 
-    assert widget._pages.currentIndex() != panel_mod.AgentPanel.PAGE_AUTH
+    assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_AUTH
+    assert widget._auth_view._empty_label.text() != "The agent offered no sign-in methods."
     widget.shutdown()
 
 

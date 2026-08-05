@@ -110,6 +110,14 @@ def _state_text(installed, update: "Update | None") -> str:
     return f"installed {installed.version}"
 
 
+#: How far the Sign in/out line is indented under the row's name —
+#: rendered and looked at (issue #33 follow-up): flush with the row's own
+#: left edge, the eye read it as belonging to the row BELOW rather than
+#: the name above it. Enough to clearly subordinate it without lining up
+#: under any one specific letter of the name.
+_AUTH_ROW_INDENT = 24
+
+
 def _clear_layout(layout: "QtWidgets.QLayout") -> None:
     while layout.count():
         item = layout.takeAt(0)
@@ -126,15 +134,28 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
 class _AgentRow(QtWidgets.QWidget):
     """One row: a registry agent, or a "custom agent" entry.
 
-    Two lines when the agent has anything to say about signing in: the
-    usual name/state/install-update-remove line, and a second line beneath
-    it — Sign in, Sign out (if the agent implements logout), and whatever
-    the last attempt did. Both buttons are offered whenever the agent has
-    ever reported auth methods, for ANY installed agent, not gated on
-    whether the panel currently believes this one is signed in or out —
-    that belief is a guess (`AgentPanel._is_signed_in`, docs/facts/acp-
-    sdk.md §11), and gating reachability on a guess is exactly how someone
-    got stranded (issue #33).
+    Two lines for any installed (or custom) agent: the usual name/state/
+    install-update-remove line, and a second, INDENTED line beneath it —
+    Sign in, Sign out (if the agent implements logout) and whatever the
+    last attempt did.
+
+    "Sign in…" is offered from the moment the row exists, not only once
+    the panel happens to have connected to that agent and cached what
+    `initialize` said. Reported for real: the button only appeared after
+    the artist had clicked through every agent once, which reads as a
+    Settings screen that grows controls as a reward for poking around.
+    There is no way to know an agent's methods before `initialize` — so
+    this does not pretend to; clicking it is what starts that agent and
+    opens its sign-in screen once it connects
+    (`AgentPanel._on_agent_row_sign_in`/`_complete_pending_auth_switch`).
+    Cached methods, when present, only REFINE the row afterward — adding
+    Sign out (once `supports_logout` is actually known) and the last
+    attempt's result — they are never what makes Sign in exist.
+
+    Not gated on whether the panel currently believes this one is signed
+    in or out, either — that belief is a guess (`AgentPanel._is_signed_
+    in`, docs/facts/acp-sdk.md §11), and gating reachability on a guess is
+    exactly how someone got stranded (issue #33).
     """
 
     install_requested = Signal()
@@ -163,7 +184,6 @@ class _AgentRow(QtWidgets.QWidget):
         is_installed: bool = False,
         has_update: bool = False,
         is_custom: bool = False,
-        has_auth: bool = False,
         can_sign_out: bool = False,
         auth_status: str = "",
         parent=None,
@@ -219,16 +239,21 @@ class _AgentRow(QtWidgets.QWidget):
             # agent is shown, not hidden).
             return
 
-        if has_auth:
-            # A second line, not squeezed into the actions column above:
-            # Sign in, Sign out (only if this agent implements logout) and
-            # whatever the last attempt actually did — reachable here at
-            # any time, for any installed agent, whether or not it's the
-            # one this tab is connected to right now (`AgentPanel.
-            # _on_agent_row_sign_in`/`_sign_out` handle switching to it
-            # first when it isn't).
+        if is_custom or is_installed:
+            # A second line, INDENTED under the name — not squeezed into
+            # the actions column above, and not flush with the row's own
+            # left edge either. Reported live: flush with the row, Sign
+            # in/out read as belonging to the row BELOW rather than this
+            # one — the indent is what ties it back to the name above it.
+            # Sign in is unconditional (see this class's own docstring for
+            # why); Sign out (only once `supports_logout` is actually
+            # known) and the last attempt's result are the only parts that
+            # wait on a cache — reachable here at any time, for any
+            # installed agent, whether or not it's the one this tab is
+            # connected to right now (`AgentPanel._on_agent_row_sign_in`/
+            # `_sign_out` handle switching to it first when it isn't).
             auth_row = QtWidgets.QHBoxLayout()
-            auth_row.setContentsMargins(0, 0, 0, 0)
+            auth_row.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
             auth_row.setSpacing(6)
             sign_in_btn = QtWidgets.QPushButton("Sign in…", self)
             sign_in_btn.clicked.connect(self.sign_in_requested.emit)
@@ -455,7 +480,6 @@ class AgentsView(QtWidgets.QWidget):
                     and installed is not None
                     and is_newer(update.latest, installed.version)
                 ),
-                has_auth=bool(auth_info and auth_info.methods),
                 can_sign_out=bool(auth_info and auth_info.supports_logout),
                 auth_status=_auth_status_text(attempt),
                 parent=self,
@@ -562,7 +586,6 @@ class AgentsView(QtWidgets.QWidget):
                 version=agent.command,
                 state_text="custom agent",
                 is_custom=True,
-                has_auth=bool(auth_info and auth_info.methods),
                 can_sign_out=bool(auth_info and auth_info.supports_logout),
                 auth_status=_auth_status_text(attempt),
                 parent=self,
