@@ -536,6 +536,15 @@ class AgentPanel(QtWidgets.QWidget):
         # Writing to the agent from the settings or auth screen is pointless:
         # the reply lands in a feed the human can't see right now.
         self._composer.setVisible(index == self.PAGE_TRANSCRIPT)
+        # And the conversation drawer belongs to the conversation. It
+        # overlays rather than pushing content aside, which is right over a
+        # transcript — that column is empty margin — and wrong over settings,
+        # where it covered the agent names and the Back button with them,
+        # leaving no way out except closing a drawer the artist might not
+        # realise was open. It closes when the page changes; the toggle in
+        # the header stays for when they come back.
+        if index != self.PAGE_TRANSCRIPT and self._conversations.is_open():
+            self._conversations.close_drawer()
         # The permission popover is a free-floating child of the panel, not
         # part of the page stack — without this it kept hovering over the
         # settings form, anchored to a composer that isn't even on screen.
@@ -1705,11 +1714,26 @@ class AgentPanel(QtWidgets.QWidget):
     #: session happily and only writes "AuthorizationRequired" to stderr, so
     #: a panel that watched the protocol alone showed a working conversation
     #: that answered nothing.
-    _FATAL_STDERR_MARKERS = ("authorizationrequired", "fatal", "error")
+    _FATAL_STDERR_MARKERS = ("authorizationrequired", "fatal", "error", "command not found")
 
     def _on_log_line(self, line: str) -> None:
         lowered = line.lower()
         if not any(marker in lowered for marker in self._FATAL_STDERR_MARKERS):
+            return
+        if "command not found" in lowered:
+            # npx can leave its cache half-made: the directory exists, the
+            # package inside does not, and it then runs the missing binary
+            # and exits 0. Every launch after that fails identically, and
+            # the only visible sign is a shell error naming a command
+            # nobody typed. Seen for real on a machine whose network was
+            # dropping large transfers mid-stream when the agent was first
+            # installed — the download died, the cache stayed, and a working
+            # network later changed nothing because npx thought it was done.
+            self._note(
+                "The agent's package didn't finish downloading, and npx keeps "
+                "reusing the incomplete copy. Clear its cache and start the "
+                "agent again:\n    rm -rf ~/.npm/_npx"
+            )
             return
         if "authorizationrequired" in lowered.replace(" ", ""):
             self._note(

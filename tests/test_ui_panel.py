@@ -1700,3 +1700,25 @@ def test_a_panel_update_already_installed_is_not_offered(qapp, monkeypatch):
     assert panel_mod._update_is_stale(_Update("99.0.0")) is False, (
         "a genuinely newer version must still be offered"
     )
+
+
+def test_a_half_downloaded_npx_package_is_named_as_the_cause(qapp, monkeypatch):
+    """`sh: line 1: codex-acp: command not found` — a shell error naming a
+    command the artist never typed, repeated on every launch forever.
+
+    npx can leave its cache half-made: the directory exists, the package does
+    not, and it then runs the missing binary and exits 0. Fixing the network
+    afterwards changes nothing, because npx believes it already finished.
+    Diagnosed on a real machine whose transfers were dying mid-stream.
+    """
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_log_line("sh: line 1: codex-acp: command not found")
+
+    assert notes, "the artist was left with a bare shell error"
+    assert "_npx" in notes[-1], f"the fix must be spelled out: {notes[-1]!r}"
+    widget.shutdown()
