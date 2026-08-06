@@ -229,11 +229,11 @@ class AgentInfo:
     #: Read but deliberately unused, and it should stay that way. The obvious
     #: thing to build on it is listing the sessions the artist had with this
     #: agent in a terminal and continuing one here — and that was considered
-    #: and declined by the owner (2026-08-04): "терминальные сессии агента не
-    #: надо мешать с панелью, в этом и был смысл". The panel's conversations
-    #: belong to a scene; the terminal's belong to wherever it was opened.
-    #: Merging the two lists would erase exactly the boundary the scene
-    #: scoping exists to draw.
+    #: and declined by the owner (2026-08-04): "the agent's terminal sessions
+    #: shouldn't be mixed with the panel — that was the whole point." The
+    #: panel's conversations belong to a scene; the terminal's belong to
+    #: wherever it was opened. Merging the two lists would erase exactly the
+    #: boundary the scene scoping exists to draw.
     supports_load_session: bool
     supports_logout: bool
     auth_methods: tuple[AuthMethod, ...]

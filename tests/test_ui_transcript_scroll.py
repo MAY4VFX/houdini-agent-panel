@@ -1,9 +1,10 @@
 """The feed follows a streaming answer.
 
-Reported from a real session: "когда агент отвечает скрол не прокручивается,
-а стоит на месте". Following used to be re-derived on every refresh from
-"is the bar at the bottom right now" — an answer that is wrong for one frame
-whenever content grows faster than layout settles. One such frame and the
+Reported from a real session: "when the agent is answering the scroll
+doesn't scroll — it just stays put". Following used to be re-derived on
+every refresh from "is the bar at the bottom right now" — an answer that
+is wrong for one frame whenever content grows faster than layout settles.
+One such frame and the
 feed concluded the artist had scrolled away, and stopped following for the
 rest of the answer.
 """
@@ -67,7 +68,8 @@ def test_scrolling_up_stops_the_follow_and_returning_resumes_it(qapp):
 
 
 def test_rebuilding_a_message_never_makes_a_window(qapp):
-    """The reported "плашки появляются поверх Houdini и прячутся".
+    """The reported "little panes appear over Houdini and then hide
+    themselves".
 
     A widget with no parent IS a top-level window, and macOS composites it
     for a frame the moment it exists. Rebuilding a message's segments

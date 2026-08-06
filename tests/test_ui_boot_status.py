@@ -1,8 +1,8 @@
 """The strip that shows an agent coming up.
 
-Reported by the artist: "во время загрузки агентов никак не оповещается,
-что агент ещё грузится" — two lines flashed past in the feed and then, after
-a silence, the model and mode chips simply appeared.
+Reported by the artist: "while an agent is loading there's no indication
+at all that it's still loading" — two lines flashed past in the feed and
+then, after a silence, the model and mode chips simply appeared.
 """
 
 from __future__ import annotations

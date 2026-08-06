@@ -13,12 +13,12 @@ from houdini_agent_panel.transcript_model import TranscriptModel
 def test_unkeyed_chunks_form_one_message():
     model = TranscriptModel()
 
-    for word in ("При", "вет", "! ", "Чем ", "помочь", "?"):
+    for word in ("Hi ", "there", "! ", "How ", "can I ", "help?"):
         model.apply_chunk("", word)
 
     entries = model.entries()
     assert len(entries) == 1
-    assert entries[0].text == "Привет! Чем помочь?"
+    assert entries[0].text == "Hi there! How can I help?"
 
 
 def test_a_user_line_ends_the_run():

@@ -2114,9 +2114,9 @@ def test_a_half_downloaded_npx_package_is_named_as_the_cause(qapp, monkeypatch):
 
 def test_the_boot_strip_follows_the_panel_through_a_real_start(qapp, monkeypatch):
     """Wiring test: the phases must come from the code paths that do the
-    work, not from a timer. Reported as "во время загрузки агентов никак не
-    оповещается, что агент ещё грузится" — two lines flashed past in the
-    feed and then the chips appeared out of nowhere."""
+    work, not from a timer. Reported as "while an agent is loading there's
+    no indication at all that it's still loading" — two lines flashed past
+    in the feed and then the chips appeared out of nowhere."""
     from houdini_agent_panel import client as client_mod
     from houdini_agent_panel.ui import boot_status as boot_mod
     from houdini_agent_panel.ui import panel as panel_mod

@@ -504,10 +504,10 @@ class SettingsView(QtWidgets.QWidget):
         agents_section.add_widget(self._agents_view)
 
         # No "Default agent" field here any more (owner's call, seeing it
-        # live: "непонятно, какая модель дефолта выбрана, в меню этого не
-        # нужно" — a second control for a fact the header chip already
-        # decides). `settings.default_agent` still exists and still works
-        # exactly as before — the last agent actually picked from the
+        # live: "not clear which one is the default agent — don't need
+        # that in the menu" — a second control for a fact the header chip
+        # already decides). `settings.default_agent` still exists and still
+        # works exactly as before — the last agent actually picked from the
         # header chip's menu (`AgentPanel._on_agent_chosen`) — this screen
         # just no longer shows or lets you set it directly.
         behaviour_section = _Section("Behaviour", self, expanded=True, grid=grid_metrics)

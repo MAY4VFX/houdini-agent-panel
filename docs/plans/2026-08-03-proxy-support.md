@@ -47,7 +47,7 @@ Read `docs/2026-08-03-proxy-support.md` first. The two facts that drive every ta
   `launch_spec` and `custom_launch_spec`.
 - **Modify** `python/houdini_agent_panel/network.py` — `configure()`, a proxy-aware opener,
   and cache invalidation for `ssl_context()`.
-- **Modify** `python/houdini_agent_panel/ui/settings_view.py` — a "Сеть" section.
+- **Modify** `python/houdini_agent_panel/ui/settings_view.py` — a "Network" section.
 - **Modify** `python/houdini_agent_panel/ui/panel.py` — apply on change, offer an agent restart.
 - **Modify** `docs/design.md`, `README.md` — document the fields and their limits.
 
@@ -655,18 +655,18 @@ In `SettingsView.__init__`, next to the other field widgets:
         self._ca_bundle_edit.textChanged.connect(self._on_field_changed)
 
         proxy_hint = QtWidgets.QLabel(
-            "Пусто — панель возьмёт настройки прокси у самой машины.\n"
-            "Пароль в адресе сохраняется в settings.json открытым текстом:\n"
-            "лучше прокси без авторизации или с доступом по IP.\n"
-            "localhost никогда не идёт через прокси."
+            "Blank — the panel picks up the proxy settings from the machine itself.\n"
+            "A password in the address is stored in settings.json as plain text:\n"
+            "prefer a proxy with no login, or one restricted by IP.\n"
+            "localhost never goes through the proxy."
         )
         proxy_hint.setWordWrap(True)
         proxy_hint.setEnabled(False)
 
-        network_section = _Section("Сеть", expanded=False)
-        network_section.add_row("Прокси", self._proxy_edit)
-        network_section.add_row("Без прокси", self._no_proxy_edit)
-        network_section.add_row("Корневой сертификат", self._ca_bundle_edit)
+        network_section = _Section("Network", expanded=False)
+        network_section.add_row("Proxy", self._proxy_edit)
+        network_section.add_row("No proxy", self._no_proxy_edit)
+        network_section.add_row("CA bundle", self._ca_bundle_edit)
         network_section.add_row(proxy_hint)
 ```
 
@@ -720,8 +720,8 @@ Wire `self._settings_view.proxy_changed` to a new handler in `panel.py`:
         if not client.is_running():
             return
         self._announce(
-            "Настройки сети изменились. Агент подхватит их после перезапуска.",
-            action=("Перезапустить агента", self._restart_agent),
+            "Network settings changed. The agent will pick them up after a restart.",
+            action=("Restart agent", self._restart_agent),
         )
 ```
 

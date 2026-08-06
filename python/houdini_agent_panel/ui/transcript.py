@@ -702,10 +702,11 @@ def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
 class _ToolGroupRow(QtWidgets.QWidget):
     """A run of consecutive tool calls, collapsed into one block.
 
-    "Все тулы сыплются в чат бесконечно" was the complaint: an agent that
-    reads five files in a row used to draw five separate `_ToolCallRow`
-    widgets, one under another, forever growing the feed. Modeled on how
-    Claude Code shows this — collapsed by default to a single summary line
+    "All the tools just keep pouring into the chat forever" was the
+    complaint: an agent that reads five files in a row used to draw five
+    separate `_ToolCallRow` widgets, one under another, forever growing
+    the feed. Modeled on how Claude Code shows this — collapsed by default
+    to a single summary line
     (whichever step is still running, or a one-line result once the whole
     run is done), with a click revealing the full list.
 

@@ -449,10 +449,11 @@ class AgentsView(QtWidgets.QWidget):
         custom_form.addWidget(add_custom_btn)
 
         # Hidden, not removed — the owner's call after seeing it live:
-        # "давай это поле пока скроем, я пока даже не понимаю, что это за
-        # функционал." The feature works (add/remove, `_on_add_custom`,
-        # `settings.custom_agents`, every test below still exercises it
-        # directly) — it just has no explained audience yet. Comes back
+        # "let's hide this field for now, I don't even understand yet what
+        # this feature is for." The feature works (add/remove,
+        # `_on_add_custom`, `settings.custom_agents`, every test below
+        # still exercises it directly) — it just has no explained audience
+        # yet. Comes back
         # once someone can say who needs it; until then the code stays put
         # so that day doesn't mean rewriting it.
         self._custom_section = QtWidgets.QWidget(self)

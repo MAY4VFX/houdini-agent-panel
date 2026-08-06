@@ -95,8 +95,8 @@ def test_network_section_starts_collapsed(qapp):
 def test_network_caption_states_the_socks_limit(qapp):
     """The owner asked what proxy TYPE is supported. Answer lives in the
     same caption as the other honest facts, not a new label — a real
-    warning from the owner's own studio notes backs this: "НЕ ставить
-    ALL_PROXY=socks5 — ломает urllib OAuth."."""
+    warning from the owner's own studio notes backs this: "DO NOT set
+    ALL_PROXY=socks5 — breaks urllib OAuth."."""
     view = SettingsView()
     text = view._network_caption.text()
     assert "HTTP" in text
@@ -272,10 +272,11 @@ def test_settings_has_no_native_combobox(qapp):
 
 
 def test_no_default_agent_control_on_the_settings_screen(qapp):
-    """Removed per the owner's call, seen live: "непонятно, какая модель
-    дефолта выбрана, в меню этого не нужно" — a second control for a fact
-    the header chip's own menu already decides. `settings.default_agent`
-    itself is untouched (`test_saving_other_fields_does_not_touch_default_
+    """Removed per the owner's call, seen live: "not clear which one is
+    the default agent — don't need that in the menu" — a second control
+    for a fact the header chip's own menu already decides.
+    `settings.default_agent` itself is untouched
+    (`test_saving_other_fields_does_not_touch_default_
     agent` below) — only this screen's control is gone. "Behaviour" now
     has exactly one row: the autostart checkbox, occupying row 0."""
     view = SettingsView()

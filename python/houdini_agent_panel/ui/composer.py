@@ -682,10 +682,11 @@ class Composer(QtWidgets.QWidget):
         self._entrance = BuddyEntrance(self)
         self._entrance.finished.connect(self._on_entrance_finished)
 
-        # "где-нибудь в правом углу мелким текстом кнопочка" (owner) — a
-        # small, quiet text control, not a toolbar button competing with
-        # Send/voice/mode for attention; findable when wanted, invisible
-        # otherwise. Same free-floating-child, positioned-in-`resizeEvent`
+        # "somewhere in the right corner, small text, a little button"
+        # (owner, his original placement request) — a small, quiet text
+        # control, not a toolbar button competing with Send/voice/mode for
+        # attention; findable when wanted, invisible otherwise. Same
+        # free-floating-child, positioned-in-`resizeEvent`
         # technique as `_buddy`/`_boot_status` just above, for the same
         # reason stated on both of those: living outside `main_layout`
         # means its own size is never what determines where the input box
