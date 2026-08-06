@@ -8,8 +8,8 @@ from houdini_agent_panel import paths
 from houdini_agent_panel import settings as settings_module
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 from houdini_agent_panel.ui.agents import AgentsView
-from houdini_agent_panel.ui.qt import QtCore
-from houdini_agent_panel.ui.settings_view import SettingsView
+from houdini_agent_panel.ui.qt import QtCore, QtWidgets
+from houdini_agent_panel.ui.settings_view import SettingsView, _ROW_LABELS
 
 
 def test_reload_reflects_defaults(qapp):
@@ -24,6 +24,45 @@ def test_reload_reflects_defaults(qapp):
     assert view._ca_bundle_edit.text() == ""
     assert view._restart_banner.isVisible() is False
     assert view._data_dir_label.text() == str(paths.data_dir())
+
+
+def test_grid_measuring_labels_never_render_over_the_page(qapp):
+    """Regression, reported live with a screenshot: `_GridMetrics.measure`
+    builds five throwaway `QLabel`s (`_ROW_LABELS`) purely to measure the
+    widest one's `sizeHint()`. They must be parented (a parentless QWidget
+    is a real native top-level window on macOS — the original defect this
+    codebase already fixed once, in `chips.py`/`transcript.py`), but
+    parenting them turned them into ordinary VISIBLE children of the view
+    under construction, with no layout to place them — all five stacked at
+    (0, 0), each painted over the last, until `deleteLater()`'s deferred
+    cleanup finally ran. The owner's screenshot showed exactly that:
+    illegible overlapping label text laid over the back button and title.
+    `SettingsView()` here is a fresh, un-eventlooped construction — the
+    worst case for that race, with no `processEvents()` call given a
+    chance to run the deferred deletion first — so a stray visible probe
+    would still be a live, visible child of the view at this exact point,
+    same as it was for the artist's own first paint.
+    """
+    view = SettingsView()
+    # `isVisible()` follows the WHOLE ancestor chain — a child reports
+    # `False` whenever its top level was never shown, regardless of its
+    # own state. Without this, the assertion below would pass whether or
+    # not the bug was present, since `view` itself starts unshown.
+    view.show()
+    # `_ROW_LABELS` text is not unique to the probes — "Whisper endpoint"
+    # is also the real, legitimately-visible row label in the Voice
+    # section. What's unique to a probe is being a DIRECT child of `view`
+    # itself: every real row label lives several layers down (section ->
+    # its body -> the row), never straight off the top-level view, since
+    # `_GridMetrics.measure(self)` is called with the view itself as the
+    # probes' parent.
+    probes = [
+        child
+        for child in view.findChildren(QtWidgets.QLabel)
+        if child.parentWidget() is view and child.text() in _ROW_LABELS
+    ]
+    assert probes, "the probes this regression test targets weren't found at all — has measure() changed?"
+    assert [p for p in probes if p.isVisible()] == []
 
 
 def test_toggling_checkbox_persists_and_emits_changed(qapp):

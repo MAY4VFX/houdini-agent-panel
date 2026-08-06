@@ -121,12 +121,25 @@ class _GridMetrics:
         #
         # `parent` (the `SettingsView` under construction) is passed in so
         # these throwaway measuring labels are never parentless: a
-        # parentless QWidget is a top-level window, and this used to build
-        # and discard five of them every time settings opened. They're
-        # thrown away for real, not left dangling off `parent` forever —
-        # `deleteLater()` once each is measured, since nothing ever adds
-        # them to a layout.
+        # parentless QWidget is a top-level window, and macOS gives it a
+        # real native one the instant it's realised (the same defect fixed
+        # in `chips.py`/`transcript.py` — see those commits) — this used to
+        # build and discard five of them every time settings opened.
+        #
+        # A REAL regression came from that fix, reported live: parenting
+        # alone made these ordinary, VISIBLE child widgets of `parent` —
+        # with no layout to place them, they all sat stacked at (0, 0),
+        # each one painted on top of the last, until `deleteLater()`'s
+        # deferred cleanup finally ran on the next event-loop turn. On a
+        # slow enough first paint (or a `.grab()` taken before that turn),
+        # that showed up as illegible overlapping text at the panel's own
+        # top-left corner — not a hidden window this time, a visible one.
+        # `setVisible(False)` right after construction closes that gap:
+        # still parented (no top-level-window burst), never painted
+        # (nothing to overlap), still deleted for real once measured.
         probes = [QtWidgets.QLabel(text, parent) for text in _ROW_LABELS]
+        for probe in probes:
+            probe.setVisible(False)
         label_width = max(probe.sizeHint().width() for probe in probes)
         for probe in probes:
             probe.deleteLater()
