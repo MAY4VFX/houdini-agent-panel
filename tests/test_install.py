@@ -66,6 +66,14 @@ def test_install_writes_package_json_with_correct_deps_path(fake_houdini, monkey
     assert payload["env"][0] == {"HAP_DEPS": expected_deps}
     assert payload["path"] == "$HAP_DEPS/houdini_agent_panel/houdini"
 
+    fx_package_path = fake_houdini / "packages" / "fxhoudinimcp.json"
+    assert fx_package_path.exists()
+    fx_payload = json.loads(fx_package_path.read_text("utf-8"))
+    assert fx_payload == {
+        "env": [{"FXHOUDINIMCP": f"{expected_deps}/fxhoudinimcp/houdini"}],
+        "path": "$FXHOUDINIMCP",
+    }
+
 
 def test_install_skip_deps_still_writes_package_json_without_installing(fake_houdini, monkeypatch):
     _stub_hython(monkeypatch)

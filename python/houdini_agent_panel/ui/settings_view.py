@@ -308,19 +308,18 @@ class SettingsView(QtWidgets.QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settingsOverlay")
-        # `WA_StyledBackground`: a plain `QWidget` ignores a stylesheet
-        # `background` otherwise (it only affects widgets Qt already knows
-        # how to draw a background for) — needed here because this view now
-        # LAYS OVER the transcript page rather than reading as just another
-        # page of the same stack (owner: "settings should sit as an overlay,
-        # a slightly different shade from the rest of the background").
-        # `palette(alternate-base)` is the same theme-derived "a shade apart
-        # from Window" role `theme.popup_background()` already uses for
-        # every other floating surface in the panel (agent switcher, "…"
-        # menu) — read live at paint time, so it needs no `_apply_theme`
-        # refresh of its own the way a colour computed in Python would.
-        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.setStyleSheet("QWidget#settingsOverlay { background: palette(alternate-base); }")
+        # This view lays over the transcript page, so it needs a slightly
+        # different shade from the rest of the panel (the owner's wording).
+        # Do not use a parent QSS background here. Qt5 turns a background
+        # declaration into a resolved palette and cascades it into every
+        # child: under Houdini 20.5 that replaced Base/Button/Window with
+        # AlternateBase (a mid-grey), producing the washed-out real report.
+        # Auto-fill paints this widget's Window and leaves child controls on
+        # Houdini's own palette/style.
+        self.setAutoFillBackground(True)
+        overlay_palette = QtGui.QPalette(self.palette())
+        overlay_palette.setColor(QtGui.QPalette.Window, theme.settings_background())
+        self.setPalette(overlay_palette)
         self._loading = False
         #: True from the moment a Network field is edited until the restart
         #: is either done (button clicked) or explicitly dismissed
@@ -628,6 +627,17 @@ class SettingsView(QtWidgets.QWidget):
         layout.addWidget(self._scroll, 1)
 
         self.reload()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        # Preserve live Houdini theme switching. The old QSS palette()
+        # expression refreshed automatically; the Qt5-safe auto-fill palette
+        # above is explicit, so update its one overridden role when the host
+        # application palette changes.
+        if event.type() == QtCore.QEvent.ApplicationPaletteChange:
+            overlay_palette = QtGui.QPalette(self.palette())
+            overlay_palette.setColor(QtGui.QPalette.Window, theme.settings_background())
+            self.setPalette(overlay_palette)
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
         """Don't let the rail's fixed width become the panel's minimum.

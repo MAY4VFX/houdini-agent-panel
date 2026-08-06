@@ -30,6 +30,7 @@ from .. import registry, runtime
 from ..updates import is_newer
 from .. import settings as settings_module
 from .qt import QtCore, QtWidgets, Signal
+from . import theme
 from .worker import Worker, release
 
 if TYPE_CHECKING:
@@ -135,6 +136,22 @@ def _state_text(installed, update: "Update | None") -> str:
 #: the name above it. Enough to clearly subordinate it without lining up
 #: under any one specific letter of the name.
 _AUTH_ROW_INDENT = 24
+
+
+def _compact_button(text: str, parent) -> "QtWidgets.QPushButton":
+    """An action button with the same compact geometry on Qt5 and Qt6.
+
+    Houdini 20.5's native QPushButton is four pixels taller than Houdini
+    22's. An installed agent has one on each of its two lines, so that
+    difference inflated every row by eight pixels and pushed whole Settings
+    sections below the fold. Scope the normalization to this dense table;
+    buttons elsewhere remain host-native.
+    """
+    button = QtWidgets.QPushButton(text, parent)
+    height = theme.scaled_size(22)
+    button.setFixedHeight(height)
+    button.setStyleSheet(f"padding: 0 {theme.scaled_size(5)}px;")
+    return button
 
 
 def _clear_layout(layout: "QtWidgets.QLayout") -> None:
@@ -316,11 +333,11 @@ class _AgentRow(QtWidgets.QWidget):
             # else, which is also what a "Sign out" click falls back to if
             # it could not act (`AgentPanel._on_logout_requested`).
             if is_signed_in and can_sign_out:
-                sign_out_btn = QtWidgets.QPushButton("Sign out", self)
+                sign_out_btn = _compact_button("Sign out", self)
                 sign_out_btn.clicked.connect(self.sign_out_requested.emit)
                 auth_row.addWidget(sign_out_btn)
             else:
-                sign_in_btn = QtWidgets.QPushButton("Sign in…", self)
+                sign_in_btn = _compact_button("Sign in…", self)
                 sign_in_btn.clicked.connect(self.sign_in_requested.emit)
                 auth_row.addWidget(sign_in_btn)
             if auth_status:
@@ -333,23 +350,23 @@ class _AgentRow(QtWidgets.QWidget):
             outer.addLayout(auth_row)
 
         if is_custom:
-            remove_btn = QtWidgets.QPushButton("Remove", self._actions)
+            remove_btn = _compact_button("Remove", self._actions)
             remove_btn.clicked.connect(self.remove_custom_requested.emit)
             actions_layout.addWidget(remove_btn)
             return
 
         if not is_installed:
-            install_btn = QtWidgets.QPushButton("Install", self._actions)
+            install_btn = _compact_button("Install", self._actions)
             install_btn.clicked.connect(self.install_requested.emit)
             actions_layout.addWidget(install_btn)
             return
 
         if has_update:
-            update_btn = QtWidgets.QPushButton("Update", self._actions)
+            update_btn = _compact_button("Update", self._actions)
             update_btn.clicked.connect(self.update_requested.emit)
             actions_layout.addWidget(update_btn)
 
-        remove_btn = QtWidgets.QPushButton("Remove", self._actions)
+        remove_btn = _compact_button("Remove", self._actions)
         remove_btn.clicked.connect(self.uninstall_requested.emit)
         actions_layout.addWidget(remove_btn)
 

@@ -698,10 +698,12 @@ class Composer(QtWidgets.QWidget):
         self._bug_report_link.clicked.connect(self.bug_report_link_clicked.emit)
         self._bug_report_link.adjustSize()
 
+        surface_background = theme.to_hex(theme.composer_background())
+        surface_border = theme.to_hex(theme.composer_border())
         self.setStyleSheet(
             "QFrame#composerSurface {"
-            " background: palette(base);"
-            " border: 1px solid palette(mid);"
+            f" background: {surface_background};"
+            f" border: 1px solid {surface_border};"
             " border-radius: 18px;"
             "}"
             "QPlainTextEdit#composerInput {"

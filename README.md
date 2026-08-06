@@ -43,8 +43,10 @@ uvx --from houdini-agent-panel python -m houdini_agent_panel install
 Restart Houdini → **Tab → Python Panels → Agent**. 🎉
 
 The installer finds every Houdini on the machine and installs into each one's
-own Python — 20.5 ships 3.11, 22 ships 3.13, and `pydantic`'s compiled core
-means one shared tree for both is impossible.
+own Python. Verified locally: Houdini 20.5 uses Python 3.11 + Qt5, Houdini 21
+uses Python 3.11 + Qt6, and Houdini 22 uses Python 3.13 + Qt6. `pydantic`'s
+compiled core means the 3.11 and 3.13 builds need separate dependency trees;
+20.5 and 21 safely share the 3.11 tree.
 
 Behind a proxy? Export it in the shell running the command above —
 `export HTTPS_PROXY=http://proxy.studio.local:8080` before the `curl`/`irm`

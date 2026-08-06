@@ -403,6 +403,23 @@ def test_header_rail_lines_up_with_the_settings_rail(qapp):
     assert abs(header_left - rail_left) <= 1
 
 
+def test_overlay_background_does_not_replace_child_control_palette(qapp):
+    """Qt5 cascaded the old parent background QSS into every child role."""
+    from houdini_agent_panel.ui.qt import QtGui
+
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#3a3a3a"))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#cccccc"))
+    palette.setColor(QtGui.QPalette.Base, QtGui.QColor("#000000"))
+    palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#989898"))
+    qapp.setPalette(palette)
+
+    view = SettingsView()
+
+    assert view.palette().color(QtGui.QPalette.Window) == QtGui.QColor("#454545")
+    assert view._whisper_edit.palette().color(QtGui.QPalette.Base) == QtGui.QColor("#000000")
+
+
 def test_settings_screen_does_not_pin_the_panel_wide(qapp):
     view = SettingsView()
     assert view.minimumSizeHint().width() <= 200

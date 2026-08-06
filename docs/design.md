@@ -50,6 +50,9 @@ Plus **"Custom Agent"** — a field for a command and arguments, speaking ACP wi
 - **Many sessions over one connection** — stated directly in ACP's architecture docs.
 - **Panels**: `.pypanel` is XML with an `<interface>` and a `<script>`, where `onCreateInterface()` returns a Qt widget. H22 ships 60 of these, it's a standard mechanism.
 - **`hutil.PySide`** — Houdini's own shim: on H22 it hands back PySide6, on 20.5 it hands back PySide2. One codebase for both versions. Confirmed during recon: the shim didn't appear right at the start of the 20.5.x line — it's missing in 20.5.278 (only `hutil.Qt` exists there), present by 20.5.445. That's why imports go through our own `ui/qt.py` module: `hutil.PySide` → PySide6 → PySide2.
+- **H21 compatibility** — verified on 21.0.792: Python 3.11.7 and PySide6/Qt
+  6.5.3. It reuses the `py3.11` dependency tree from H20.5 while taking the
+  Qt6 path in `ui/qt.py`; the real GUI render/lifecycle probe passes.
 - **Qt in H22**: `QtWidgets`, `QtNetwork`, `QtWebSockets`, `QtWebEngineWidgets` are all available.
 - **ACP SDK**: `agent-client-protocol` 0.12.0 on PyPI, `>=3.10,<3.15` — covers H20.5 (3.11) and H22 (3.13).
 - **Registry**: `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. An entry carries `version` and `distribution`: either `npx.package` or `binary.<platform>` with `archive`, `cmd`, `args`, `sha256`.

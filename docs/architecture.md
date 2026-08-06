@@ -20,7 +20,7 @@ is the main source of bugs:
 | Who | What it is | What lives in it |
 |---|---|---|
 | **installer python** | the one you ran `pip install houdini-agent-panel` with | the installer CLI, `fxhoudinimcp` |
-| **Houdini python** | `$HFS/bin/hython`, 3.11 on H20.5, 3.13 on H22 | the panel and its dependencies — in a separate `--target` tree |
+| **Houdini python** | `$HFS/bin/hython`, 3.11 on H20.5/H21, 3.13 on H22 | the panel and its dependencies — in a separate `--target` tree |
 | **agent process** | Node/the agent's binary | nothing of ours |
 
 `pydantic` carries a compiled `pydantic_core`, so putting the installer
@@ -49,12 +49,18 @@ The package json (the one place where paths get glued together):
 }
 ```
 
+The same install also writes `fxhoudinimcp.json` through
+`fxhoudinimcp.houdini_package.write_package`, pointing at the fx plugin in
+that same ABI-specific dependency tree. Installing its Python package alone
+does not expose its `uiready.py` to a fresh Houdini preferences directory.
+
 - `PYTHONPATH` is **prepended**, not appended: the panel's tree must win
   over anything the user has already piled onto the environment.
 - `HAP_PYTHON` is the installer python. The panel needs it for exactly one
   thing: building `mcpServers[0].command`, because `fxhoudinimcp` as an
   MCP server lives there specifically (see §4).
-- `path` gives Houdini the plugin tree: `python3.11libs/`, `python3.13libs/`,
+- `path` gives Houdini the plugin tree: `python3.11libs/` (H20.5/H21),
+  `python3.13libs/` (H22),
   `python_panels/`.
 
 Requires network access to install. Offline — `--find-links DIR`, and pip

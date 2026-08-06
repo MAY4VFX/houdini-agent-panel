@@ -150,6 +150,20 @@ def monospace_font() -> QtGui.QFont:
     return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
 
 
+def scaled_size(value: int) -> int:
+    """A Houdini Global-UI-Size-aware pixel value, or ``value`` elsewhere."""
+    try:
+        import hou
+    except ImportError:
+        return value
+    try:
+        if hou.isUIAvailable():
+            return int(hou.ui.scaledSize(value))
+    except Exception:  # noqa: BLE001 - host styling must never break a widget
+        pass
+    return value
+
+
 def kind_glyph(kind: str) -> str:
     """A one-letter or symbol badge for a tool call's kind."""
     return _KIND_GLYPH.get(kind, _KIND_GLYPH["other"])
@@ -276,6 +290,63 @@ def _blend(base: QtGui.QColor, other: QtGui.QColor, amount: float) -> QtGui.QCol
     )
 
 
+def _luminance(color_value: QtGui.QColor) -> float:
+    return (
+        0.299 * color_value.red()
+        + 0.587 * color_value.green()
+        + 0.114 * color_value.blue()
+    )
+
+
+def _subtle_surface(
+    preferred: QtGui.QColor,
+    *,
+    fallback_amount: float,
+    maximum_amount: float = 0.20,
+) -> QtGui.QColor:
+    """Use a palette surface only while it is a subtle step from Window.
+
+    Houdini 20.5's live Qt5 palette is internally inconsistent: under the
+    stock dark scheme ``Window`` is ``#3a3a3a`` and ``Text`` is ``#cccccc``,
+    but ``Base`` is pure black and ``AlternateBase`` is ``#989898``. Both
+    roles are valid QColors, yet neither means what Qt6/Houdini 22 makes it
+    mean for a quiet raised surface. Judge the candidate on the host's own
+    Window -> Text contrast axis; if it points the wrong way or travels too
+    far, derive the small step that the role was meant to represent.
+
+    This is semantic rather than a Qt-version branch, so custom/light themes
+    keep working and any future host with a coherent palette uses its own
+    value unchanged.
+    """
+    window = palette().color(QtGui.QPalette.Window)
+    text = palette().color(QtGui.QPalette.Text)
+    span = _luminance(text) - _luminance(window)
+    if preferred.isValid() and abs(span) > 1.0:
+        amount = (_luminance(preferred) - _luminance(window)) / span
+        if 0.015 <= amount <= maximum_amount:
+            return preferred
+    return _blend(window, text, fallback_amount)
+
+
+def settings_background() -> QtGui.QColor:
+    """A quiet overlay shade: AlternateBase when that role is coherent."""
+    return _subtle_surface(
+        palette().color(QtGui.QPalette.AlternateBase), fallback_amount=0.08
+    )
+
+
+def composer_background() -> QtGui.QColor:
+    """The input card surface: Base when it lies on the contrast axis."""
+    return _subtle_surface(palette().color(QtGui.QPalette.Base), fallback_amount=0.11)
+
+
+def composer_border() -> QtGui.QColor:
+    """A restrained edge around the input card, never darker than Window."""
+    return _subtle_surface(
+        palette().color(QtGui.QPalette.Mid), fallback_amount=0.025, maximum_amount=0.12
+    )
+
+
 def contrasting_text_color(background: QtGui.QColor) -> QtGui.QColor:
     """Black or white — whichever reads better on `background`.
 
@@ -299,20 +370,12 @@ def contrasting_text_color(background: QtGui.QColor) -> QtGui.QColor:
 
 
 def popup_background() -> QtGui.QColor:
-    """Menu/popup fill — `QApplication.palette()`'s own `AlternateBase`.
-
-    Read directly from the palette, NOT through `color()` (which tries
-    `hou.qt.getColor("MenuBG")` first): same reasoning as `accent_color` —
-    a Houdini 22 "Edit Theme" preset recolours the live palette, and there is
-    no verified way to know whether the `.hcs`-based scheme-name lookup
-    follows it too. The palette is the one source proven to track a preset,
-    on every version the panel supports.
-    """
-    return palette().color(QtGui.QPalette.AlternateBase)
+    """Menu/popup fill from the live palette's coherent surface roles."""
+    return settings_background()
 
 
 def popup_border() -> QtGui.QColor:
-    return palette().color(QtGui.QPalette.Mid)
+    return composer_border()
 
 
 def popup_hover_background() -> QtGui.QColor:

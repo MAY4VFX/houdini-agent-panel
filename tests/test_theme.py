@@ -45,6 +45,8 @@ def test_contrasting_text_color_picks_light_on_dark_background():
 
 def test_popup_stylesheet_contains_only_colours_derived_from_the_live_palette(qapp):
     palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#001122"))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#ddeeff"))
     palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#112233"))
     palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#ff33aa"))
     qapp.setPalette(palette)
@@ -58,10 +60,42 @@ def test_popup_stylesheet_contains_only_colours_derived_from_the_live_palette(qa
 
 def test_popup_background_reads_alternate_base(qapp):
     palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#334455"))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#ddeeff"))
     palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#445566"))
     qapp.setPalette(palette)
 
     assert theme.popup_background() == QtGui.QColor("#445566")
+
+
+def test_broken_qt5_surface_roles_are_rebuilt_from_window_and_text(qapp):
+    """The exact stock Houdini 20.5 palette captured by the GUI probe."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#3a3a3a"))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#cccccc"))
+    palette.setColor(QtGui.QPalette.Base, QtGui.QColor("#000000"))
+    palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#989898"))
+    palette.setColor(QtGui.QPalette.Mid, QtGui.QColor("#242424"))
+    qapp.setPalette(palette)
+
+    assert theme.settings_background() == QtGui.QColor("#454545")
+    assert theme.composer_background() == QtGui.QColor("#4a4a4a")
+    assert theme.composer_border() == QtGui.QColor("#3d3d3d")
+
+
+def test_coherent_qt6_surface_roles_are_kept(qapp):
+    """The exact stock Houdini 22 roles already have the desired meaning."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#2d2d2d"))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor("#f9f9f9"))
+    palette.setColor(QtGui.QPalette.Base, QtGui.QColor("#434343"))
+    palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#3e3e3e"))
+    palette.setColor(QtGui.QPalette.Mid, QtGui.QColor("#313131"))
+    qapp.setPalette(palette)
+
+    assert theme.settings_background() == QtGui.QColor("#3e3e3e")
+    assert theme.composer_background() == QtGui.QColor("#434343")
+    assert theme.composer_border() == QtGui.QColor("#313131")
 
 
 def test_no_hardcoded_hex_literals_remain_in_ui_sources():

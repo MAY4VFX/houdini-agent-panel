@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from fxhoudinimcp import houdini_package as fx_houdini_package
+
 from . import deps as deps_mod
 from . import mcp_runtime
 from . import houdini_package
@@ -239,10 +241,21 @@ def install(
             deps=target, installer_python=mcp_python, source=source, mcp_path=mcp_path
         )
         package_path = package_dir / houdini_package.PACKAGE_NAME
+        fx_plugin = target / "fxhoudinimcp" / "houdini"
+        fx_package_path = package_dir / fx_houdini_package.PACKAGE_NAME
         if dry_run:
+            out(f"  [dry-run] would write {fx_package_path}")
             out(f"  [dry-run] would write {package_path}")
         else:
             package_dir.mkdir(parents=True, exist_ok=True)
+            # A fresh Houdini version has no fx package file of its own.
+            # Installing the Python dependency is not enough: Houdini only
+            # discovers fx's uiready.py/server plugin through this package
+            # path. Delegate the JSON/encoding contract to fxhoudinimcp's
+            # own writer; only the target path is ours to choose because the
+            # dependency was installed into this ABI-specific tree above.
+            written_fx = fx_houdini_package.write_package(package_dir, fx_plugin)
+            out(f"  fx package json: {written_fx}")
             package_path.write_text(payload, encoding="utf-8", newline="\n")
             out(f"  package json: {package_path}")
         any_ok = True

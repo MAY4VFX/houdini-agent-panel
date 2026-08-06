@@ -65,6 +65,10 @@ def test_houdini_version_of_prefixed_dir():
     assert houdini_package.houdini_version_of(Path("/home/user/houdini22.0")) == "22.0"
 
 
+def test_houdini_version_of_houdini_21_dir():
+    assert houdini_package.houdini_version_of(Path("/whatever/21.0")) == "21.0"
+
+
 @pytest.mark.parametrize("name", ["packages", "20.5beta", "houdini", "houdini-20.5", ""])
 def test_houdini_version_of_rejects_non_version_names(name):
     assert houdini_package.houdini_version_of(Path("/whatever") / name) is None
@@ -76,12 +80,13 @@ def test_candidate_package_dirs_macos_only_existing_prefs(tmp_path, monkeypatch)
 
     root = tmp_path / "Library" / "Preferences" / "houdini"
     (root / "20.5").mkdir(parents=True)
+    (root / "21.0").mkdir(parents=True)
     (root / "22.0").mkdir(parents=True)
     (root / "not_a_version").mkdir(parents=True)
 
     found = houdini_package.candidate_package_dirs()
 
-    assert sorted(p.parent.name for p in found) == ["20.5", "22.0"]
+    assert sorted(p.parent.name for p in found) == ["20.5", "21.0", "22.0"]
     for packages in found:
         assert packages.name == "packages"
         assert packages.is_dir()  # candidate_package_dirs may create it itself
@@ -99,12 +104,15 @@ def test_candidate_package_dirs_linux_prefixed_names(tmp_path, monkeypatch):
     monkeypatch.setattr(houdini_package.Path, "home", staticmethod(lambda: tmp_path))
 
     (tmp_path / "houdini20.5").mkdir()
+    (tmp_path / "houdini21.0").mkdir()
     (tmp_path / "houdini22.0").mkdir()
     (tmp_path / "not-houdini").mkdir()
 
     found = houdini_package.candidate_package_dirs()
 
-    assert sorted(p.parent.name for p in found) == ["houdini20.5", "houdini22.0"]
+    assert sorted(p.parent.name for p in found) == [
+        "houdini20.5", "houdini21.0", "houdini22.0"
+    ]
 
 
 def test_candidate_package_dirs_windows_documents(tmp_path, monkeypatch):
