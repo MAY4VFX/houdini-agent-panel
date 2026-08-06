@@ -34,3 +34,34 @@ def test_path_with_node_keeps_existing_tools():
     result = node.path_with_node(Path("/data/node/bin/node"), "/opt/homebrew/bin:/usr/bin")
 
     assert "/opt/homebrew/bin" in result.split(os.pathsep)
+
+
+def test_path_with_dirs_keeps_order_and_deduplicates():
+    result = node.path_with_dirs(["/our/node", "/our/tools"], "/usr/bin:/our/node")
+
+    assert result.split(os.pathsep) == ["/our/node", "/our/tools", "/usr/bin"]
+
+
+def test_existing_node_never_downloads(monkeypatch, tmp_path):
+    """`ensure_node` may fetch 50 MB; `existing_node` answers "is one here
+    already" and nothing more — it is what the main thread is allowed to
+    ask (see `AgentPanel._npx_setup_token_argv`)."""
+    monkeypatch.setattr(node, "find_system_node", lambda *a, **k: None)
+
+    def explode(**kwargs):
+        raise AssertionError("existing_node() must never install Node")
+
+    monkeypatch.setattr(node, "install_node", explode)
+
+    assert node.existing_node() is None
+
+
+def test_existing_node_finds_the_one_we_installed(monkeypatch):
+    from houdini_agent_panel import paths
+
+    monkeypatch.setattr(node, "find_system_node", lambda *a, **k: None)
+    ours = node._node_bin_path(paths.node_dir() / node.NODE_VERSION)
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("#!/bin/sh\n")
+
+    assert node.existing_node() == ours

@@ -38,6 +38,17 @@ class LaunchSpec:
     command: str
     args: list[str]
     env: dict[str, str]  # added to the process environment, not a replacement for it
+    #: Directories that must come FIRST on the agent's PATH, whatever the
+    #: rest of it ends up being. Only `env["PATH"]` would be simpler, and it
+    #: was that at first — but the value written here can only be built from
+    #: Houdini's own PATH, and the PATH the agent should actually run with is
+    #: the artist's login-shell one (`shellenv.py`), which is not known until
+    #: `client.do_start`. Handing over the directories instead of a finished
+    #: string lets that composition happen where both halves exist, without
+    #: this module spawning a shell of its own. `env["PATH"]` is still set as
+    #: well, so a spec spawned directly (a script, a diagnostic) remains
+    #: correct on its own.
+    path_prepend: tuple[str, ...] = ()
 
 
 class InstallError(RuntimeError):
@@ -293,6 +304,30 @@ def _resolve_cmd(root: Path, cmd: str) -> Path:
     return root / cleaned
 
 
+def _unwrap_single_directory(extract_root: Path, cmd: str) -> Path:
+    """The directory the archive's `cmd` is actually relative to.
+
+    Normally the archive is flat and that is `extract_root` itself
+    (opencode's zips: `opencode` at the top level). But a GitHub release
+    tarball built by the usual Rust/Go release tooling wraps everything in
+    one directory named after the release —
+    `kimi-1.49.0-x86_64-unknown-linux-gnu/kimi` — while the registry still
+    says `cmd: "./kimi"`. `install_node` has always unwrapped exactly this
+    shape; agents went without, so such an archive installed "successfully"
+    and produced a launch command pointing at a file that was never there.
+
+    Only ever unwraps when it FIXES something: the cmd must be missing at
+    the top level and present inside the single directory. An archive that
+    resolves as-is is never second-guessed.
+    """
+    if _resolve_cmd(extract_root, cmd).exists():
+        return extract_root
+    entries = list(extract_root.iterdir())
+    if len(entries) == 1 and entries[0].is_dir() and _resolve_cmd(entries[0], cmd).exists():
+        return entries[0]
+    return extract_root
+
+
 def _make_executable(path: Path) -> None:
     if sys.platform == "win32":
         return
@@ -321,7 +356,9 @@ def _npx_launch_spec(node_bin: Path, dist: NpxDistribution) -> LaunchSpec:
     args = node_module.npx_argv(node_bin, dist.package, dist.args)
     env = dict(dist.env)
     env["PATH"] = node_module.path_with_node(node_bin, env.get("PATH"))
-    return LaunchSpec(command=args[0], args=args[1:], env=env)
+    return LaunchSpec(
+        command=args[0], args=args[1:], env=env, path_prepend=(str(node_bin.parent),)
+    )
 
 
 def _binary_launch_spec(version_dir: Path, dist: BinaryDistribution) -> LaunchSpec:
@@ -364,7 +401,12 @@ def install_agent(
         node_bin = node_module.ensure_node(progress=progress, fetch=fetch)
         _write_manifest(entry, kind="npx")
         spec = _npx_launch_spec(node_bin, dist)
-        return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+        return LaunchSpec(
+            command=spec.command,
+            args=spec.args,
+            env=_with_proxy(spec.env, settings),
+            path_prepend=spec.path_prepend,
+        )
 
     if not dist.sha256:
         # Some registry entries have no sha256 (§ registry.py,
@@ -385,17 +427,36 @@ def install_agent(
         extract_root = tmp_dir / "extracted"
         extract_root.mkdir()
         extract_archive(archive_path, extract_root)
+        payload_root = _unwrap_single_directory(extract_root, dist.cmd)
 
         if version_dir.exists():
             shutil.rmtree(version_dir)
         version_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(extract_root), str(version_dir))
+        shutil.move(str(payload_root), str(version_dir))
 
     cmd_path = _resolve_cmd(version_dir, dist.cmd)
+    if not cmd_path.exists():
+        # Fail HERE, where there is still something to say, rather than at
+        # launch. Without this the manifest got written for an agent whose
+        # command does not exist, `_make_executable` swallowed the resulting
+        # OSError, and the only symptom reached the artist minutes later as
+        # a bare "agent did not start" from a `Popen` that never had a file
+        # to run. The install is rolled back so the next attempt is a fresh
+        # one rather than a no-op against a version already on record.
+        shutil.rmtree(version_dir, ignore_errors=True)
+        raise InstallError(
+            f"{entry.name} {entry.version}: the archive did not contain {dist.cmd!r} "
+            f"(expected it at {cmd_path})"
+        )
     _make_executable(cmd_path)
     _write_manifest(entry, kind="binary")
     spec = _binary_launch_spec(version_dir, dist)
-    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+    return LaunchSpec(
+        command=spec.command,
+        args=spec.args,
+        env=_with_proxy(spec.env, settings),
+        path_prepend=spec.path_prepend,
+    )
 
 
 def uninstall_agent(agent_id: str) -> None:
@@ -458,7 +519,12 @@ def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
         version_dir = paths.agent_dir(entry.id) / entry.version
         spec = _binary_launch_spec(version_dir, dist)
 
-    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+    return LaunchSpec(
+        command=spec.command,
+        args=spec.args,
+        env=_with_proxy(spec.env, settings),
+        path_prepend=spec.path_prepend,
+    )
 
 
 def custom_launch_spec(agent: CustomAgent, *, settings=None) -> LaunchSpec:

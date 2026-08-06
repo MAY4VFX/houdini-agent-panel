@@ -422,3 +422,36 @@ def test_version_match_is_not_fooled_by_a_longer_number(tmp_path, monkeypatch):
     assert _mentions_version(Path("/x/Houdini22.0.368/Versions/22.0"), "22.0") is True
     assert _mentions_version(Path("/opt/hfs20.55"), "20.5") is False
     assert _mentions_version(Path("/opt/hfs120.5"), "20.5") is False
+
+
+def test_find_hython_without_a_version_uses_hfs(tmp_path, monkeypatch):
+    """`--houdini-dir /studio/hsite/packages` has no version in its name.
+    With `$HFS` set — which it always is under `hython` — this used to reach
+    `re.escape(None)` and end the install with a TypeError."""
+    hfs = tmp_path / "hfs22.0.368"
+    hython = _touch(hfs / "bin" / "hython")
+    monkeypatch.setenv("HFS", str(hfs))
+    monkeypatch.setattr(deps, "_system", lambda: "linux")
+    monkeypatch.setattr(deps, "_LINUX_OPT_ROOT", tmp_path / "nothing")
+
+    assert deps.find_hython(None) == hython
+
+
+def test_find_hython_without_a_version_picks_the_newest_on_disk(tmp_path, monkeypatch):
+    monkeypatch.delenv("HFS", raising=False)
+    monkeypatch.setattr(deps, "_system", lambda: "linux")
+    root = tmp_path / "opt"
+    monkeypatch.setattr(deps, "_LINUX_OPT_ROOT", root)
+
+    _touch(root / "hfs20.5.445" / "bin" / "hython")
+    newest = _touch(root / "hfs22.0.368" / "bin" / "hython")
+
+    assert deps.find_hython(None) == newest
+
+
+def test_find_hython_without_a_version_finds_nothing_when_there_is_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv("HFS", raising=False)
+    monkeypatch.setattr(deps, "_system", lambda: "darwin")
+    monkeypatch.setattr(deps, "_MAC_APPLICATIONS_ROOT", tmp_path / "nothing")
+
+    assert deps.find_hython(None) is None

@@ -43,6 +43,12 @@ rediscover them.
   behalf and never invent anything on top of the protocol.
 - **Houdini is never blocked.** Even a critical announcement only blocks the panel's
   input field.
+- **Every child process goes through `childproc.py`** — `childproc.run`,
+  `spawn_with_asyncio_pipes`, `terminate_tree`. A bare `subprocess.run`/`Popen`
+  works fine on the two platforms this project is developed on and, on Windows,
+  pops a console window in the artist's face, hands asyncio a pipe it cannot
+  read, or kills a parent while the real agent keeps running. Those three
+  facts live in one module so no call site has to remember them.
 - Don't duplicate code from `fxhoudinimcp/install.py` — reuse
   `resolve_houdini_dirs`, `desktop_config_path`, `printable_argv`.
 - **Any script that imports `houdini_agent_panel` outside pytest must set

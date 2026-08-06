@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from . import childproc
 from . import paths
 from . import runtime
 from .network import Fetcher, urlopen_fetch
@@ -64,7 +65,7 @@ def _find_system_node_uncached(minimum: tuple[int, int, int]) -> Path | None:
         return None
     path = Path(found)
     try:
-        result = subprocess.run(
+        result = childproc.run(
             [str(path), "--version"], capture_output=True, text=True, timeout=5
         )
     except (OSError, subprocess.SubprocessError):
@@ -194,6 +195,22 @@ def ensure_node(*, progress: Progress | None = None, fetch: Fetcher | None = Non
     return install_node(progress=progress, fetch=fetch)
 
 
+def existing_node() -> Path | None:
+    """The Node this machine already has, or None. NEVER downloads.
+
+    `ensure_node()` is the wrong call anywhere a download would be a
+    surprise — on the main thread above all, where fetching 50 MB of Node
+    means a frozen Houdini. This answers the narrower question: is there a
+    usable `node` right now, either the system's or the one we installed
+    earlier?
+    """
+    system_node = find_system_node()
+    if system_node is not None:
+        return system_node
+    ours = _node_bin_path(paths.node_dir() / NODE_VERSION)
+    return ours if ours.exists() else None
+
+
 def npx_argv(node_bin: Path, package: str, args: Sequence[str]) -> list[str]:
     """`[<node>, <npx-cli.js>, "--yes", package, *args]`.
 
@@ -259,6 +276,24 @@ def _npx_cli_path(node_bin: Path) -> Path:
     )
 
 
+def path_with_dirs(dirs: Sequence[str | Path], base: str | None = None) -> str:
+    """`base` with `dirs` in front of it, in order, each appearing once.
+
+    Split out of `path_with_node` because `client.py` has to redo this
+    against a DIFFERENT base than the one available here — see
+    `client._agent_path`: the PATH the agent should run with is the
+    artist's login-shell PATH, which this module has no business spawning a
+    shell to read.
+    """
+    existing = base if base is not None else os.environ.get("PATH", "")
+    wanted = [str(directory) for directory in dirs]
+    parts = list(wanted)
+    for part in existing.split(os.pathsep):
+        if part and part not in parts:
+            parts.append(part)
+    return os.pathsep.join(parts)
+
+
 def path_with_node(node_bin: Path, base: str | None = None) -> str:
     """A PATH with our `node`'s directory prepended.
 
@@ -272,7 +307,4 @@ def path_with_node(node_bin: Path, base: str | None = None) -> str:
     the agent may need other tools from the machine too, and we're not
     going to take them away from it.
     """
-    node_dir = str(node_bin.parent)
-    existing = base if base is not None else os.environ.get("PATH", "")
-    parts = [node_dir] + [part for part in existing.split(os.pathsep) if part and part != node_dir]
-    return os.pathsep.join(parts)
+    return path_with_dirs([node_bin.parent], base)

@@ -48,6 +48,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import childproc
+
 #: Variables that would let another interpreter's world answer for this one.
 #: Houdini's package file prepends the deps tree to `PYTHONPATH` and every
 #: child of the installer inherits it — which once made an unrelated
@@ -115,7 +117,7 @@ def _clean_env(pythonpath: Path | None) -> dict[str, str]:
 def _imports(python: Path, module: str, pythonpath: Path | None) -> bool:
     """Can this interpreter import the server? The only question that counts."""
     try:
-        result = subprocess.run(
+        result = childproc.run(
             [str(python), "-c", f"import {module}"],
             capture_output=True,
             timeout=_CHECK_TIMEOUT,

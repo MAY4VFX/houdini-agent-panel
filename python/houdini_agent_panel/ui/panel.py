@@ -2454,7 +2454,7 @@ class AgentPanel(QtWidgets.QWidget):
         if claude_on_path:
             command, args = claude_on_path, ["setup-token"]
         else:
-            command, args = "npx", ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+            command, args = self._npx_setup_token_argv()
         return acp_client.AuthMethod(
             id="claude-setup-token",
             name="Sign in with browser",
@@ -2467,6 +2467,38 @@ class AgentPanel(QtWidgets.QWidget):
             ),
             terminal_auth=acp_client.TerminalAuth(command=command, args=args, env={}),
         )
+
+    @staticmethod
+    def _npx_setup_token_argv() -> tuple[str, list[str]]:
+        """`claude setup-token` through npx, run the same way the AGENT is.
+
+        A bare `"npx"` was the first version of this and it is wrong twice
+        over. On a machine with no system Node — the case this panel
+        vendors Node for, and the same case where `claude` is not on PATH
+        either, so exactly the case this branch exists to serve — there is
+        no `npx` to find and the sign-in button dies with
+        `FileNotFoundError`. And on Windows `npx` is `npx.cmd`, which
+        `CreateProcess` will not locate from the bare name at all.
+
+        `node.npx_argv` is what `runtime._npx_launch_spec` already uses for
+        the agent itself: our Node, `npx-cli.js` called directly, no shim.
+        `existing_node`, not `ensure_node`, because this runs on the main
+        thread — if there is somehow no Node at all we fall back to the
+        bare name rather than freezing Houdini on a download.
+        """
+        package_args = ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+        from .. import node as node_module
+
+        node_bin = node_module.existing_node()
+        if node_bin is not None:
+            try:
+                argv = node_module.npx_argv(
+                    node_bin, "@anthropic-ai/claude-code", ["setup-token"]
+                )
+            except node_module.NpxNotFoundError:
+                return "npx", package_args
+            return argv[0], argv[1:]
+        return "npx", package_args
 
     def _find_auth_method(self, method_id: str) -> Any:
         """Wire methods first (`agent_info().auth_methods`), then the

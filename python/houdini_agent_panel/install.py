@@ -188,6 +188,13 @@ def install(
         version = houdini_package.houdini_version_of(prefs_dir)
         out(f"— Houdini {version or '?'} ({prefs_dir}) —")
 
+        # `version` is None when the directory's name says nothing about a
+        # Houdini version — impossible for an auto-detected candidate
+        # (`candidate_package_dirs` filters those out), routine for an
+        # explicit `--houdini-dir /studio/hsite/packages`. `find_hython`
+        # answers that with "$HFS, else the newest Houdini on the machine";
+        # it used to answer it with a TypeError out of `re.escape(None)`
+        # whenever `$HFS` was set, which is every run through `hython`.
         hython = deps_mod.find_hython(version)
         if hython is None:
             out("  hython not found on disk — skipping this Houdini")

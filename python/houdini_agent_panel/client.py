@@ -79,7 +79,7 @@ from acp.schema import (
     TextContentBlock,
 )
 
-from . import __version__, shellenv
+from . import __version__, childproc, shellenv
 from .logbook import logger as _logbook_logger
 from .sessions import SessionMode as _SessionMode
 from .sessions import SessionState
@@ -311,6 +311,40 @@ def _build_content_block(block: dict) -> Any:
 
 def _chunk_text(content: Any) -> str:
     return content.text if getattr(content, "type", None) == "text" else ""
+
+
+def _agent_path(spec: "LaunchSpec", env: dict) -> str:
+    """The PATH the agent process actually runs with.
+
+    Two things have to be true at once, and only this function sees both.
+
+    The artist's login shell owns the PATH that matters: their `git`, their
+    `rg`, their version manager's Python all live on it, and Houdini — a GUI
+    process launched by the window server — never saw any of it
+    (`shellenv.py`). A binary agent already gets that PATH, because its spec
+    carries none of its own.
+
+    Our vendored Node has to come FIRST, because `npx-cli.js` spawns its
+    children with the bare `node` command (`node.path_with_node`). An npx
+    spec therefore arrives with a finished `env["PATH"]` — built by
+    `runtime._npx_launch_spec` out of the only PATH IT could see, Houdini's
+    — and merging it in the ordinary way replaced the shell's PATH wholesale,
+    so npx agents silently lost every tool a binary agent kept. Composing
+    from `spec.path_prepend` instead keeps both halves: our directories in
+    front, the artist's PATH behind them.
+    """
+    # `getattr`, not `spec.path_prepend`: what this function is handed is
+    # anything shaped like a launch spec — `runtime.LaunchSpec` in the
+    # panel, a two-line stand-in in the tests — and requiring a field that
+    # only one of them has would turn "no directories to put first", the
+    # ordinary case, into a crash at launch.
+    prepend = tuple(getattr(spec, "path_prepend", ()) or ())
+    if not prepend:
+        return env.get("PATH", "")
+    from . import node as node_module  # noqa: PLC0415 - import cost only when it applies
+
+    shell_path = shellenv.capture().get("PATH")
+    return node_module.path_with_dirs(prepend, shell_path or env.get("PATH", ""))
 
 
 @dataclass(frozen=True)
@@ -612,6 +646,7 @@ class AcpWorker(QtCore.QThread):
             # project all live in that profile and nowhere else. See
             # `shellenv.py` for what this costs and why it is cached.
             env = shellenv.merged(dict(acp.default_environment()), spec.env)
+            env["PATH"] = _agent_path(spec, env)
 
             from . import proxy as _proxy_module
 
@@ -621,13 +656,13 @@ class AcpWorker(QtCore.QThread):
                 _proxy_module.sanitize(_proxy_address) if _proxy_address else "none",
             )
 
-            process = subprocess.Popen(
-                [spec.command, *spec.args],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=cwd,
+            # NOT a bare `subprocess.Popen`: on Windows the pipes handed to
+            # `connect_read_pipe`/`connect_write_pipe` below have to be
+            # opened for overlapped I/O or the proactor loop cannot read
+            # them at all (`childproc.py`, point 2), and the agent must not
+            # get a console window of its own (point 1).
+            process = childproc.spawn_with_asyncio_pipes(
+                [spec.command, *spec.args], env=env, cwd=cwd
             )
             self._process = process
             # From this line on, a Houdini that dies without warning
@@ -1106,7 +1141,10 @@ class AcpWorker(QtCore.QThread):
             return
         except asyncio.TimeoutError:
             pass
-        process.terminate()
+        # The tree, not just the process we hold: an npx agent runs the real
+        # agent as a grandchild, and on Windows nothing forwards a
+        # termination to it (`childproc.terminate_tree`).
+        childproc.terminate_tree(process)
         try:
             await asyncio.wait_for(self._await_process(process), timeout=2.0)
             self._forget_process(process)

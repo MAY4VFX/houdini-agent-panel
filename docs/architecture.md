@@ -326,6 +326,11 @@ class LaunchSpec:
     command: str
     args: list[str]
     env: dict[str, str]      # added to the environment, not a replacement for it
+    path_prepend: tuple[str, ...] = ()
+    """Directories that must lead the agent's PATH (our vendored Node, for an
+    npx agent). `env["PATH"]` is set too, but it can only be built out of
+    Houdini's own PATH; the PATH the agent should actually run with is the
+    artist's login-shell one, and only `client._agent_path` sees both."""
 
 class InstallError(RuntimeError): ...
 class ChecksumError(InstallError): ...
@@ -473,6 +478,21 @@ helper would otherwise have handled:
 
 The agent's `stderr` is read by a separate task and forwarded to
 `log_line` — otherwise a full pipe hangs the process.
+
+3. **The pipes themselves, on Windows.** `subprocess.PIPE` creates
+   anonymous pipes, and the proactor loop cannot read one: it works by
+   associating a HANDLE with an I/O completion port, which requires a
+   handle opened for overlapped I/O, and an anonymous pipe's `fileno()` is
+   a C-runtime descriptor rather than a handle. The standard library
+   solved this for its own subprocess transport in
+   `asyncio.windows_utils.Popen` ("Replacement for subprocess.Popen using
+   overlapped pipe handles"), and `childproc.spawn_with_asyncio_pipes`
+   uses it on Windows for exactly the same reason. The same module also
+   owns the other two Windows-only facts every spawn in the panel needs:
+   no console window for a child of a GUI process, and `taskkill /T` to
+   stop the tree rather than `TerminateProcess` on the parent alone. None
+   of the Windows branches have been executed on a real Windows machine —
+   this project has none.
 
 ---
 

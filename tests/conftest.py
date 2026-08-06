@@ -148,6 +148,27 @@ def no_real_network(monkeypatch):
     monkeypatch.setattr("houdini_agent_panel.network.stream_fetch", explode)
 
 
+@pytest.fixture(autouse=True)
+def no_inherited_proxy(monkeypatch):
+    """The machine's own proxy/CA variables must not leak into a test.
+
+    `proxy.child_env` deliberately inherits `HTTPS_PROXY`,
+    `NODE_EXTRA_CA_CERTS` and friends from the environment — that is the
+    feature (a studio configured machine-wide keeps working). It also means
+    that on such a machine every assertion of the form `spec.env == {}`
+    fails, with the suite blaming code that is behaving exactly as
+    designed. Cleared for every test, the same reflex as `no_real_network`:
+    a test states its own inputs, it does not read the developer's.
+
+    A test that is ABOUT inheritance sets what it needs itself; a
+    `monkeypatch.setenv` in the test body still wins over this.
+    """
+    from houdini_agent_panel import proxy
+
+    for name in (*proxy.PROXY_VARS, *proxy.CA_VARS, "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """One QApplication per run: Qt doesn't allow a second instance."""

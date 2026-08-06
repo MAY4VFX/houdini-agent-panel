@@ -129,6 +129,8 @@ python/houdini_agent_panel/
   install.py           # package json into user prefs
   registry.py          # ACP registry, picking the distribution for the platform
   runtime.py           # download + sha256 + extract: agents and portable Node
+  childproc.py         # spawning children per platform: no console window on
+                       # Windows, overlapped pipes for asyncio, kill the tree
   client.py            # ACP on top of agent-client-protocol, asyncio on a QThread
   sessions.py          # session pool per agent id, over that agent's connection
   auth.py              # authMethods / authenticate / logout

@@ -43,6 +43,7 @@ import threading
 from shutil import which
 from types import SimpleNamespace
 
+from .. import childproc
 from .qt import Signal
 from .terminal_login import TerminalLoginWorker
 from .worker import Worker, WorkerStopped
@@ -169,6 +170,10 @@ class SelfUpdateWorker(Worker):
             process = subprocess.Popen(
                 argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
+                # uv's output is read line by line below and shown in the
+                # panel; on Windows a console window would otherwise open
+                # alongside it with nothing in it (`childproc.py`).
+                **childproc.hidden_window_kwargs(),
             )
         except OSError as exc:
             raise SelfUpdateError(f"Could not start the update for {self._target}: {exc}") from exc
