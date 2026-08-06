@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 EntryKind = Literal[
-    "user", "activity", "agent", "thought", "tool", "plan", "permission", "error"
+    "user", "activity", "agent", "thought", "tool", "plan", "permission", "error", "queued"
 ]
 
 #: The feed has one plan per session — the protocol sends it in full on
@@ -120,6 +120,42 @@ class TranscriptModel:
         entry = Entry(kind="user", id=str(uuid.uuid4()), text=text)
         self._entries.append(entry)
         return entry
+
+    def queue_message(self, entry_id: str, text: str) -> Entry:
+        """A message the artist sent while a turn was already running.
+
+        Its own entry, not a deferred `append_user` — the feed has to show
+        "this is waiting" as a distinct fact, at the position it will
+        actually occupy once sent (`ui/panel.py::_on_enqueue_requested`
+        appends it right after whatever entry exists when it's typed, same
+        as a live send would). `promote_queued` is what turns it into an
+        ordinary sent message once its turn comes.
+        """
+        entry = Entry(kind="queued", id=entry_id, text=text)
+        self._entries.append(entry)
+        return entry
+
+    def promote_queued(self, entry_id: str) -> Entry | None:
+        """A queued message's turn has come — same entry, same position in
+        the feed, just no longer waiting. Mutated in place rather than
+        removed and re-appended: with more than one message queued, the
+        others are still sitting right after this one in send order, and
+        re-appending would jump this one past them."""
+        for entry in self._entries:
+            if entry.id == entry_id and entry.kind == "queued":
+                entry.kind = "user"
+                return entry
+        return None
+
+    def remove_entry(self, entry_id: str) -> bool:
+        """Drop an entry outright — today, only ever a queued message the
+        artist pulled back before it was sent (`ui/panel.py::_on_queue_
+        remove_requested`). Nothing else in the feed is ever taken back."""
+        for index, entry in enumerate(self._entries):
+            if entry.id == entry_id:
+                del self._entries[index]
+                return True
+        return False
 
     def start_activity(self) -> Entry:
         activity = ActivityView(started_at=time.monotonic())
@@ -241,10 +277,18 @@ class TranscriptModel:
     # reads back is the conversation, which is the part that was theirs.
 
     def to_records(self) -> list[dict]:
+        # "queued" is in here on purpose: a message the artist typed while
+        # busy is exactly as much theirs as one they typed while idle, and
+        # a hang that loses it is the same bug as the one that motivated
+        # persisting a prompt the instant it exists at all (`ui/panel.py::
+        # _persist_conversations_soon`). Only the text round-trips, same as
+        # "user"/"agent"/"error" — the blocks needed to actually resend it
+        # (attachments in particular) don't survive a restart; `ui/panel.py::
+        # _restore_conversations` rebuilds a plain-text-only block from this.
         return [
             {"kind": entry.kind, "id": entry.id, "text": entry.text}
             for entry in self._entries
-            if entry.kind in ("user", "agent", "error") and entry.text
+            if entry.kind in ("user", "agent", "error", "queued") and entry.text
         ]
 
     def load_records(self, records: list[dict]) -> None:

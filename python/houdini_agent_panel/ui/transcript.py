@@ -70,6 +70,11 @@ class TranscriptView(QtWidgets.QScrollArea):
     #: would see last frame's number. Pushed here, at the one point this
     #: value is actually known correct, that ordering problem doesn't exist.
     gutter_changed = Signal(int)
+    #: The artist pulled a still-waiting message back out of the queue
+    #: (`_MessageRow`'s "Remove" button, only shown on a `queued` row).
+    #: `str` is the entry id, matching both the `TranscriptModel.Entry`
+    #: and the `sessions.QueuedMessage` it stands for.
+    queue_remove_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -293,7 +298,13 @@ class TranscriptView(QtWidgets.QScrollArea):
             return _ActivityRow(entry, self._content)
         if entry.kind == "plan":
             return _PlanRow(entry, self._content)
-        return _MessageRow(entry, self._content)
+        row = _MessageRow(entry, self._content)
+        if entry.kind == "queued":
+            entry_id = entry.id
+            row.remove_requested.connect(
+                lambda entry_id=entry_id: self.queue_remove_requested.emit(entry_id)
+            )
+        return row
 
     def _update_row(self, row: QtWidgets.QWidget, entry: Entry) -> None:
         if isinstance(row, _ToolGroupRow):
@@ -411,6 +422,11 @@ class _MessageRow(QtWidgets.QWidget):
     untouched and simply wraps by word.
     """
 
+    #: Only fired by a `queued`-kind row, whose footer has the button —
+    #: see `_build_queued_footer`. `ui/transcript.py::TranscriptView`
+    #: connects it to its own `queue_remove_requested`.
+    remove_requested = Signal()
+
     def __init__(self, entry: Entry, parent=None) -> None:
         super().__init__(parent)
         self._kind = entry.kind
@@ -418,9 +434,49 @@ class _MessageRow(QtWidgets.QWidget):
         self._layout.setSpacing(theme.SPACING_TIGHT)
         self._apply_kind_margins(entry.kind)
         self._segments: list[QtWidgets.QWidget] = []
+        self._queued_footer: QtWidgets.QWidget | None = None
         self.update_from(entry)
+        if entry.kind == "queued":
+            self._queued_footer = self._build_queued_footer()
+            self._layout.addWidget(self._queued_footer, 0, QtCore.Qt.AlignRight)
+
+    def _build_queued_footer(self) -> QtWidgets.QWidget:
+        """Only for a `queued` row: what makes "typed, not sent yet" visible
+        at a glance, and the one interactive control this feed has ever
+        needed — a way to take a message back before its turn comes."""
+        row = QtWidgets.QWidget(self)
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACING_TIGHT)
+        label = QtWidgets.QLabel("Queued — waiting to send", row)
+        muted = theme.status_color("pending")
+        label.setStyleSheet(f"color: {theme.to_hex(muted)};")
+        font = label.font()
+        font.setPointSize(max(8, font.pointSize() - 1))
+        label.setFont(font)
+        layout.addWidget(label)
+        remove = QtWidgets.QPushButton("Remove", row)
+        remove.setFlat(True)
+        remove.setCursor(QtCore.Qt.PointingHandCursor)
+        remove.setToolTip("Remove this message from the queue")
+        remove.clicked.connect(self.remove_requested.emit)
+        layout.addWidget(remove)
+        return row
 
     def update_from(self, entry: Entry) -> None:
+        if entry.kind != self._kind:
+            # The only transition this feed makes: a queued message's turn
+            # arrives and `TranscriptModel.promote_queued` turns it into an
+            # ordinary sent one, same entry, same id. Everything that said
+            # "still waiting" stops being true right then.
+            self._kind = entry.kind
+            self._apply_kind_margins(entry.kind)
+            if self._queued_footer is not None:
+                self._layout.removeWidget(self._queued_footer)
+                self._queued_footer.hide()  # before orphaning: a parentless widget is a window
+                self._queued_footer.setParent(None)
+                self._queued_footer.deleteLater()
+                self._queued_footer = None
         segments = _split_markdown_segments(entry.text)
 
         # Streaming usually just appends to the last chunk without changing
@@ -454,14 +510,21 @@ class _MessageRow(QtWidgets.QWidget):
                 self._apply_kind_style(widget, entry.kind)
                 widget.set_text(content)
             self._segments.append(widget)
-            alignment = QtCore.Qt.AlignRight if entry.kind == "user" else QtCore.Qt.Alignment()
+            # A queued message is the same bubble as a sent one — it IS
+            # what the artist is about to say, just not yet — so it gets
+            # the same alignment, not a style of its own to learn.
+            alignment = (
+                QtCore.Qt.AlignRight
+                if entry.kind in ("user", "queued")
+                else QtCore.Qt.Alignment()
+            )
             self._layout.addWidget(widget, 0, alignment)
 
     def _apply_kind_margins(self, kind: str) -> None:
         # The indent is the visual marker for "a human typed this" — no
         # frames, no boxes.
-        indent = theme.SPACING * 4 if kind == "user" else 0
-        bottom = 32 if kind == "user" else 0
+        indent = theme.SPACING * 4 if kind in ("user", "queued") else 0
+        bottom = 32 if kind in ("user", "queued") else 0
         self._layout.setContentsMargins(indent, 0, 0, bottom)
 
     def _apply_kind_style(self, widget: "_ProseBlock", kind: str) -> None:
@@ -471,15 +534,17 @@ class _MessageRow(QtWidgets.QWidget):
             # A thought is secondary; the user bubble, by contrast, keeps
             # normal contrast as in the Claude/Codex references.
             palette.setColor(QtGui.QPalette.Text, theme.status_color("pending"))
-        elif kind == "user":
+        elif kind in ("user", "queued"):
             user_text = palette.color(QtGui.QPalette.Text)
-            user_text.setAlpha(230)
+            # A queued bubble reads as waiting, not as said — dimmer than
+            # a sent message, same as the muted footer under it.
+            user_text.setAlpha(140 if kind == "queued" else 230)
             palette.setColor(QtGui.QPalette.Text, user_text)
         if kind == "thought":
             font.setItalic(True)
         elif kind == "error":
             font.setBold(True)
-        if kind == "user":
+        if kind in ("user", "queued"):
             widget.setMaximumWidth(540)
             widget.document().setDocumentMargin(8)
             widget.setStyleSheet(
@@ -495,7 +560,7 @@ class _MessageRow(QtWidgets.QWidget):
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        if self._kind == "user":
+        if self._kind in ("user", "queued"):
             maximum = max(220, int(self.width() * 0.74))
             for widget in self._segments:
                 widget.setMaximumWidth(maximum)

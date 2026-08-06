@@ -1438,3 +1438,68 @@ Answering the four questions directly:
   captured in the one mid-fetch snapshot — not watched continuously.
 - Whether `no_proxy` (empty in the panel's settings here) has any effect —
   not exercised, since it was empty on this machine.
+
+## 15. Two concurrent `session/prompt` calls on one session — measured, not assumed
+
+The question, ahead of building a per-conversation send queue (the artist
+typing and sending again while a turn is still running): does anything in
+the SDK or transport stop, queue, or serialize a second `session/prompt`
+for a session that already has one in flight? Answered by measurement, not
+read off the schema — `session/prompt` is just another JSON-RPC request
+with its own id, and JSON-RPC has no inherent concept of "one at a time
+per session."
+
+### The measurement
+
+`AcpClient.prompt()` (`client.py`) schedules `do_prompt` as a fire-and-
+forget asyncio task on the worker's own event loop (`_submit`/`worker.
+submit`) — it does not await the previous call, and nothing in `AcpClient`,
+`AcpWorker`, or the vendored `acp` package (`.venv/…/site-packages/acp/
+connection.py`) tracks "is there already a prompt outstanding for this
+session id." Confirmed live: a real subprocess speaking the real SDK
+(`tests/fake_agent.py`, `stream` scenario — the same harness `test_client.py`
+uses), one session, two `client.prompt(session_id, blocks)` calls back to
+back with no wait for the first's `turn_finished`:
+
+```
+('chunk', 'm1', 'echo')
+('chunk', 'm1', 'echo')
+('turn_finished', 'sess-1', 'end_turn')
+('turn_finished', 'sess-1', 'end_turn')
+('chunk', 'm1', ': fi')
+('chunk', 'm1', ': se')
+('chunk', 'm1', 'rst')
+('chunk', 'm1', 'cond')
+```
+
+Both turns' `agent_message_chunk` updates carried the *same* `message_id`
+("m1" — `FakeAgent._prompt_stream` always uses that literal id), so the
+client-side model stitched them into ONE entry: reconstructing it from the
+chunks above gives `"echoecho: fi: sercond"` — the two replies ("echo:
+first" and "echo: second") interleaved character-group by character-group
+into a single garbled message. `turn_finished` fired twice back to back,
+*before* several of the chunks belonging to either turn had even arrived —
+completion and content genuinely raced.
+
+### Consequences for the UI (queueing)
+
+1. **A client that ever sends two `session/prompt` for the same session
+   while one is outstanding risks a corrupted transcript, not just a
+   confusing one.** This isn't specific to a hypothetical badly-behaved
+   real agent — it reproduces against the SDK's own reference fake agent,
+   which is about as well-behaved as an agent can be.
+2. **A send queue that only ever dispatches the next message after the
+   previous one's `turn_finished` (or `error`) arrives sidesteps this
+   entirely** — it never depends on knowing how any particular real agent
+   (`claude-agent-acp`, `codex-acp`, …) handles concurrent prompts, because
+   it never sends one.
+3. No agent-side behavior beyond the fake agent was measured — a real
+   agent might reject a concurrent prompt outright, hang, or do something
+   else not seen here. Irrelevant to the design above only because that
+   design never puts it to the test.
+
+### Not established
+
+- What any real agent (as opposed to the SDK's reference fake one) does
+  with a concurrent `session/prompt` — not measured, and, per the above,
+  not needed for the queueing design that follows from this.

@@ -575,6 +575,7 @@ class AgentPanel(QtWidgets.QWidget):
         # whether the transcript's or the panel's resizeEvent runs first —
         # see `TranscriptView.gutter_changed`'s own docstring.
         self._transcript.gutter_changed.connect(self._conversations.set_available_width)
+        self._transcript.queue_remove_requested.connect(self._on_queue_remove_requested)
 
         # The panel forwards focus to the composer: Houdini activates the pane
         # tab and grants focus to the panel widget, not to anything inside it.
@@ -593,6 +594,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._conversations.session_removed.connect(self._on_session_removed)
 
         self._composer.submitted.connect(self._on_submitted)
+        self._composer.enqueue_requested.connect(self._on_enqueue_requested)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
         self._composer.config_option_selected.connect(self._on_config_option_selected)
@@ -1309,6 +1311,12 @@ class AgentPanel(QtWidgets.QWidget):
             restored_state = self._pool.get(adopted)
             if restored_state is not None:
                 state.title = restored_state.title
+                # Anything still queued when this conversation was written
+                # to disk (`_restore_conversations` rebuilds it from the
+                # `queued`-kind entries) rides along the same way the
+                # transcript and the title just did — a queue is part of
+                # the conversation, not something a restart gets to erase.
+                state.queued = restored_state.queued
                 self._pool.remove(adopted)
         import uuid as _uuid
 
@@ -1335,6 +1343,13 @@ class AgentPanel(QtWidgets.QWidget):
         pending, self._pending_prompt = self._pending_prompt, None
         if pending:
             self._on_submitted(pending)
+        # A restored queue with nothing pending ahead of it: nothing else
+        # is going to call `_drain_queue` for a session that just started
+        # with no turn of its own yet. `_dispatch_prompt`, inside it, marks
+        # the session busy on the way out — if `pending` above just did
+        # exactly that, this is a no-op (`_drain_queue` checks `busy`
+        # first) and the restored queue waits its turn like any other.
+        self._drain_queue(session_id)
 
     def _on_modes_changed(self, session_id: str, mode_state: Any) -> None:
         state = self._pool.get(session_id)
@@ -1482,6 +1497,11 @@ class AgentPanel(QtWidgets.QWidget):
         # whole answer too, not just the one that never came back. See
         # `_persist_conversations_soon`.
         self._persist_conversations_soon()
+        # This turn's own drain point: if something was typed while it was
+        # running, its turn has come. After the persist above, not before —
+        # the turn that just finished gets written to disk as itself before
+        # anything about the NEXT one starts.
+        self._drain_queue(session_id)
 
     def _on_error(self, session_id: str, message: str) -> None:
         if self._pending_logout_agent == self._agent_id:
@@ -1515,9 +1535,20 @@ class AgentPanel(QtWidgets.QWidget):
             return
         entry = self._model(target).append_error(message)
         self._touch(target, entry.id)
+        state = self._pool.get(target)
+        if state is not None:
+            # An error ends this turn as surely as `turn_finished` does —
+            # no further completion is coming for it. Left set, this stuck
+            # `busy` forever blocked `_drain_queue` for a queue behind a
+            # turn that failed instead of finishing cleanly (found while
+            # wiring the queue through every way a turn can end, not just
+            # the tidy one).
+            state.busy = False
         if self._is_current(target):
             self._composer.set_busy(False)
         self._finish_activity(target)
+        self._persist_conversations_soon()
+        self._drain_queue(target)
 
     def _on_permission_requested(
         self, request_key: str, session_id: str, tool_call: Any, options: list
@@ -1958,12 +1989,100 @@ class AgentPanel(QtWidgets.QWidget):
             # reconstruct if the turn that follows never comes back (a hang,
             # a wedged agent, a crash). See `_persist_conversations_soon`.
             self._persist_conversations_soon()
-        current.busy = True
-        self._composer.set_busy(True)
-        activity = self._model(current.session_id).start_activity()
-        self._touch(current.session_id, activity.id)
-        self._composer.trigger_buddy()
-        shared_client(self._agent_id).prompt(current.session_id, blocks)
+        self._dispatch_prompt(current.session_id, blocks)
+
+    def _dispatch_prompt(self, session_id: str, blocks: list[dict]) -> None:
+        """Actually send blocks to the agent and mark the session busy.
+
+        The shared tail of two very different moments: "type and press
+        send" (`_on_submitted`, always the CURRENT session) and "the turn
+        ahead of this queued message just finished, so its own turn has
+        come" (`_drain_queue`, which may be draining a session that isn't
+        even the one on screen right now — the artist could have switched
+        tabs while it was waiting). `_is_current` is what tells the two
+        apart: the composer only ever reflects the ONE session on screen.
+        """
+        state = self._pool.get(session_id)
+        if state is not None:
+            state.busy = True
+        if self._is_current(session_id):
+            self._composer.set_busy(True)
+            self._composer.trigger_buddy()
+        activity = self._model(session_id).start_activity()
+        self._touch(session_id, activity.id)
+        shared_client(self._agent_id).prompt(session_id, blocks)
+
+    # --- the queue: typed while busy, sent one turn at a time --------------
+
+    def _on_enqueue_requested(self, blocks: list) -> None:
+        """The composer decided this should wait, not go now — busy (not
+        blocked) at the moment send was pressed. Queued on the conversation
+        itself (`sessions.SessionState.queued`), never anywhere keyed by
+        panel/tab: switching to a different conversation while this one is
+        still working must not carry these typed words along, or leave
+        them showing up in the wrong one.
+        """
+        current = self._current_session()
+        if current is None or current.session_id.startswith(_RESTORED_PREFIX):
+            # Nothing live and busy to queue behind — this is the same
+            # situation `_on_submitted` already knows how to open a session
+            # for, so let it, rather than queuing behind nothing.
+            self._on_submitted(blocks)
+            return
+        text = " ".join(
+            block.get("text", "") for block in blocks if block.get("type") == "text"
+        ).strip()
+        import uuid as _uuid
+
+        entry_id = str(_uuid.uuid4())
+        if text:
+            # Attachment-only messages get no transcript entry here, same
+            # as a direct send (`_on_submitted` above) — the blocks still
+            # queue and will still be sent, they just have nothing to show
+            # in a feed that has never rendered a textless user message.
+            entry = self._model(current.session_id).queue_message(entry_id, text)
+            self._touch(current.session_id, entry.id)
+        current.queued.append(sessions.QueuedMessage(id=entry_id, blocks=list(blocks)))
+        self._pool.mark_changed(current.session_id)
+        # The artist's own words, on disk the instant they exist — a queued
+        # message lost to a hang before its turn ever comes is exactly the
+        # bug `_persist_conversations_soon` was written for.
+        self._persist_conversations_soon()
+
+    def _drain_queue(self, session_id: str) -> None:
+        """The next queued message's turn has come.
+
+        One at a time, oldest first — never the whole backlog at once: each
+        queued message is its own separate turn, the same as if the artist
+        had waited for each answer and typed the next one by hand. Does
+        nothing if the session is busy (another turn is already running —
+        it will call back here when IT finishes) or the queue is empty.
+        """
+        state = self._pool.get(session_id)
+        if state is None or state.busy or not state.queued:
+            return
+        queued = state.queued.pop(0)
+        entry = self._model(session_id).promote_queued(queued.id)
+        if entry is not None:
+            self._touch(session_id, entry.id)
+        self._pool.mark_changed(session_id)
+        self._persist_conversations_soon()
+        self._dispatch_prompt(session_id, queued.blocks)
+
+    def _on_queue_remove_requested(self, entry_id: str) -> None:
+        """The artist pulled a still-waiting message back out — the one
+        thing about a queue that has to work, per the owner's own ask.
+        Only ever reachable for the CURRENT session: the remove button
+        lives on a transcript row, and only the session on screen has any
+        rows drawn at all."""
+        current = self._current_session()
+        if current is None:
+            return
+        current.queued = [q for q in current.queued if q.id != entry_id]
+        if self._model(current.session_id).remove_entry(entry_id):
+            self._touch(current.session_id, entry_id)
+        self._pool.mark_changed(current.session_id)
+        self._persist_conversations_soon()
 
     def _finish_activity(self, session_id: str) -> None:
         activity = self._model(session_id).finish_activity()
@@ -1983,6 +2102,15 @@ class AgentPanel(QtWidgets.QWidget):
         if current is None:
             self._composer.set_busy(False)
             return
+        if current.queued:
+            # Visible at the moment of the decision, not discovered later
+            # as a surprise once the next queued message quietly goes out
+            # on its own: the queue is kept, not silently dropped, and
+            # cancelling this turn is what lets the FIRST of them start.
+            self._note(
+                f"Stopping — {len(current.queued)} queued message(s) will "
+                "still be sent, one at a time, once this turn ends."
+            )
         shared_client(self._agent_id).cancel(current.session_id)
         session_id = current.session_id
         QtCore.QTimer.singleShot(
@@ -1996,11 +2124,17 @@ class AgentPanel(QtWidgets.QWidget):
         state.busy = False
         if self._is_current(session_id):
             self._composer.set_busy(False)
+        queue_note = (
+            f" {len(state.queued)} queued message(s) will still be sent."
+            if state.queued
+            else ""
+        )
         entry = self._model(session_id).append_error(
             "The agent did not acknowledge the stop. Input is unlocked; "
-            "start a new conversation if it stays unresponsive."
+            "start a new conversation if it stays unresponsive." + queue_note
         )
         self._touch(session_id, entry.id)
+        self._drain_queue(session_id)
 
     def _on_mode_selected(self, mode_id: str) -> None:
         """Record the pick right away, not only once the agent echoes it back.
@@ -3394,6 +3528,20 @@ class AgentPanel(QtWidgets.QWidget):
                 cwd=scene.hip_dir(),
                 created_at=conversation.created_at,
             )
+            # Whatever was still queued when this was last written survives
+            # here too — only as plain text, though: `to_records` never
+            # kept the original blocks (attachments in particular), the
+            # same limit every other restored entry already has ("Only
+            # text survives a restart" — `transcript_model.py`). Carried
+            # onto a real session's `SessionState` the moment one opens for
+            # this conversation (`_on_session_started`'s adoption).
+            state.queued = [
+                sessions.QueuedMessage(
+                    id=record["id"], blocks=[{"type": "text", "text": record["text"]}]
+                )
+                for record in conversation.entries
+                if record.get("kind") == "queued" and record.get("text")
+            ]
             self._pool.add(state)
             self._conversation_ids[key] = conversation.id
             self._model(key).load_records(conversation.entries)

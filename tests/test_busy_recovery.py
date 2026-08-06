@@ -66,18 +66,24 @@ def test_new_session_is_never_born_busy(qapp):
     widget.shutdown()
 
 
-def test_submitting_while_busy_explains_itself(qapp):
-    """Silence here is indistinguishable from a dead panel."""
+def test_submitting_while_busy_queues_instead_of_refusing(qapp):
+    """This used to be the dead end: a turn in flight meant "send" silently
+    refused, and a thought that arrived mid-turn had nowhere to go but the
+    artist's own head. It queues now (`ui/panel.py::_on_enqueue_requested`)
+    — busy no longer means refused, only "not yet"."""
     from houdini_agent_panel.ui.composer import Composer
 
     composer = Composer()
-    messages: list[str] = []
-    composer.attachment_rejected.connect(messages.append)
+    queued: list[list] = []
+    rejected: list[str] = []
+    composer.enqueue_requested.connect(queued.append)
+    composer.attachment_rejected.connect(rejected.append)
     composer.set_busy(True)
     composer._text_edit.setPlainText("hello")
 
     composer._submit()
 
-    assert messages, "a refused send must say why"
-    assert "stop" in messages[0].lower()
+    assert queued, "busy must queue the message, not drop it in silence"
+    assert queued[0][0]["text"] == "hello"
+    assert not rejected
     composer.deleteLater()

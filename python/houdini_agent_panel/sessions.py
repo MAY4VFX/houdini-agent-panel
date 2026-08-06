@@ -36,6 +36,23 @@ class Usage:
 
 
 @dataclass
+class QueuedMessage:
+    """A message typed while this session's turn was already running.
+
+    Lives on the `SessionState` it was typed into, not on the panel or the
+    agent process — a queue is a fact about ONE conversation, the same way
+    `entries`/`busy` already are. `blocks` are the real ACP content blocks,
+    ready to send unchanged once this message's turn comes
+    (`ui/panel.py::_drain_queue`); `id` matches the `queued`-kind
+    `transcript_model.Entry` shown for it, so promoting or removing one
+    finds the other.
+    """
+
+    id: str
+    blocks: list[dict]
+
+
+@dataclass
 class SessionState:
     session_id: str
     title: str  # the first line of the first prompt, otherwise "New chat"
@@ -56,6 +73,12 @@ class SessionState:
     #: Cleared the moment it becomes current again (`AgentPanel._show_session`)
     #: — "read" means "the artist had it open," nothing more elaborate.
     unread: bool = False
+    #: Messages typed while `busy` was already true, waiting their turn —
+    #: drained one at a time, oldest first, as each turn finishes
+    #: (`ui/panel.py::_drain_queue`). Per conversation like everything else
+    #: here: switching to a different one must never show or send another
+    #: conversation's still-typed words.
+    queued: list[QueuedMessage] = field(default_factory=list)
 
 
 class SessionPool(QtCore.QObject):

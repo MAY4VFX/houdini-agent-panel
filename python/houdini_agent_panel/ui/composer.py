@@ -529,6 +529,12 @@ class Composer(QtWidgets.QWidget):
     """Bottom of the panel: growing field, "+", microphone, chips, counter, send/stop."""
 
     submitted = Signal(list)  # list[dict] — ready ACP content blocks
+    #: Sent instead of `submitted` when the artist typed something and
+    #: pressed send/Enter while a turn was already running (`_submit`). The
+    #: composer only reports the intent — same as it never decides whether
+    #: an attachment is allowed, `ui/panel.py` is the one that knows what a
+    #: conversation's queue is and owns it (`sessions.SessionState.queued`).
+    enqueue_requested = Signal(list)
     cancelled = Signal()
     mode_selected = Signal(str)
     config_option_selected = Signal(str, str)  # config_id, value
@@ -1313,20 +1319,31 @@ class Composer(QtWidgets.QWidget):
         return blocks
 
     def _submit(self) -> None:
-        if self._blocked or self._busy:
-            # Never fail in silence. A stuck busy flag turned the send button
-            # into a stop button that did nothing when pressed, and from the
-            # outside that is indistinguishable from a dead panel.
-            self.attachment_rejected.emit(
-                "Still waiting on the previous turn. Press stop, or start a new conversation."
-                if self._busy
-                else "Input is locked by a notice above."
-            )
+        if self._blocked:
+            # Never fail in silence — a silently dropped send is
+            # indistinguishable from a dead panel. `_busy` used to refuse
+            # here too, with its own reason; it queues now instead (below).
+            self.attachment_rejected.emit("Input is locked by a notice above.")
             return
         blocks = self._gather_blocks()
         if not blocks:
             return
-        self.submitted.emit(blocks)
+        # Busy no longer means "refused": a thought that arrives mid-turn
+        # used to have nowhere to go but the artist's own head, or an
+        # interrupted turn nobody asked to interrupt. It queues instead —
+        # `ui/panel.py` decides what that means (there is no live session
+        # here to ask), the composer only reports which one was meant.
+        #
+        # No slash-command check here: measured (not assumed — see the
+        # queueing feature's own commit), a slash command is unparsed plain
+        # text the agent's own CLI reads, sent through the identical
+        # `session/prompt` call whether it goes out now or after a turn
+        # finishes. There is no command in this codebase whose meaning
+        # depends on going out immediately rather than in its own turn.
+        if self._busy:
+            self.enqueue_requested.emit(blocks)
+        else:
+            self.submitted.emit(blocks)
         self._text_edit.clear()
         self._attachments = []
         self._refresh_attachments_bar()
