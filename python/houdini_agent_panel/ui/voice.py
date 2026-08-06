@@ -250,12 +250,6 @@ class VoiceButton(QtWidgets.QToolButton):
             return
         self.setVisible(True)
 
-    def is_available(self) -> bool:
-        return self._backend is not None
-
-    def unavailable_reason(self) -> str:
-        return self._unavailable_reason
-
     # --- recording -------------------------------------------------------
 
     def _on_clicked(self) -> None:
