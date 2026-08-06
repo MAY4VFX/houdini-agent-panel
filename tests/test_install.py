@@ -338,3 +338,87 @@ def test_requirement_drops_the_pin_when_running_from_the_target_tree(monkeypatch
     )
 
     assert install_mod._requirement_for(target, "0.2.2") == "houdini-agent-panel"
+
+
+def test_reports_when_the_install_updated_the_version_that_was_running(
+    fake_houdini, monkeypatch
+):
+    """docs/facts/houdini.md §15: `hython -m houdini_agent_panel install`
+    runs from inside the very deps tree it is about to overwrite, so
+    anything this run decided about the install ITSELF — the MCP
+    interpreter, what went into the package file — was decided by the OLD
+    version, even though the tree now holds the new one. The artist needs
+    to be told to run the command again, in plain words, at the end where
+    it will actually be read — not left to notice a stale `HAP_PYTHON`
+    days later and assume it's a fresh bug (which is exactly what
+    happened: see the team-lead's own report)."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod, "_panel_version", lambda: "0.4.3")
+    monkeypatch.setattr(
+        deps_mod, "installed_version", lambda target, name: "0.4.4"
+    )
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    notice = "\n".join(logged)
+    assert "0.4.3" in notice and "0.4.4" in notice
+    assert "again" in notice.lower() or "once more" in notice.lower()
+
+
+def test_no_self_update_notice_when_installed_matches_running(fake_houdini, monkeypatch):
+    """The ordinary case — reinstalling the version already running, or a
+    normal update where this process's own `__version__` already reflects
+    what just got installed — must stay quiet. A notice on every routine
+    reinstall is noise that trains people to ignore it."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod, "_panel_version", lambda: "0.4.4")
+    monkeypatch.setattr(
+        deps_mod, "installed_version", lambda target, name: "0.4.4"
+    )
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    notice = "\n".join(logged)
+    assert "updated itself" not in notice
+
+
+def test_no_self_update_notice_on_a_dry_run(fake_houdini, monkeypatch):
+    """A dry run never touches the target tree, so there is nothing to
+    compare — `deps_mod.installed_version` must not even be consulted."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: [])
+    monkeypatch.setattr(install_mod, "_panel_version", lambda: "0.4.3")
+
+    def _boom(target, name):
+        raise AssertionError("installed_version must not be called on a dry run")
+
+    monkeypatch.setattr(deps_mod, "installed_version", _boom)
+    logged = []
+
+    code = install_mod.install(dry_run=True, out=logged.append)
+
+    assert code == 0
+    assert "updated itself" not in "\n".join(logged)
+
+
+def test_no_self_update_notice_with_skip_deps(fake_houdini, monkeypatch):
+    """`--skip-deps` never runs `install_deps`, so nothing was updated and
+    there is nothing to report — regardless of what's on disk."""
+    _stub_hython(monkeypatch)
+
+    def _boom(target, name):
+        raise AssertionError("installed_version must not be called with --skip-deps")
+
+    monkeypatch.setattr(deps_mod, "installed_version", _boom)
+    logged = []
+
+    code = install_mod.install(skip_deps=True, out=logged.append)
+
+    assert code == 0
+    assert "updated itself" not in "\n".join(logged)

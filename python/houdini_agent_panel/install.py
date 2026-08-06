@@ -164,6 +164,12 @@ def install(
     installer_python = sys.executable
     panel_version = _panel_version()
     any_ok = False
+    #: Set once, if any target's `install_deps` leaves a version behind that
+    #: differs from `panel_version` — see the notice printed at the end of
+    #: this function, and `docs/facts/houdini.md` §15 for why this can
+    #: happen at all (`hython -m houdini_agent_panel install` runs from
+    #: inside the very tree it is about to overwrite).
+    self_updated_to: str | None = None
 
     for package_dir in package_dirs:
         prefs_dir = package_dir.parent
@@ -211,6 +217,11 @@ def install(
                 out(f"  dependency install failed: {exc}")
                 continue
 
+            if not dry_run:
+                installed = deps_mod.installed_version(target, _PACKAGE)
+                if installed and installed != panel_version:
+                    self_updated_to = installed
+
         mcp_python, mcp_path = _mcp_python(
             hython, pyver, target, installer_python, out=out, dry_run=dry_run
         )
@@ -232,6 +243,25 @@ def install(
         agents_result = _install_agents(agents, dry_run=dry_run, fetch=fetch, out=out)
         if agents_result != 0:
             result = agents_result
+
+    if self_updated_to is not None:
+        # docs/facts/houdini.md §15: `hython -m houdini_agent_panel install`
+        # runs from inside the very deps tree it is about to overwrite, so
+        # this run's own decisions about what an install SHOULD look like —
+        # which interpreter runs the MCP server, what goes in the package
+        # file — were made by panel_version, not the version now on disk.
+        # We don't re-exec to fix that ourselves: restarting an installer
+        # mid-run, from a tree it just overwrote, is how you get a
+        # half-installed panel. Saying so once, plainly, costs nothing.
+        out("")
+        out(
+            f"houdini-agent-panel updated itself from {panel_version} to "
+            f"{self_updated_to} during this run. Everything else this run "
+            f"decided — which interpreter runs the MCP server, what went "
+            f"into the package file — was computed by {panel_version}, not "
+            f"{self_updated_to}. Run this command once more to have "
+            f"{self_updated_to} make those decisions."
+        )
 
     return result
 
