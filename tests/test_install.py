@@ -282,7 +282,10 @@ def test_doctor_reports_missing_houdini(tmp_path, monkeypatch):
     code = install_mod.doctor(out=logged.append)
 
     assert code == 0
-    assert any("no houdini found" in line.lower() for line in logged)
+    # Not "no Houdini found" — detection only looks for the prefs directory,
+    # which Houdini itself only creates on first launch, not at install
+    # time. The message says so, not "you don't have Houdini".
+    assert any("no houdini preferences directory found" in line.lower() for line in logged)
 
 
 def test_doctor_reports_hython_and_deps_state(fake_houdini, monkeypatch):

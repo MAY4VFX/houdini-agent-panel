@@ -150,10 +150,20 @@ def install(
 ) -> int:
     package_dirs, reason = _resolve_package_dirs(houdini_dir)
     if not package_dirs:
+        # NOT "no Houdini on this machine" — detection only ever looks for
+        # Houdini's own PREFS directory (~/Library/Preferences/houdini/X.Y
+        # and friends), which Houdini itself only creates the first time it
+        # is actually launched, not when it's installed. A fresh Houdini
+        # install that has never been opened once has Houdini on disk and
+        # nothing here yet — the original wording claimed the former and
+        # meant the latter, which reads as "you don't have Houdini" to a
+        # new artist on a machine that plainly does.
         out(
-            "No Houdini found on this machine: neither --houdini-dir nor the known "
-            "prefs paths (~/Library/Preferences/houdini/*, ~/houdiniX.Y, "
-            "~/Documents/houdiniX.Y) exist."
+            "No Houdini preferences directory found on this machine: neither "
+            "--houdini-dir nor the known prefs paths (~/Library/Preferences/houdini/*, "
+            "~/houdiniX.Y, ~/Documents/houdiniX.Y) exist. If Houdini is installed but "
+            "has never been launched, this is expected — it creates that directory on "
+            "first launch, not at install time. Open Houdini once, then run this again."
         )
         return 1
 
@@ -383,7 +393,11 @@ def doctor(out=print) -> int:
 
     package_dirs, reason = _resolve_package_dirs(None)
     if not package_dirs:
-        out("No Houdini found on this machine (no prefs directories with a recognized version).")
+        out(
+            "No Houdini preferences directory found (no prefs directories with a "
+            "recognized version) — installed but never launched leaves nothing here "
+            "yet; open Houdini once, then run this again."
+        )
         return 0
 
     out(f"Houdini packages directories ({reason}):")
