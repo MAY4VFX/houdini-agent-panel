@@ -753,6 +753,22 @@ class _ToolCallRow(QtWidgets.QWidget):
         self._details.setText(_format_tool_content(self._tool.content, self._tool.locations))
 
 
+#: Ceiling on what one expanded tool call puts into a `QLabel`. A `read` of
+#: a big geometry dump or a `find` across a project comes back as one string
+#: with no upper bound, and a word-wrapping label lays out every character of
+#: it — on the UI thread, inside Houdini. Generous enough that ordinary tool
+#: output is untouched, and the tail is always what gets cut, because the
+#: interesting end of a command's output is the top.
+_TOOL_CONTENT_LIMIT = 20_000
+
+
+def _clamp(text: str) -> str:
+    if len(text) <= _TOOL_CONTENT_LIMIT:
+        return text
+    dropped = len(text) - _TOOL_CONTENT_LIMIT
+    return text[:_TOOL_CONTENT_LIMIT] + f"\n\n… {dropped:,} more characters not shown"
+
+
 def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
     parts: list[str] = []
     for item in content:
@@ -778,7 +794,7 @@ def _format_tool_content(content: list[dict], locations: list[dict]) -> str:
         paths = ", ".join(loc.get("path", "?") for loc in locations)
         parts.append(f"[files: {paths}]")
 
-    return "\n\n".join(parts) if parts else "(no content)"
+    return _clamp("\n\n".join(parts)) if parts else "(no content)"
 
 
 class _ToolGroupRow(QtWidgets.QWidget):
