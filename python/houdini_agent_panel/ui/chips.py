@@ -28,6 +28,33 @@ _MIN_POPUP_WIDTH = 220
 _MAX_POPUP_HEIGHT = 360
 
 
+class _ContentSizedToolButton(QtWidgets.QToolButton):
+    """A tool button whose hint accounts for its own text.
+
+    Houdini 21's pane style was measured returning 36–38px from the native
+    ``QToolButton.sizeHint()`` regardless of whether the button said
+    ``Claude Agent`` or ``Opus (1M context)``. The layout faithfully gave
+    every control that width, leaving only ellipses. Keep the host's height
+    and chrome, but provide the missing content width ourselves. The native
+    minimum width remains zero, so a genuinely narrow dock can still shrink
+    the row instead of forcing the whole pane wider.
+    """
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        text = self.text()
+        if not text:
+            return hint
+        width = QtGui.QFontMetrics(self.font()).horizontalAdvance(text) + 16
+        if not self.icon().isNull():
+            style = self.toolButtonStyle()
+            if style == QtCore.Qt.ToolButtonTextBesideIcon:
+                width += self.iconSize().width() + 4
+            elif style == QtCore.Qt.ToolButtonTextUnderIcon:
+                width = max(width, self.iconSize().width() + 16)
+        return QtCore.QSize(max(hint.width(), width), hint.height())
+
+
 class ChoiceButton(QtWidgets.QWidget):
     """Small custom dropdown with a styled, non-native popup."""
 
@@ -43,7 +70,7 @@ class ChoiceButton(QtWidgets.QWidget):
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._button = QtWidgets.QToolButton(self)
+        self._button = _ContentSizedToolButton(self)
         self._button.setObjectName("choiceTriggerAccent" if accent else "choiceTrigger")
         self._button.setAutoRaise(False)
         self._button.setMinimumHeight(29 if accent else 26)
@@ -209,6 +236,7 @@ class ChoiceButton(QtWidgets.QWidget):
         shown = metrics.elidedText(label, QtCore.Qt.ElideMiddle, _MAX_CHOICE_LABEL_PX)
         self._button.setText(f"{shown}  ⌄" if self._show_caret else shown)
         self._button.setToolTip(description or (label if shown != label else ""))
+        self._button.updateGeometry()
 
     def _toggle_popup(self) -> None:
         popup = self._ensure_popup()
@@ -330,7 +358,7 @@ class HeaderBar(QtWidgets.QWidget):
         self._conversations_button.clicked.connect(self.conversations_clicked)
         layout.addWidget(self._conversations_button)
 
-        self._agent_button = QtWidgets.QToolButton(self._rail)
+        self._agent_button = _ContentSizedToolButton(self._rail)
         self._agent_button.setObjectName("contextButton")
         self._agent_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self._agent_button.clicked.connect(self._on_agent_button_clicked)
@@ -476,6 +504,7 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_button.setText(name)
         self._agent_has_custom_icon = icon is not None
         self._agent_button.setIcon(icon if icon is not None else self._fallback_agent_icon())
+        self._agent_button.updateGeometry()
 
     def _fallback_agent_icon(self) -> QtGui.QIcon:
         """A small accent-coloured dot — used until the registry's real icon

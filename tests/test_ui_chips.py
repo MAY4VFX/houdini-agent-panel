@@ -5,8 +5,15 @@ from __future__ import annotations
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from houdini_agent_panel.sessions import SessionMode
-from houdini_agent_panel.ui import theme
+from houdini_agent_panel.ui import chips as chips_mod, theme
 from houdini_agent_panel.ui.chips import ChoiceButton, HeaderBar, ModeChip
+
+
+class _BrokenHoudiniToolButton(QtWidgets.QToolButton):
+    """The fixed 36–38px sizeHint measured in the live Houdini 21 pane."""
+
+    def sizeHint(self):  # noqa: N802
+        return QtCore.QSize(38, super().sizeHint().height())
 
 
 # --- HeaderBar -----------------------------------------------------------
@@ -16,6 +23,25 @@ def test_set_agent_sets_button_text(qapp):
     header = HeaderBar()
     header.set_agent("Claude Code", None)
     assert header._agent_button.text() == "Claude Code"
+
+
+def test_agent_chip_sizes_for_its_text_when_houdini_style_ignores_it(qapp, monkeypatch):
+    monkeypatch.setattr(chips_mod.QtWidgets, "QToolButton", _BrokenHoudiniToolButton)
+    header = HeaderBar()
+    header.set_agent("Claude Agent", None)
+
+    text_width = QtGui.QFontMetrics(header._agent_button.font()).horizontalAdvance("Claude Agent")
+    assert header._agent_button.sizeHint().width() >= text_width + 24
+
+
+def test_choice_sizes_for_late_text_when_houdini_style_ignores_it(qapp, monkeypatch):
+    monkeypatch.setattr(chips_mod.QtWidgets, "QToolButton", _BrokenHoudiniToolButton)
+    choice = ChoiceButton()
+    choice.addItem("Opus (1M context)", "opus")
+
+    shown = choice._button.text()
+    text_width = QtGui.QFontMetrics(choice._button.font()).horizontalAdvance(shown)
+    assert choice._button.sizeHint().width() >= text_width + 16
 
 
 def test_header_uses_centered_precision_rail_and_no_native_combobox(qapp):
