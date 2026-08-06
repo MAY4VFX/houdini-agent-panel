@@ -7,6 +7,8 @@ then, after a silence, the model and mode chips simply appeared.
 
 from __future__ import annotations
 
+from PySide6 import QtGui
+
 from houdini_agent_panel.ui import boot_status as boot_mod
 from houdini_agent_panel.ui.boot_status import (
     PHASE_CONNECTING,
@@ -31,6 +33,23 @@ def test_begin_shows_the_first_phase_named_after_the_agent(qapp):
     assert strip.isHidden() is False
     assert strip.phase() == PHASE_PREPARING
     assert "Codex" in strip.text()
+
+
+def test_houdini_pixel_font_stays_readable_in_the_boot_strip(qapp):
+    """H21 specifies its application font in pixels, so pointSizeF is -1."""
+    previous = qapp.font()
+    pixel_font = QtGui.QFont(previous)
+    pixel_font.setPixelSize(14)
+    qapp.setFont(pixel_font)
+    try:
+        strip = BootStatus()
+        strip.begin("OpenCode")
+        strip.adjustSize()
+
+        assert strip._label.font().pixelSize() == 13
+        assert strip.sizeHint().height() >= 20
+    finally:
+        qapp.setFont(previous)
 
 
 def test_the_bar_fills_by_steps_completed_not_steps_entered(qapp):

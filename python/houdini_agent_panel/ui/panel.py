@@ -502,6 +502,14 @@ class AgentPanel(QtWidgets.QWidget):
         layout.setSpacing(0)
 
         self._header = HeaderBar(self)
+        # `_boot()` is intentionally deferred until Houdini has accepted
+        # the pane widget. That leaves one real first frame before the timer
+        # fires; on H21 it was visible as a bare accent dot and looked like
+        # the installed agents had disappeared. The choice is already in
+        # the settings we loaded synchronously, so name it immediately.
+        if self._settings.default_agent:
+            self._pending_agent_label = self._display_label(self._settings.default_agent)
+            self._header.set_agent(self._pending_agent_label, None)
         self._notice = NoticeStrip(self)
         self._consent = ConsentStrip(self)
         self._pages = QtWidgets.QStackedWidget(self)

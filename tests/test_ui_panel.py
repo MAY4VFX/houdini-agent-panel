@@ -53,6 +53,20 @@ def _session(session_id: str = "s1") -> sessions.SessionState:
     )
 
 
+def test_default_agent_is_named_before_the_deferred_boot_frame(qapp, monkeypatch):
+    """The pane's first frame must not show a bare dot while _boot is queued."""
+    current = settings_mod.Settings(default_agent="opencode", autostart_agent=False)
+    monkeypatch.setattr(panel_mod.settings_mod, "load", lambda: current)
+    queued = []
+    monkeypatch.setattr(panel_mod.QtCore.QTimer, "singleShot", lambda *args: queued.append(args))
+
+    widget = panel_mod.AgentPanel()
+
+    assert widget._header._agent_button.text() == "OpenCode"
+    assert queued, "boot should remain deferred"
+    widget.shutdown()
+
+
 def test_without_default_agent_panel_opens_on_agents_settings(qapp):
     """First open: no agent picked, so the human is shown what there is to
     pick from — which is now the "Agents" block in settings, not a separate

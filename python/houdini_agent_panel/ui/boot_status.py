@@ -83,7 +83,12 @@ class _ProgressBar(QtWidgets.QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        track = theme.color(QtGui.QPalette.Mid)
+        # `Mid` is near-black in H20.5/H21 even though Window and the
+        # composer are mid-grey. It made the three-pixel track look like a
+        # heavy black divider. Use the same restrained edge as the input
+        # card so startup remains part of the panel instead of native dark
+        # chrome leaking through.
+        track = theme.composer_border()
         accent = theme.accent_color()
         radius = _BAR_HEIGHT / 2
         painter.setPen(QtCore.Qt.NoPen)
@@ -117,7 +122,15 @@ class BootStatus(QtWidgets.QWidget):
         self._bar = _ProgressBar(self)
 
         font = self._label.font()
-        font.setPointSizeF(max(1.0, font.pointSizeF() - 1))
+        # Houdini's application font is pixel-sized on H21 (`pointSizeF()`
+        # returns -1). Feeding that sentinel through `setPointSizeF` made
+        # this a 1pt font, collapsed the strip to 13px, and left what looked
+        # like a black rule instead of a readable startup status. Preserve
+        # whichever sizing mode the host actually uses.
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(1, font.pixelSize() - 1))
+        else:
+            font.setPointSizeF(max(1.0, font.pointSizeF() - 1.0))
         self._label.setFont(font)
         self._step.setFont(font)
         self._step.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)

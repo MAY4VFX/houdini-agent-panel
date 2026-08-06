@@ -499,9 +499,9 @@ class _BootScrim(QtWidgets.QWidget):
     words underneath stay legible enough to be recognised, while nothing
     about the pane invites a click.
 
-    Blur comes from `QGraphicsBlurEffect` on the surface itself, applied by
-    `Composer.set_booting`; this widget is the tint on top and the thing
-    that swallows the mouse.
+    The overlay is an opaque copy of the composer's own themed surface and
+    swallows the mouse. An earlier blur-plus-transparent-tint treatment
+    rendered almost black under H20.5/H21's native compositor.
     """
 
     def __init__(self, parent: QtWidgets.QWidget) -> None:
@@ -513,13 +513,12 @@ class _BootScrim(QtWidgets.QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        tint = QtGui.QColor(theme.color(QtGui.QPalette.Window))
-        tint.setAlpha(190)
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(tint)
+        painter.setPen(QtGui.QPen(theme.composer_border(), 1))
+        painter.setBrush(theme.composer_background())
         # Same radius as the surface underneath, or the corners show a bright
         # crescent of un-covered input.
-        painter.drawRoundedRect(QtCore.QRectF(self.rect()), 18, 18)
+        area = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.drawRoundedRect(area, 18, 18)
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt
@@ -964,9 +963,11 @@ class Composer(QtWidgets.QWidget):
         dead input.
         """
         if booting:
-            blur = QtWidgets.QGraphicsBlurEffect(self._surface)
-            blur.setBlurRadius(4)
-            self._surface.setGraphicsEffect(blur)
+            # Keep the card on the same subtle theme surface during boot.
+            # Blurring this native child under H20.5/H21 darkened it almost
+            # to black; the opaque scrim already communicates the disabled
+            # state and prevents interaction without changing its tone.
+            self._surface.setGraphicsEffect(None)
             self._boot_scrim.show()
             self._boot_scrim.raise_()
             self._buddy.hide()
