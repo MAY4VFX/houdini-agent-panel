@@ -282,6 +282,111 @@ def test_sign_in_and_sign_out_requested_carry_the_agent_id(qapp, monkeypatch):
     assert sign_outs == ["agent-a"]
 
 
+def test_the_button_says_switch_account_once_a_completed_turn_proves_signed_in(qapp, monkeypatch):
+    """Reported live: the owner signed into Codex saw its row offer BOTH
+    "Sign in…" and "Sign out" and asked, reasonably, why sign-in is still
+    offered when he's already signed in. Reachability has to stay (issue
+    #33: stranded on a broken Vertex login with the panel convinced he was
+    already in) — but a button labelled "Sign in…" next to "Sign out"
+    states something false about his current state. The label follows the
+    same evidence `AgentPanel._is_signed_in` already uses (a completed
+    turn, persisted in `settings.signed_in_agents`) without gating
+    reachability on it — same click, same signal, only the word changes.
+    """
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("agent-a", "1.0.0")
+    current = settings_module.load()
+    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
+        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+        supports_logout=True,
+    )
+    current.signed_in_agents = ["agent-a"]
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["agent-a"]
+
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert "Switch account…" in buttons
+    assert "Sign in…" not in buttons
+    assert "Sign out" in buttons
+
+    # The action must not change — same signal, same agent id, whatever
+    # the button currently says.
+    sign_ins: list[str] = []
+    view.sign_in_requested.connect(sign_ins.append)
+    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Switch account…").click()
+    assert sign_ins == ["agent-a"]
+
+
+def test_the_button_still_says_sign_in_when_not_yet_proven_signed_in(qapp, monkeypatch):
+    """The other half of the same report: an agent nobody has completed a
+    turn with yet (or one this panel has never connected to at all) must
+    keep saying "Sign in…" — `signed_in_agents` empty is "we don't know",
+    not "we know they're signed out", and "Sign in…" is still the honest
+    word for that."""
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("agent-a", "1.0.0")
+    current = settings_module.load()
+    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
+        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+        supports_logout=True,
+    )
+    # No `signed_in_agents` entry — never proven, deliberately.
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["agent-a"]
+
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert "Sign in…" in buttons
+    assert "Switch account…" not in buttons
+
+
+def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qapp, monkeypatch):
+    """claude-acp's own shape (docs/facts/acp-sdk.md §11): it advertises
+    NO auth methods at all and still opens a session happily, so a
+    completed turn alone would otherwise mark it "signed in" with nothing
+    real behind that — there is no account to switch between, so the
+    label must not follow `signed_in_agents` here regardless of what it
+    says. Team lead's own wording: "it has no account to switch"."""
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="claude-acp",
+        name="Claude Agent",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("claude-acp", "1.0.0")
+    current = settings_module.load()
+    # Marked signed in (a completed turn happened), but the cached auth
+    # info — if any — carries no methods, matching claude-acp for real.
+    current.signed_in_agents = ["claude-acp"]
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["claude-acp"]
+
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert "Sign in…" in buttons
+    assert "Switch account…" not in buttons
+
+
 def test_last_auth_attempt_shown_beside_the_row(qapp, monkeypatch):
     """"Show the last attempt's result beside the method" (issue #33) — a
     failure visible where the retry button is, not only in a transcript the

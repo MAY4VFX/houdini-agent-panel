@@ -91,6 +91,25 @@ def _auth_status_text(attempt: "settings_module.AuthAttempt | None") -> str:
     return f"{verb}: {attempt.message}" if attempt.message else verb
 
 
+def _is_agent_signed_in(
+    agent_id: str,
+    auth_info: "settings_module.AgentAuthInfo | None",
+    current_settings: "settings_module.Settings",
+) -> bool:
+    """Same guess `AgentPanel._is_signed_in` makes for the tab's own
+    current agent (a completed turn, cached persistently — see that
+    method's own docstring for why an open session is not evidence),
+    generalised to any agent id a Settings row might show, connected or
+    not: `signed_in_agents` is a plain settings list, not scoped to one
+    tab. `auth_info.methods` must be non-empty too — an agent with NO
+    advertised methods (claude-acp) has no account to switch between, so
+    it keeps saying "Sign in…" regardless of what a completed turn alone
+    might otherwise suggest (docs/facts/acp-sdk.md §11: claude-acp opens
+    a session happily with zero auth methods advertised at all).
+    """
+    return agent_id in current_settings.signed_in_agents and bool(auth_info and auth_info.methods)
+
+
 def _state_text(installed, update: "Update | None") -> str:
     """What this agent's row says about itself.
 
@@ -155,7 +174,21 @@ class _AgentRow(QtWidgets.QWidget):
     Not gated on whether the panel currently believes this one is signed
     in or out, either — that belief is a guess (`AgentPanel._is_signed_
     in`, docs/facts/acp-sdk.md §11), and gating reachability on a guess is
-    exactly how someone got stranded (issue #33).
+    exactly how someone got stranded (issue #33). The BUTTON stays exactly
+    as reachable either way — same screen, same methods, always there —
+    only its LABEL follows the guess: "Sign in…" reads as false once we
+    have real evidence (a completed turn) that this agent already has an
+    account signed in, sitting right next to a "Sign out" that says the
+    opposite. Reported live: "why does it still offer sign-in when I am
+    already signed in?" — a fair question an artist shouldn't have to know
+    our own reasoning about guesses to answer. Once `is_signed_in` is
+    true, the same reachable control is labelled "Switch account…" — what
+    pressing it actually does, worded from the account's side rather than
+    the button's. `is_signed_in` is never true for an agent with no
+    methods at all (claude-acp): there is no account to switch, so it
+    keeps saying "Sign in…" regardless of what a completed turn alone
+    might otherwise suggest (see `AgentsView`'s own call sites for that
+    guard).
     """
 
     install_requested = Signal()
@@ -185,6 +218,7 @@ class _AgentRow(QtWidgets.QWidget):
         has_update: bool = False,
         is_custom: bool = False,
         can_sign_out: bool = False,
+        is_signed_in: bool = False,
         auth_status: str = "",
         parent=None,
     ) -> None:
@@ -255,7 +289,15 @@ class _AgentRow(QtWidgets.QWidget):
             auth_row = QtWidgets.QHBoxLayout()
             auth_row.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
             auth_row.setSpacing(6)
-            sign_in_btn = QtWidgets.QPushButton("Sign in…", self)
+            # The action is identical either way — same click, same signal,
+            # same screen — only the word changes to match what we already
+            # know: "Switch account…" once there's real evidence (a
+            # completed turn) an account is already signed in, "Sign in…"
+            # otherwise. Reachability never depends on this guess (this
+            # class's own docstring); only the label does.
+            sign_in_btn = QtWidgets.QPushButton(
+                "Switch account…" if is_signed_in else "Sign in…", self
+            )
             sign_in_btn.clicked.connect(self.sign_in_requested.emit)
             auth_row.addWidget(sign_in_btn)
             if can_sign_out:
@@ -481,6 +523,7 @@ class AgentsView(QtWidgets.QWidget):
                     and is_newer(update.latest, installed.version)
                 ),
                 can_sign_out=bool(auth_info and auth_info.supports_logout),
+                is_signed_in=_is_agent_signed_in(entry.id, auth_info, current_settings),
                 auth_status=_auth_status_text(attempt),
                 parent=self,
             )
@@ -605,6 +648,7 @@ class AgentsView(QtWidgets.QWidget):
                 state_text="custom agent",
                 is_custom=True,
                 can_sign_out=bool(auth_info and auth_info.supports_logout),
+                is_signed_in=_is_agent_signed_in(agent.id, auth_info, current),
                 auth_status=_auth_status_text(attempt),
                 parent=self,
             )
