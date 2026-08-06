@@ -490,10 +490,16 @@ def test_sign_out_from_settings_logs_out_the_current_agent_directly(qapp, monkey
     widget = panel_mod.AgentPanel()
     qapp.processEvents()
     widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
     logged_out = []
-    monkeypatch.setattr(
-        panel_mod.shared_client(widget._agent_id), "logout", lambda: logged_out.append(True)
-    )
+    monkeypatch.setattr(client, "logout", lambda: logged_out.append(True))
+    # `_rejoin_agent` only switches `_agent_id` — it never spawns a real
+    # worker, so `is_running()` would otherwise be False and the new
+    # not-running guard (`_on_logout_requested`) would stop this before it
+    # ever reached `logout()`. That guard has its own test
+    # (`test_sign_out_on_a_not_running_agent_reports_failure_not_silence`
+    # in test_ui_panel.py); this one is about the direct-vs-detour routing.
+    monkeypatch.setattr(client, "is_running", lambda: True)
 
     widget._on_agent_row_sign_out(widget._agent_id)
 
@@ -510,6 +516,7 @@ def test_sign_out_success_from_settings_is_recorded(qapp, monkeypatch):
     widget._rejoin_agent("codex-acp")
     client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "logout", lambda: None)
+    monkeypatch.setattr(client, "is_running", lambda: True)
 
     widget._on_agent_row_sign_out(widget._agent_id)
     client.auth_required.emit([])
@@ -533,6 +540,7 @@ def test_sign_out_failure_from_settings_is_noted_not_lost(qapp, monkeypatch):
     widget._rejoin_agent("codex-acp")
     client = panel_mod.shared_client(widget._agent_id)
     monkeypatch.setattr(client, "logout", lambda: None)
+    monkeypatch.setattr(client, "is_running", lambda: True)
     notes: list[str] = []
     monkeypatch.setattr(widget, "_note", notes.append)
 

@@ -174,21 +174,41 @@ class _AgentRow(QtWidgets.QWidget):
     Not gated on whether the panel currently believes this one is signed
     in or out, either — that belief is a guess (`AgentPanel._is_signed_
     in`, docs/facts/acp-sdk.md §11), and gating reachability on a guess is
-    exactly how someone got stranded (issue #33). The BUTTON stays exactly
-    as reachable either way — same screen, same methods, always there —
-    only its LABEL follows the guess: "Sign in…" reads as false once we
-    have real evidence (a completed turn) that this agent already has an
-    account signed in, sitting right next to a "Sign out" that says the
-    opposite. Reported live: "why does it still offer sign-in when I am
-    already signed in?" — a fair question an artist shouldn't have to know
-    our own reasoning about guesses to answer. Once `is_signed_in` is
-    true, the same reachable control is labelled "Switch account…" — what
-    pressing it actually does, worded from the account's side rather than
-    the button's. `is_signed_in` is never true for an agent with no
-    methods at all (claude-acp): there is no account to switch, so it
-    keeps saying "Sign in…" regardless of what a completed turn alone
-    might otherwise suggest (see `AgentsView`'s own call sites for that
-    guard).
+    exactly how someone got stranded (issue #33). SOME control is always
+    reachable here regardless of the guess; only WHICH one is drawn
+    follows it.
+
+    One control, not two. This used to draw "Sign in…"/"Switch account…"
+    next to "Sign out" whenever both were possible, and the owner pushed
+    back on that, twice: first that offering "Sign in…" beside "Sign out"
+    states something false about his current state (signed into Codex,
+    seeing both, asking a fair question — why is it still offering to
+    sign in?); then, once that became "Switch account…", that this reads
+    as a riddle too — switch to WHAT? He settled the reasoning himself:
+    these CLIs only ever have one active login. Moving to a different
+    method means signing OUT of the current one first — there is no
+    second account to switch to while already signed in, so there is
+    nothing for a "switch" affordance to do. One control, matching what
+    is actually known, is the whole model:
+      - `is_signed_in` true AND `can_sign_out` true (a completed turn
+        happened, and the agent actually implements logout): "Sign out"
+        is the only control. Clicking it lands back on this same row's
+        "Sign in…", automatically — `do_logout` re-raises `auth_required`
+        with the same methods `initialize` gave it, which is exactly the
+        signal an ordinary "not signed in yet" state produces
+        (`AgentPanel._on_logout_requested`/`_on_auth_required`).
+      - Anything else — no evidence yet, or evidence but no logout
+        capability to act on (an agent can advertise auth methods without
+        implementing `logout`) — falls back to "Sign in…". This is also
+        the escape route if a "Sign out" click ever could not actually do
+        anything (agent not running — `AgentPanel._on_logout_requested`
+        checks for exactly that before calling out, since the alternative
+        is a click that visibly does nothing forever).
+    `is_signed_in` is never true for an agent with no methods at all
+    (claude-acp): there is no account to switch, so it keeps saying "Sign
+    in…" regardless of what a completed turn alone might otherwise
+    suggest (see `AgentsView`'s own call sites for that guard) — this
+    part of the shape did not change.
     """
 
     install_requested = Signal()
@@ -289,21 +309,20 @@ class _AgentRow(QtWidgets.QWidget):
             auth_row = QtWidgets.QHBoxLayout()
             auth_row.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
             auth_row.setSpacing(6)
-            # The action is identical either way — same click, same signal,
-            # same screen — only the word changes to match what we already
-            # know: "Switch account…" once there's real evidence (a
-            # completed turn) an account is already signed in, "Sign in…"
-            # otherwise. Reachability never depends on this guess (this
-            # class's own docstring); only the label does.
-            sign_in_btn = QtWidgets.QPushButton(
-                "Switch account…" if is_signed_in else "Sign in…", self
-            )
-            sign_in_btn.clicked.connect(self.sign_in_requested.emit)
-            auth_row.addWidget(sign_in_btn)
-            if can_sign_out:
+            # One control, matching what is actually known (see this
+            # class's own docstring for the owner's reasoning): "Sign out"
+            # only once there is BOTH real evidence of a signed-in account
+            # AND a logout to actually invoke; "Sign in…" for everything
+            # else, which is also what a "Sign out" click falls back to if
+            # it could not act (`AgentPanel._on_logout_requested`).
+            if is_signed_in and can_sign_out:
                 sign_out_btn = QtWidgets.QPushButton("Sign out", self)
                 sign_out_btn.clicked.connect(self.sign_out_requested.emit)
                 auth_row.addWidget(sign_out_btn)
+            else:
+                sign_in_btn = QtWidgets.QPushButton("Sign in…", self)
+                sign_in_btn.clicked.connect(self.sign_in_requested.emit)
+                auth_row.addWidget(sign_in_btn)
             if auth_status:
                 status_label = QtWidgets.QLabel(auth_status, self)
                 status_label.setStyleSheet("color: palette(disabled, text);")

@@ -237,9 +237,13 @@ def test_sign_in_is_offered_for_every_installed_agent_from_the_start(qapp, monke
 
     row_a = view._rows_by_id["agent-a"]
     row_b = view._rows_by_id["agent-b"]
-    # Cached: gets Sign in AND Sign out.
+    # Cached with `supports_logout=True`, but no completed turn recorded
+    # yet — one control, matching what's known: still "Sign in…", not
+    # "Sign out", since there's no evidence an account is signed in (see
+    # `test_the_button_says_sign_out_once_a_completed_turn_proves_signed_
+    # in` for the state where it does flip).
     assert "Sign in…" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
-    assert "Sign out" in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
+    assert "Sign out" not in {b.text() for b in row_a.findChildren(QtWidgets.QPushButton)}
     # Never connected: still gets Sign in — just not Sign out, since
     # `supports_logout` isn't known yet.
     assert "Sign in…" in {b.text() for b in row_b.findChildren(QtWidgets.QPushButton)}
@@ -250,48 +254,73 @@ def test_sign_in_and_sign_out_requested_carry_the_agent_id(qapp, monkeypatch):
     """Every row can send its OWN agent id — the panel is the one that
     decides whether that means opening the sign-in screen directly or
     switching this tab onto it first (`AgentPanel._on_agent_row_sign_in`).
+
+    One button per row now (the owner found offering both at once
+    unreadable — see `_AgentRow`'s own docstring), so this needs two
+    agents to exercise both signals: `agent-a` with no completed turn
+    recorded (draws "Sign in…"), `agent-b` with one (draws "Sign out").
     """
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
-    entry = AgentEntry(
+    entry_a = AgentEntry(
         id="agent-a",
         name="Agent A",
         version="1.0.0",
         binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
     )
-    _mark_installed("agent-a", "1.0.0")
-    current = settings_module.load()
-    current.agent_auth_info["agent-a"] = settings_module.AgentAuthInfo(
-        methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
-        supports_logout=True,
+    entry_b = AgentEntry(
+        id="agent-b",
+        name="Agent B",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/b.zip", cmd="./b", sha256="0" * 64)},
     )
+    _mark_installed("agent-a", "1.0.0")
+    _mark_installed("agent-b", "1.0.0")
+    current = settings_module.load()
+    for agent_id in ("agent-a", "agent-b"):
+        current.agent_auth_info[agent_id] = settings_module.AgentAuthInfo(
+            methods=[settings_module.AgentAuthMethod(id="m", name="Sign in")],
+            supports_logout=True,
+        )
+    current.signed_in_agents = ["agent-b"]
     settings_module.save(current)
 
     view = AgentsView()
-    view.set_agents([entry])
-    row = view._rows_by_id["agent-a"]
+    view.set_agents([entry_a, entry_b])
+    row_a = view._rows_by_id["agent-a"]
+    row_b = view._rows_by_id["agent-b"]
 
     sign_ins: list[str] = []
     sign_outs: list[str] = []
     view.sign_in_requested.connect(sign_ins.append)
     view.sign_out_requested.connect(sign_outs.append)
 
-    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign in…").click()
-    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign out").click()
+    next(b for b in row_a.findChildren(QtWidgets.QPushButton) if b.text() == "Sign in…").click()
+    next(b for b in row_b.findChildren(QtWidgets.QPushButton) if b.text() == "Sign out").click()
 
     assert sign_ins == ["agent-a"]
-    assert sign_outs == ["agent-a"]
+    assert sign_outs == ["agent-b"]
 
 
-def test_the_button_says_switch_account_once_a_completed_turn_proves_signed_in(qapp, monkeypatch):
-    """Reported live: the owner signed into Codex saw its row offer BOTH
-    "Sign in…" and "Sign out" and asked, reasonably, why sign-in is still
-    offered when he's already signed in. Reachability has to stay (issue
-    #33: stranded on a broken Vertex login with the panel convinced he was
-    already in) — but a button labelled "Sign in…" next to "Sign out"
-    states something false about his current state. The label follows the
-    same evidence `AgentPanel._is_signed_in` already uses (a completed
-    turn, persisted in `settings.signed_in_agents`) without gating
-    reachability on it — same click, same signal, only the word changes.
+def test_the_button_says_sign_out_once_a_completed_turn_proves_signed_in(qapp, monkeypatch):
+    """Reported live, in two rounds. First: the owner signed into Codex,
+    saw its row offer BOTH "Sign in…" and "Sign out", and asked, reasonably,
+    why sign-in is still offered when he's already signed in — a button
+    saying "Sign in…" next to "Sign out" states something false. The first
+    fix relabelled it "Switch account…", which he then also pushed back on:
+    signed into Codex, "switch account" reads as a riddle — switch to
+    WHAT? He settled the actual reasoning himself: these CLIs only have one
+    active login, so there is no second account to switch to while already
+    signed in — moving to a different method means signing out of the
+    current one FIRST. So now there is exactly one control once evidence
+    (a completed turn, persisted in `settings.signed_in_agents`) says an
+    account is signed in and the agent can actually act on it
+    (`supports_logout`): "Sign out", full stop — no "Sign in…" beside it,
+    no "switch" wording standing in for an affordance that solves nothing
+    that exists. Clicking it lands back on THIS row's "Sign in…" on its
+    own, once the logout succeeds (`AgentPanel._on_logout_requested`/
+    `_on_auth_required` — verified by tracing `client.py::do_logout`,
+    which re-raises `auth_required` with the same methods `initialize`
+    gave it).
     """
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
@@ -314,16 +343,14 @@ def test_the_button_says_switch_account_once_a_completed_turn_proves_signed_in(q
     row = view._rows_by_id["agent-a"]
 
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert "Switch account…" in buttons
+    assert "Switch account…" not in buttons
     assert "Sign in…" not in buttons
     assert "Sign out" in buttons
 
-    # The action must not change — same signal, same agent id, whatever
-    # the button currently says.
-    sign_ins: list[str] = []
-    view.sign_in_requested.connect(sign_ins.append)
-    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Switch account…").click()
-    assert sign_ins == ["agent-a"]
+    sign_outs: list[str] = []
+    view.sign_out_requested.connect(sign_outs.append)
+    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign out").click()
+    assert sign_outs == ["agent-a"]
 
 
 def test_the_button_still_says_sign_in_when_not_yet_proven_signed_in(qapp, monkeypatch):
@@ -331,7 +358,10 @@ def test_the_button_still_says_sign_in_when_not_yet_proven_signed_in(qapp, monke
     turn with yet (or one this panel has never connected to at all) must
     keep saying "Sign in…" — `signed_in_agents` empty is "we don't know",
     not "we know they're signed out", and "Sign in…" is still the honest
-    word for that."""
+    word for that. One control, not two (see `_AgentRow`'s own docstring
+    for the owner's settled reasoning): "Sign out" is capable here
+    (`supports_logout=True`) but must NOT be drawn without the other half
+    — evidence an account is actually signed in."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
         id="agent-a",
@@ -355,6 +385,7 @@ def test_the_button_still_says_sign_in_when_not_yet_proven_signed_in(qapp, monke
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
     assert "Sign in…" in buttons
     assert "Switch account…" not in buttons
+    assert "Sign out" not in buttons
 
 
 def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qapp, monkeypatch):
@@ -363,7 +394,11 @@ def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qa
     completed turn alone would otherwise mark it "signed in" with nothing
     real behind that — there is no account to switch between, so the
     label must not follow `signed_in_agents` here regardless of what it
-    says. Team lead's own wording: "it has no account to switch"."""
+    says. Team lead's own wording: "it has no account to switch". This
+    part of the shape survived the owner's "one button, not two" change
+    (`_AgentRow`'s own docstring) unchanged — it was never in the
+    "Switch account…"/"Sign out" pair to begin with, since `can_sign_out`
+    is also always false with no methods to log out of."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
         id="claude-acp",
@@ -385,6 +420,7 @@ def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qa
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
     assert "Sign in…" in buttons
     assert "Switch account…" not in buttons
+    assert "Sign out" not in buttons
 
 
 def test_last_auth_attempt_shown_beside_the_row(qapp, monkeypatch):

@@ -752,12 +752,46 @@ def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     seen: list = []
     monkeypatch.setattr(fresh, "authenticate", lambda mid: seen.append(("auth", mid)))
     monkeypatch.setattr(fresh, "logout", lambda: seen.append(("logout",)))
+    # `_on_logout_requested` now checks `is_running()` first (see
+    # `test_sign_out_on_a_not_running_agent_reports_failure_not_silence`)
+    # — stubbed True here since that guard isn't what this test is about.
+    monkeypatch.setattr(fresh, "is_running", lambda: True)
 
     widget._auth_view.method_chosen.emit("oauth")
     widget._auth_view.logout_requested.emit()
     qapp.processEvents()
 
     assert seen == [("auth", "oauth"), ("logout",)]
+    widget.shutdown()
+
+
+def test_sign_out_on_a_not_running_agent_reports_failure_not_silence(qapp, monkeypatch):
+    """`AcpClient._submit` (client.py) silently drops any call when there
+    is no live worker — no `auth_required`, no `error`, nothing at all.
+    Left unguarded, `_on_logout_requested` would set `_pending_logout_
+    agent` and call `logout()` into that void: the row's "Sign out" click
+    would just sit there forever with zero feedback, and no way to tell
+    the click did nothing — the exact trap the owner's one-button model
+    (`ui/agents.py::_AgentRow`) depends on NOT existing, one step further
+    along. `_on_logout_requested` checks `is_running()` first and reports
+    a failure the same way a real logout error would, instead of calling
+    out into a client with nothing listening.
+    """
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client(widget._agent_id)
+    assert not client.is_running()
+
+    called: list = []
+    monkeypatch.setattr(client, "logout", lambda: called.append(True))
+    notes: list[str] = []
+    widget._note = notes.append
+
+    widget._on_logout_requested()
+    qapp.processEvents()
+
+    assert called == []
+    assert widget._pending_logout_agent is None
+    assert any("Sign out failed" in n for n in notes)
     widget.shutdown()
 
 

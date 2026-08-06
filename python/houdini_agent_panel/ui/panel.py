@@ -2890,16 +2890,36 @@ class AgentPanel(QtWidgets.QWidget):
         the same methods that came from `initialize` — the sign-in screen
         shows up on its own, no separate branch needed here. If the agent
         couldn't log out, an `error` arrives instead and the human stays
-        put: silently pretending the logout happened isn't an option.
+        put: silently pretending the logout happened isn't an option. This
+        is what makes the owner's one-button model ("Sign out" when signed
+        in, "Sign in…" otherwise — `_AgentRow`'s own docstring) safe to
+        ship: the escape route it depends on is real, not assumed.
 
         Reachable from two places now: the sign-in screen's own Sign out
         button, and (issue #33) a Settings row's Sign out, which can fire
         with no sign-in screen open at all — `_pending_logout_agent` is how
         `_on_auth_required`/`_on_error` tell a logout's own outcome apart
         from an ordinary sign-in failure landing on the same two signals.
+
+        `is_running()` is checked FIRST, before calling out: `AcpClient.
+        _submit` silently drops the request when there is no live worker
+        to run it on — no `auth_required`, no `error`, nothing at all. Left
+        unchecked, a Sign out click on an agent that isn't running would
+        set `_pending_logout_agent` and then just sit there forever, with
+        no feedback and no way to tell the click did nothing — the same
+        trap this whole change exists to remove, one step further along.
         """
+        client = shared_client(self._agent_id)
+        if not client.is_running():
+            message = "Not connected — nothing to sign out of right now."
+            if self._pages.currentIndex() == self.PAGE_AUTH:
+                self._auth_view.show_error(message, self._last_auth_method)
+            else:
+                self._note(f"Sign out failed: {message}")
+            self._record_auth_attempt(self._agent_id, action="sign_out", ok=False, message=message)
+            return
         self._pending_logout_agent = self._agent_id
-        shared_client(self._agent_id).logout()
+        client.logout()
 
     def _on_agent_row_sign_in(self, agent_id: str) -> None:
         """"Sign in…" clicked on a Settings row — for ANY installed agent
