@@ -77,7 +77,9 @@ _KIND_GLYPH: dict[str, str] = {
     "delete": "D",
     "move": "M",
     "search": "S",
-    "execute": "X",
+    # Execution is a tool KIND, not a failure state. ``X`` read as an
+    # unfinished/failed step beside the separate ``✓ done`` status.
+    "execute": "•",
     "think": "T",
     "fetch": "F",
     "switch_mode": "⇄",

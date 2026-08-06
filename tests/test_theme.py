@@ -12,6 +12,11 @@ from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.qt import QtGui
 
 
+def test_execute_tool_kind_is_neutral_while_failure_keeps_its_cross():
+    assert theme.kind_glyph("execute") == "•"
+    assert theme.status_glyph("failed") == "✕"
+
+
 def test_accent_color_falls_back_to_palette_highlight_outside_houdini(qapp):
     qapp.setPalette(QtGui.QPalette())  # a clean, known palette
     highlight = qapp.palette().color(QtGui.QPalette.Highlight)
