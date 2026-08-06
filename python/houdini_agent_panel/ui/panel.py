@@ -40,7 +40,7 @@ from .boot_status import PHASE_CONNECTING, PHASE_LAUNCHING, PHASE_PREPARING, PHA
 from .composer import Composer
 from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QShortcut, QtCore, QtGui, QtWidgets, Signal
 from .transcript import TranscriptView
 from . import worker as worker_module
 from .worker import Worker
@@ -597,7 +597,7 @@ class AgentPanel(QtWidgets.QWidget):
         # of scope for this change and keep whatever behaviour they already
         # had (a real `keyPressEvent` on the composer's own popup is a
         # separate, already-working mechanism this doesn't touch).
-        escape = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
+        escape = QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
         escape.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         escape.activated.connect(self._on_settings_escape)
 

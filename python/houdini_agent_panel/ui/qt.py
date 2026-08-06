@@ -43,10 +43,19 @@ Qt = QtCore.Qt
 #: PySide6 moved things: ``QAction`` now lives in QtGui, PySide2 had it in QtWidgets.
 QAction = getattr(QtGui, "QAction", None) or QtWidgets.QAction  # type: ignore[attr-defined]
 
+#: Same split, same reason: ``QShortcut`` moved to QtGui in PySide6 (Qt6),
+#: PySide2 (Qt5, Houdini 20.5's own binding) still has it in QtWidgets. A
+#: call site reaching into `QtGui.QShortcut` directly crashed the panel on
+#: 20.5 with `AttributeError: module 'PySide2.QtGui' has no attribute
+#: 'QShortcut'` — the panel never even constructed. Resolved here, once,
+#: the same way `QAction` already is, so no other call site can repeat it.
+QShortcut = getattr(QtGui, "QShortcut", None) or QtWidgets.QShortcut  # type: ignore[attr-defined]
+
 QT_VERSION = QtCore.qVersion()
 
 __all__ = [
     "QAction",
+    "QShortcut",
     "Property",
     "QT_SOURCE",
     "QT_VERSION",
