@@ -40,7 +40,7 @@ from .boot_status import PHASE_CONNECTING, PHASE_LAUNCHING, PHASE_PREPARING, PHA
 from .composer import Composer
 from .conversations import ConversationDrawer, summarize_title
 from .permissions import PermissionRow
-from .qt import QtCore, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal
 from .transcript import TranscriptView
 from . import worker as worker_module
 from .worker import Worker
@@ -566,8 +566,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.agent_selected.connect(self._on_agent_chosen)
         self._header.conversations_clicked.connect(self._toggle_conversations)
         self._header.new_session_clicked.connect(self._start_new_session)
-        self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
-        self._header.bug_report_clicked.connect(self._open_bug_report)
+        self._header.settings_clicked.connect(self._toggle_settings)
         self._conversations.new_session_clicked.connect(self._start_new_session)
         self._conversations.session_selected.connect(self._set_current_session)
         self._conversations.session_renamed.connect(self._on_session_renamed)
@@ -585,6 +584,38 @@ class AgentPanel(QtWidgets.QWidget):
         self._blocking.action_clicked.connect(self._on_blocking_action)
         self._consent.answered.connect(self._on_telemetry_answer)
 
+        # Settings lost its own back button (owner's call — it's an overlay
+        # now, not a page you navigate away from): Escape is one of the
+        # remaining ways out, alongside the "…" button toggling it closed
+        # again and whatever already returned to the transcript on its own
+        # (an agent switch does, deliberately). `WidgetWithChildrenShortcut`
+        # so it fires no matter which child inside Settings currently has
+        # focus — a plain `keyPressEvent` override on `self` would miss
+        # every keystroke a focused child widget consumes first. Scoped to
+        # ONLY close Settings, never anything else: Auth/BugReport are out
+        # of scope for this change and keep whatever behaviour they already
+        # had (a real `keyPressEvent` on the composer's own popup is a
+        # separate, already-working mechanism this doesn't touch).
+        escape = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
+        escape.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        escape.activated.connect(self._on_settings_escape)
+
+    def _toggle_settings(self) -> None:
+        """The "…" button's one job now (bug reporting moved to its own
+        link — see `HeaderBar.settings_clicked`'s own docstring): open
+        Settings if it isn't showing, close it (back to the transcript) if
+        it is. Same click, opposite outcome depending on current state —
+        exactly the owner's own description of it.
+        """
+        if self._pages.currentIndex() == self.PAGE_SETTINGS:
+            self._show_page(self.PAGE_TRANSCRIPT)
+        else:
+            self._show_page(self.PAGE_SETTINGS)
+
+    def _on_settings_escape(self) -> None:
+        if self._pages.currentIndex() == self.PAGE_SETTINGS:
+            self._show_page(self.PAGE_TRANSCRIPT)
+
     def _make_settings_view(self) -> QtWidgets.QWidget:
         from .settings_view import SettingsView
 
@@ -593,7 +624,6 @@ class AgentPanel(QtWidgets.QWidget):
         )
         self._settings_view = view
         view.changed.connect(self._on_settings_changed)
-        view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
         view.install_succeeded.connect(self._on_agent_install_succeeded)
         view.install_failed.connect(self._on_agent_install_failed)
         view.sign_in_requested.connect(self._on_agent_row_sign_in)
@@ -645,13 +675,18 @@ class AgentPanel(QtWidgets.QWidget):
         # Writing to the agent from the settings or auth screen is pointless:
         # the reply lands in a feed the human can't see right now.
         self._composer.setVisible(index == self.PAGE_TRANSCRIPT)
+        # The "…" button's own pressed look tracks whichever route actually
+        # opened or closed Settings — its own click, Escape, or an agent
+        # switch landing back on the transcript — not just its own click,
+        # since every one of those goes through this single funnel.
+        self._header.set_settings_open(index == self.PAGE_SETTINGS)
         # And the conversation drawer belongs to the conversation. It
         # overlays rather than pushing content aside, which is right over a
         # transcript — that column is empty margin — and wrong over settings,
-        # where it covered the agent names and the Back button with them,
-        # leaving no way out except closing a drawer the artist might not
-        # realise was open. It closes when the page changes; the toggle in
-        # the header stays for when they come back.
+        # where it covered the agent names, leaving no way out except
+        # closing a drawer the artist might not realise was open. It closes
+        # when the page changes; the toggle in the header stays for when
+        # they come back.
         if index != self.PAGE_TRANSCRIPT and self._conversations.is_open():
             self._conversations.close_drawer()
         # The permission popover is a free-floating child of the panel, not
@@ -2248,8 +2283,6 @@ class AgentPanel(QtWidgets.QWidget):
     def _open_url(self, url: str) -> None:
         if not url:
             return
-        from .qt import QtGui
-
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _remember_seen(self, announcement_id: str) -> None:

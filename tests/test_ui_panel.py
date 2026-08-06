@@ -65,6 +65,116 @@ def test_without_default_agent_panel_opens_on_agents_settings(qapp):
     widget.shutdown()
 
 
+def test_settings_button_toggles_open_then_closed(qapp):
+    """One control, not "Sign in…"'s own back-and-forth but the same idea
+    applied to the "…" button: the owner wanted the back button gone and
+    the SAME control that opens Settings to close it again on a second
+    press — no separate close affordance. `_toggle_settings` is what the
+    header's `settings_clicked` now drives (it used to always open)."""
+    widget = _make_panel(qapp)
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+
+    widget._toggle_settings()
+    assert widget._pages.currentIndex() == widget.PAGE_SETTINGS
+
+    widget._toggle_settings()
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
+    widget.shutdown()
+
+
+def test_settings_button_looks_pressed_while_settings_is_open(qapp):
+    """Losing the back button means the "…" button itself has to say
+    which of "open" or "close" a click will do next — a checked/pressed
+    look is that signal (owner: it should read as linked to the state,
+    not a guess). Driven from `_show_page` itself, not only the button's
+    own click, so it stays correct no matter which route opened or closed
+    Settings (Escape, an agent switch back to the transcript, ...)."""
+    widget = _make_panel(qapp)
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    assert widget._header._settings_button.isChecked() is False
+
+    widget._show_page(widget.PAGE_SETTINGS)
+    assert widget._header._settings_button.isChecked() is True
+
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    assert widget._header._settings_button.isChecked() is False
+    widget.shutdown()
+
+
+def test_escape_closes_settings_when_it_is_open(qapp):
+    """The back button's removal has to leave a real way out — Escape is
+    one of the two named explicitly (the other being the "…" toggle
+    itself, covered above). Driven through the same `QShortcut` the real
+    panel wires up in `_build`, not a direct call to a private handler —
+    a shortcut with the wrong context or key would pass a test that only
+    called the handler by name and still leave the artist stuck for real.
+    """
+    from PySide6 import QtTest
+
+    widget = _make_panel(qapp)
+    widget.show()
+    widget.activateWindow()
+    widget.setFocus()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_SETTINGS)
+    assert widget._pages.currentIndex() == widget.PAGE_SETTINGS
+
+    QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+    qapp.processEvents()
+
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
+    widget.shutdown()
+
+
+def test_escape_does_nothing_when_settings_is_not_open(qapp):
+    """Scoped to Settings only — Escape must not, say, jump out of a
+    transcript or cancel something unrelated just because the shortcut is
+    always installed."""
+    from PySide6 import QtTest
+
+    widget = _make_panel(qapp)
+    widget.show()
+    widget.activateWindow()
+    widget.setFocus()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+
+    QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+    qapp.processEvents()
+
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
+    widget.shutdown()
+
+
+def test_settings_overlay_paints_a_visibly_different_shade(qapp):
+    """Owner: Settings should "lay as an overlay, differing slightly in
+    shade from the rest of the background" — checked by actually
+    rendering both pages and comparing real pixels, not just confirming a
+    stylesheet string was set. A `QScrollArea` paints its own opaque
+    background regardless of what's styled underneath it (real bug found
+    while building this: the overlay's background was invisible under the
+    scroll area that covers nearly the whole page, fixed by making the
+    scroll area and its viewport transparent — `SettingsView.__init__`'s
+    own note on `_scroll`), so this has to grab pixels from deep inside
+    the scrolled content, not just the thin header strip above it.
+    """
+    widget = _make_panel(qapp)
+    widget.resize(500, 700)
+    widget.show()
+    qapp.processEvents()
+
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    qapp.processEvents()
+    transcript_pixel = widget.grab().toImage().pixelColor(100, 300)
+
+    widget._show_page(widget.PAGE_SETTINGS)
+    qapp.processEvents()
+    settings_pixel = widget.grab().toImage().pixelColor(100, 300)
+
+    assert settings_pixel != transcript_pixel
+    widget.shutdown()
+
+
 def test_two_panels_on_the_same_agent_share_one_client_and_one_pool(qapp):
     """Two tabs on the SAME agent, one process. A direct design.md
     requirement: "one agent, many sessions" — per agent id, not per

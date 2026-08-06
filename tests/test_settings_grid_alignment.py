@@ -162,11 +162,18 @@ def test_section_headers_share_one_left_edge(qapp):
     assert len(toggle_xs) == 1, f"section headers do not share one X: {toggle_xs}"
 
 
-def test_nothing_starts_left_of_the_back_button(qapp):
-    """The owner's literal report: "everything left-aligns past ← Settings."
-    That only shows up once the page is tall enough to actually need a
-    scrollbar — `_rail` used to center itself within the scroll
-    VIEWPORT's width (a few px narrower than `self.width()` once a
+def test_nothing_starts_left_of_the_header_rail(qapp):
+    """The owner's literal report, when `_header_rail` still held a back
+    button next to "Settings": "everything left-aligns past ← Settings."
+    That back button is gone now (Settings is an overlay closed via the
+    "…" toggle/Escape/an agent switch instead — `AgentPanel._toggle_
+    settings`), and the title is centred rather than left-aligned, but the
+    underlying invariant this guards is unrelated to what's actually drawn
+    in the rail: `_header_rail` and every section header still have to
+    share one left edge, and the same original mismatch is still possible
+    if it regressed. That only shows up once the page is tall enough to
+    actually need a scrollbar — `_rail` used to center itself within the
+    scroll VIEWPORT's width (a few px narrower than `self.width()` once a
     scrollbar appears), while `_header_rail` sits outside the scroll area
     and always centers within the full `self.width()`; a wide/short window
     never triggers the mismatch, which is exactly how it shipped unnoticed
@@ -178,7 +185,7 @@ def test_nothing_starts_left_of_the_back_button(qapp):
     qapp.processEvents()
     qapp.processEvents()
 
-    back_button_x = _left_x(view, view._header_rail)
+    header_rail_x = _left_x(view, view._header_rail)
     content_xs = {
         _left_x(view, section._toggle)
         for section in (
@@ -191,8 +198,8 @@ def test_nothing_starts_left_of_the_back_button(qapp):
             view._data_section,
         )
     }
-    assert content_xs == {back_button_x}, (
-        f"section header(s) at {content_xs} do not match the back button's X ({back_button_x})"
+    assert content_xs == {header_rail_x}, (
+        f"section header(s) at {content_xs} do not match the header rail's X ({header_rail_x})"
     )
 
 

@@ -176,50 +176,37 @@ def test_conversations_button_click_emits_signal(qapp):
     assert seen == [True]
 
 
-def test_settings_button_opens_a_menu_with_settings_and_report_a_bug(qapp):
-    """The "⋯" button used to jump straight to Settings on click — now it
-    opens a small menu (bug-report task) with both "Settings" and "Report
-    a bug…" as items, so the bug reporter is reachable from here too, not
-    only from inside the Settings screen itself."""
+def test_settings_button_click_emits_signal(qapp):
+    """Direct action again, not a menu. The "⋯" briefly opened a two-item
+    overflow menu (Settings, "Report a bug…") so the bug reporter had a
+    header entry point too — that stopped being needed once bug reports
+    moved to their own link under the composer (owner's later placement
+    call), leaving Settings as this button's only job. `AgentPanel` is
+    the one that turns this single click into open-or-close, comparing it
+    against whether Settings is already showing (`_toggle_settings`) —
+    this button only ever reports the click itself."""
     header = HeaderBar()
-    settings_seen = []
-    bug_report_seen = []
-    header.settings_clicked.connect(lambda: settings_seen.append(True))
-    header.bug_report_clicked.connect(lambda: bug_report_seen.append(True))
+    seen = []
+    header.settings_clicked.connect(lambda: seen.append(True))
 
     header._settings_button.click()
-    menu = header._overflow_menu
-    assert menu is not None
-    assert menu.isVisible()
 
-    header._overflow_settings_button.click()
-    assert settings_seen == [True]
-    assert bug_report_seen == []
+    assert seen == [True]
 
 
-def test_report_a_bug_item_in_the_overflow_menu_emits_its_own_signal(qapp):
+def test_settings_button_is_checkable_for_the_pressed_look(qapp):
+    """`set_settings_open` is what `AgentPanel._show_page` drives (owner:
+    the "..." that opens Settings should look pressed while it's open, so
+    a second click reads as "close" rather than a guess) — this only
+    confirms the button CAN show that state at all."""
     header = HeaderBar()
-    bug_report_seen = []
-    header.bug_report_clicked.connect(lambda: bug_report_seen.append(True))
+    assert header._settings_button.isCheckable() is True
 
-    header._settings_button.click()
-    header._overflow_bug_report_button.click()
+    header.set_settings_open(True)
+    assert header._settings_button.isChecked() is True
 
-    assert bug_report_seen == [True]
-
-
-def test_the_overflow_menu_is_reused_not_rebuilt_per_click(qapp):
-    """The exact leak `conversations.py`'s own row-menu comment already
-    found once, in a different popup — a `Qt.Popup` is a real top-level
-    window, and rebuilding one per click never gives the old one back."""
-    header = HeaderBar()
-
-    header._settings_button.click()
-    first_menu = header._overflow_menu
-    header._settings_button.click()  # closes it
-    header._settings_button.click()  # opens it again
-
-    assert header._overflow_menu is first_menu
+    header.set_settings_open(False)
+    assert header._settings_button.isChecked() is False
 
 
 # --- ModeChip --------------------------------------------------------------

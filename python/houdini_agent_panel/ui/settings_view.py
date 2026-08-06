@@ -264,7 +264,6 @@ class _Section(QtWidgets.QWidget):
 
 class SettingsView(QtWidgets.QWidget):
     changed = Signal()
-    closed = Signal()
     #: Forwarded straight from `AgentsView` — see its docstring. The panel
     #: needs these to react to ONE specific agent's install, which the
     #: generic `changed` (settings reload) doesn't carry enough to do.
@@ -308,6 +307,20 @@ class SettingsView(QtWidgets.QWidget):
         before_uninstall: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("settingsOverlay")
+        # `WA_StyledBackground`: a plain `QWidget` ignores a stylesheet
+        # `background` otherwise (it only affects widgets Qt already knows
+        # how to draw a background for) — needed here because this view now
+        # LAYS OVER the transcript page rather than reading as just another
+        # page of the same stack (owner: "settings should sit as an overlay,
+        # a slightly different shade from the rest of the background").
+        # `palette(alternate-base)` is the same theme-derived "a shade apart
+        # from Window" role `theme.popup_background()` already uses for
+        # every other floating surface in the panel (agent switcher, "…"
+        # menu) — read live at paint time, so it needs no `_apply_theme`
+        # refresh of its own the way a colour computed in Python would.
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setStyleSheet("QWidget#settingsOverlay { background: palette(alternate-base); }")
         self._loading = False
         #: True from the moment a Network field is edited until the restart
         #: is either done (button clicked) or explicitly dismissed
@@ -319,21 +332,24 @@ class SettingsView(QtWidgets.QWidget):
         #: child's own state; this flag doesn't have that ambiguity.
         self._restart_pending = False
 
-        close_button = QtWidgets.QToolButton(self)
-        close_button.setText("←")
-        close_button.setToolTip("Back")
-        close_button.clicked.connect(self.closed.emit)
-
-        # The back arrow lines up with the left edge of the settings rail
-        # below it, not with the panel's own edge. Full width put it out at
-        # the very border, where an open conversation drawer covered it —
-        # and the one control that leaves settings has no business hiding.
+        # No back button (owner's call): Settings is an overlay now, not a
+        # page you navigate away from — the SAME "…" control that opened
+        # it closes it again (`HeaderBar.settings_clicked`/`AgentPanel.
+        # _toggle_settings`), plus Escape (`AgentPanel`'s own shortcut) and
+        # whatever already returned to the transcript on its own (an agent
+        # switch does, deliberately — `_show_page`'s callers). With the
+        # back button gone, "Settings" is centred in the rail instead of
+        # sitting beside where that button used to be.
         self._header_rail = QtWidgets.QWidget(self)
         header_rail_layout = QtWidgets.QHBoxLayout(self._header_rail)
         header_rail_layout.setContentsMargins(0, 10, 0, 4)
         header_rail_layout.setSpacing(6)
-        header_rail_layout.addWidget(close_button)
-        header_rail_layout.addWidget(QtWidgets.QLabel("Settings", self._header_rail))
+        header_rail_layout.addStretch(1)
+        # Same weight as `BugReportView`'s own centred-ish title — both are
+        # now overlay-style screens with no back button beside their name.
+        title_label = QtWidgets.QLabel("Settings", self._header_rail)
+        title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_rail_layout.addWidget(title_label)
         header_rail_layout.addStretch(1)
 
         header = QtWidgets.QHBoxLayout()
@@ -586,7 +602,21 @@ class SettingsView(QtWidgets.QWidget):
         self._content_layout = content_layout
 
         self._scroll = QtWidgets.QScrollArea(self)
-        self._scroll.setStyleSheet(theme.scrollbar_stylesheet())
+        self._scroll.setObjectName("settingsScroll")
+        # A `QScrollArea` paints its own opaque background (and so does the
+        # viewport widget it builds internally) regardless of what `self`
+        # is styled to show underneath — without this, the overlay's own
+        # `palette(alternate-base)` background (see `__init__`'s own note)
+        # was completely invisible everywhere except the thin header strip
+        # above the scroll area, since the scroll area covers essentially
+        # the whole rest of the page. Same "make the scroll area and its
+        # inner viewport transparent" idiom `conversations.py`'s drawer
+        # already uses for the identical reason.
+        self._scroll.setStyleSheet(
+            theme.scrollbar_stylesheet()
+            + "QScrollArea#settingsScroll { background: transparent; border: none; }"
+            "QScrollArea#settingsScroll > QWidget > QWidget { background: transparent; }"
+        )
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._scroll.setWidget(content)

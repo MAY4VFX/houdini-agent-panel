@@ -381,9 +381,15 @@ def test_installing_agent_refreshes_the_panel_without_recreating_it(qapp, monkey
     assert changed == [True]
 
 
-def test_back_button_lines_up_with_the_settings_rail(qapp):
-    """Full width put the back arrow at the panel's own edge, where an open
-    conversation drawer covered it — and it is the only way out of settings."""
+def test_header_rail_lines_up_with_the_settings_rail(qapp):
+    """`_header_rail` (now just the centred "Settings" title — the back
+    button it used to hold is gone, Settings is an overlay you close via
+    the "…" toggle/Escape/an agent switch instead of navigating out of)
+    must still share the content rail's own width and left edge below it.
+    Full width put the title at the panel's own edge, where an open
+    conversation drawer covered it; the underlying alignment mismatch this
+    guards is the same one `test_nothing_starts_left_of_the_back_button`
+    (test_settings_grid_alignment.py) catches in the scrollbar case."""
     view = SettingsView()
     view.resize(1000, 700)
     view.show()
