@@ -522,6 +522,14 @@ class _ProseBlock(QtWidgets.QTextBrowser):
         # No fill of its own — the feed's background shows through, no box.
         self.setAutoFillBackground(False)
         self.viewport().setAutoFillBackground(False)
+        # Houdini 20.5 applies a pane-level QTextBrowser rule whose Base is
+        # pure black. `setAutoFillBackground(False)` does not beat an
+        # inherited stylesheet, so every system/error note became a black
+        # rectangle exactly the width of this widget. A local transparent
+        # rule wins that cascade; set it on the viewport too because that is
+        # the child QAbstractScrollArea actually paints behind the document.
+        self.setStyleSheet("QTextBrowser { background: transparent; }")
+        self.viewport().setStyleSheet("background: transparent;")
         self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
 
     def set_text(self, text: str) -> None:

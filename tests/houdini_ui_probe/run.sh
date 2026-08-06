@@ -3,9 +3,14 @@ set -eu
 
 version="${1:-20.5}"
 installed_probe=0
+installed_ui_probe=0
 case "$version" in
   20.5)
     houdini_bin="/Applications/Houdini/Houdini20.5.445/Houdini FX 20.5.445.app/Contents/MacOS/houdini"
+    ;;
+  20.5-installed)
+    houdini_bin="/Applications/Houdini/Houdini20.5.445/Houdini FX 20.5.445.app/Contents/MacOS/houdini"
+    installed_ui_probe=1
     ;;
   21)
     houdini_bin="/Applications/Houdini/Houdini21.0.792/Houdini FX 21.0.792.app/Contents/MacOS/houdini"
@@ -18,7 +23,7 @@ case "$version" in
     houdini_bin="/Applications/Houdini/Houdini22.0.368/Houdini FX 22.0.368.app/Contents/MacOS/houdini"
     ;;
   *)
-    echo "usage: $0 20.5|21|21-installed|22" >&2
+    echo "usage: $0 20.5|20.5-installed|21|21-installed|22" >&2
     exit 2
     ;;
 esac
@@ -27,13 +32,16 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 probe_dir=$(mktemp -d /tmp/hap-ui-probe.XXXXXX)
 export HAP_DATA_DIR="$probe_dir"
 export HOUDINI_PATH="$repo_dir/tests/houdini_ui_probe;&"
-if [ "$installed_probe" -eq 1 ]; then
+if [ "$installed_probe" -eq 1 ] || [ "$installed_ui_probe" -eq 1 ]; then
   # Read the real package JSON, but never the owner's panel settings. This
   # proves a fresh Houdini version sees both plugin trees without risking
   # autostarting their configured agent.
   unset HOUDINI_USER_PREF_DIR
   unset PYTHONPATH
-  export HAP_EXPECT_FX=1
+  export HAP_USE_INSTALLED_PANEL=1
+  if [ "$installed_probe" -eq 1 ]; then
+    export HAP_EXPECT_FX=1
+  fi
 else
   export HOUDINI_USER_PREF_DIR="$probe_dir/houdini__HVER__"
   export PYTHONPATH="$repo_dir/python"

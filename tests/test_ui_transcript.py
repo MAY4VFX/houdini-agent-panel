@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from houdini_agent_panel.transcript_model import PermissionView, TranscriptModel
-from houdini_agent_panel.ui.qt import QtCore, QtGui
+from houdini_agent_panel.ui.qt import QtCore, QtGui, QtWidgets
 from houdini_agent_panel.ui.transcript import TranscriptView
 
 
@@ -50,6 +50,29 @@ def test_set_model_renders_existing_entries(qapp):
     view.set_model(model)
 
     assert len(view._rows) == 1
+
+
+def test_system_note_does_not_inherit_a_black_text_browser_surface(qapp):
+    """Houdini 20.5's pane style supplies Base as black to text browsers."""
+    host = QtWidgets.QWidget()
+    host.setStyleSheet("QTextBrowser { background: #000000; }")
+    layout = QtWidgets.QVBoxLayout(host)
+    model = TranscriptModel()
+    note = model.append_error("Codex 1.1.9 · /Users/may")
+    view = TranscriptView(host)
+    view.set_model(model)
+    layout.addWidget(view)
+    host.resize(700, 240)
+    host.show()
+    qapp.processEvents()
+
+    prose = view._rows[note.id]._segments[0]
+    image = host.grab().toImage()
+    point = prose.viewport().mapTo(
+        host, QtCore.QPoint(prose.viewport().width() - 6, prose.viewport().height() // 2)
+    )
+
+    assert image.pixelColor(point) != QtGui.QColor("#000000")
 
 
 def test_horizontal_scrollbar_always_off(qapp):
