@@ -33,7 +33,7 @@ PACKAGE_ROOT = REPO_ROOT / "python"
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from houdini_agent_panel import paths  # noqa: E402
+from houdini_agent_panel import paths, proxy  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +48,22 @@ def data_dir(tmp_path, monkeypatch) -> Path:
     root.mkdir()
     monkeypatch.setenv(paths.DATA_DIR_ENV, str(root))
     return root
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_proxy(monkeypatch) -> None:
+    """The developer's own proxy is not part of the test fixture.
+
+    `proxy.py` is built to INHERIT a machine-wide `HTTPS_PROXY`/CA bundle —
+    a studio that exports them is correctly configured and the panel passes
+    them through. That is also why five tests went red the moment the suite
+    ran on such a machine: they assert on the launch environment a panel
+    builds, and the machine's own proxy was legitimately in it. The
+    behaviour is right; reading it from outside the test is what is wrong.
+    A test that cares about inheritance sets the variables itself.
+    """
+    for name in (*proxy.PROXY_VARS, *proxy.CA_VARS, "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
 
 
 class FakeFetcher:

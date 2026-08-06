@@ -53,9 +53,52 @@ QShortcut = getattr(QtGui, "QShortcut", None) or QtWidgets.QShortcut  # type: ig
 
 QT_VERSION = QtCore.qVersion()
 
+
+def discard(widget, layout=None) -> None:
+    """Take a widget off the screen for good, in the one order that is safe.
+
+    The four lines below were written out at a dozen call sites, and the two
+    that skipped a step are exactly the bugs this project has already paid
+    for once each:
+
+    - `hide()` BEFORE orphaning, because a parentless `QWidget` is a
+      top-level window and macOS gives it a real native one the moment it
+      exists — a feed that draws a row per message produced hundreds of
+      stray windows that way.
+    - `setParent(None)` right away rather than trusting `deleteLater()`,
+      because until the next event-loop pass the widget is still a child:
+      it still answers `findChildren`, still counts in a rebuild, and still
+      paints at its old geometry under whatever replaced it.
+
+    `layout` is the layout the widget was placed in, when the caller has
+    already taken it out itself (`takeAt`) it can be left out.
+    """
+    if widget is None:
+        return
+    if layout is not None:
+        layout.removeWidget(widget)
+    widget.hide()
+    widget.setParent(None)
+    widget.deleteLater()
+
+
+def clear_layout(layout) -> None:
+    """Empty a layout of its widgets, discarding each one properly.
+
+    Nested layouts are left alone deliberately: nothing in the panel builds
+    one, and silently deleting a sub-layout's widgets would be a much bigger
+    thing to do than "clear these rows".
+    """
+    while layout.count():
+        item = layout.takeAt(0)
+        discard(item.widget())
+
+
 __all__ = [
     "QAction",
     "QShortcut",
+    "clear_layout",
+    "discard",
     "Property",
     "QT_SOURCE",
     "QT_VERSION",

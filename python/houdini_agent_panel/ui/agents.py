@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Callable
 from .. import registry, runtime
 from ..updates import is_newer
 from .. import settings as settings_module
-from .qt import QtCore, QtWidgets, Signal
+from .qt import QtCore, QtWidgets, Signal, clear_layout
 from . import theme
 from .worker import Worker, release
 
@@ -152,19 +152,6 @@ def _compact_button(text: str, parent) -> "QtWidgets.QPushButton":
     button.setFixedHeight(height)
     button.setStyleSheet(f"padding: 0 {theme.scaled_size(5)}px;")
     return button
-
-
-def _clear_layout(layout: "QtWidgets.QLayout") -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        if widget is not None:
-            # `setParent(None)` right away, not just `deleteLater()`: otherwise
-            # the old row still counts as a child until the next event loop
-            # pass and shows up in `findChildren`/gets counted twice.
-            widget.hide()  # before orphaning: a parentless widget is a window
-            widget.setParent(None)
-            widget.deleteLater()
 
 
 class _AgentRow(QtWidgets.QWidget):
@@ -536,7 +523,7 @@ class AgentsView(QtWidgets.QWidget):
         the outside that looked exactly like "it installs in no time and
         never remembers".
         """
-        _clear_layout(self._rows_layout)
+        clear_layout(self._rows_layout)
         self._rows_by_id = {}
         current_settings = settings_module.load()
         for entry in self._entries:
@@ -674,7 +661,7 @@ class AgentsView(QtWidgets.QWidget):
     # --- "custom agent" --------------------------------------------------
 
     def _load_custom_agents(self) -> None:
-        _clear_layout(self._custom_rows_layout)
+        clear_layout(self._custom_rows_layout)
         current = settings_module.load()
         for agent in current.custom_agents:
             auth_info = current.agent_auth_info.get(agent.id)

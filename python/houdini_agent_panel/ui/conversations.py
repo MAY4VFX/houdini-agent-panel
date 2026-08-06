@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ..sessions import SessionState
 from . import theme
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal, discard
 
 #: The drawer's width when there's room for it — i.e. when it fits inside
 #: `TranscriptView.current_gutter()`, the margin that's already empty on
@@ -346,17 +346,12 @@ class ConversationDrawer(QtWidgets.QFrame):
         # nothing left to point at — drop it so the set doesn't grow forever.
         self._pinned &= self._states.keys()
         while self._sessions_layout.count() > 1:
-            item = self._sessions_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                # `takeAt` only stops the layout from managing it — the
-                # widget itself stays visible at its old geometry until
-                # `deleteLater` actually runs on a later event-loop pass.
-                # Two rebuilds in the same tick (pin toggle right after the
-                # initial `set_sessions`) used to show the old row bleeding
-                # through the new one until then.
-                widget.hide()
-                widget.deleteLater()
+            # `takeAt` only stops the layout from managing the row — until
+            # `discard` hides and orphans it, it stays visible at its old
+            # geometry. Two rebuilds in the same tick (a pin toggle right
+            # after the initial `set_sessions`) used to show the old row
+            # bleeding through the new one.
+            discard(self._sessions_layout.takeAt(0).widget())
         self._buttons.clear()
         self._pin_buttons.clear()
         self._busy_dots.clear()

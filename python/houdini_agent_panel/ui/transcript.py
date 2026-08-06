@@ -18,9 +18,15 @@ from __future__ import annotations
 import re
 
 from ..transcript_model import Entry, TranscriptModel
+from . import attachments as attachment_view
 from . import theme
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal, discard
 from .thinking import ThinkingIndicator
+
+#: The longest edge of an image preview inside a sent message. Big enough to
+#: recognise the render you attached, small enough that three of them don't
+#: push the conversation off the screen.
+_ATTACHMENT_PREVIEW = 168
 
 #: How many pixels from the bottom still count as "at the bottom" — a small
 #: allowance for layout rounding, so auto-scroll doesn't break over one pixel.
@@ -168,10 +174,7 @@ class TranscriptView(QtWidgets.QScrollArea):
             if id(row) in seen_widgets:
                 continue
             seen_widgets.add(id(row))
-            self._layout.removeWidget(row)
-            row.hide()  # before orphaning: a parentless widget is a window
-            row.setParent(None)
-            row.deleteLater()
+            discard(row, self._layout)
         self._rows.clear()
 
         entries = [e for e in self._model.entries() if e.kind != "permission"]
@@ -212,10 +215,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         if entry is not None and entry.kind == "permission":
             row = self._rows.pop(entry_id, None)
             if row is not None:
-                self._layout.removeWidget(row)
-                row.hide()  # before orphaning: a parentless widget is a window
-                row.setParent(None)
-                row.deleteLater()
+                discard(row, self._layout)
             return
 
         if entry is None:
@@ -223,10 +223,7 @@ class TranscriptView(QtWidgets.QScrollArea):
             # if that ever changes — the row simply leaves the stage.
             row = self._rows.pop(entry_id, None)
             if row is not None:
-                self._layout.removeWidget(row)
-                row.hide()  # before orphaning: a parentless widget is a window
-                row.setParent(None)
-                row.deleteLater()
+                discard(row, self._layout)
             return
 
         row = self._rows.get(entry_id)
@@ -418,10 +415,20 @@ class _MessageRow(QtWidgets.QWidget):
         self._layout.setSpacing(theme.SPACING_TIGHT)
         self._apply_kind_margins(entry.kind)
         self._segments: list[QtWidgets.QWidget] = []
+        #: The attachment strip, built once if this message carries any. It
+        #: sits ABOVE the prose and outside `_segments`, so streaming text
+        #: rebuilding its own widgets never disturbs it.
+        self._attachments: _AttachmentStrip | None = None
         self.update_from(entry)
 
     def update_from(self, entry: Entry) -> None:
-        segments = _split_markdown_segments(entry.text)
+        self._sync_attachments(entry)
+        # An attachment sent on its own is a complete message. Rendering the
+        # empty text alongside it would draw an empty bubble under the
+        # picture.
+        segments = _split_markdown_segments(entry.text) if entry.text else []
+        if not segments and not entry.attachments:
+            segments = [("text", "")]
 
         # Streaming usually just appends to the last chunk without changing
         # the number or type of chunks — then updating contents in place is
@@ -440,10 +447,7 @@ class _MessageRow(QtWidgets.QWidget):
             return
 
         for widget in self._segments:
-            self._layout.removeWidget(widget)
-            widget.hide()  # before orphaning: a parentless widget is a window
-            widget.setParent(None)
-            widget.deleteLater()
+            discard(widget, self._layout)
         self._segments = []
 
         for kind, content in segments:
@@ -454,8 +458,25 @@ class _MessageRow(QtWidgets.QWidget):
                 self._apply_kind_style(widget, entry.kind)
                 widget.set_text(content)
             self._segments.append(widget)
-            alignment = QtCore.Qt.AlignRight if entry.kind == "user" else QtCore.Qt.Alignment()
-            self._layout.addWidget(widget, 0, alignment)
+            self._layout.addWidget(widget, 0, self._alignment_for(entry.kind))
+
+    def _sync_attachments(self, entry: Entry) -> None:
+        """Draw what was attached, as part of the message it was attached to.
+
+        Before this, a picture the artist dropped into the composer left the
+        chip row on send and appeared nowhere else: the feed said only what
+        was typed, so scrolling back through a conversation gave no way to
+        tell which of four renders the agent had actually been shown.
+        """
+        if not entry.attachments or self._attachments is not None:
+            return
+        strip = _AttachmentStrip(entry.attachments, entry.kind == "user", self)
+        self._attachments = strip
+        self._layout.insertWidget(0, strip, 0, self._alignment_for(entry.kind))
+
+    @staticmethod
+    def _alignment_for(kind: str):
+        return QtCore.Qt.AlignRight if kind == "user" else QtCore.Qt.Alignment()
 
     def _apply_kind_margins(self, kind: str) -> None:
         # The indent is the visual marker for "a human typed this" — no
@@ -499,6 +520,64 @@ class _MessageRow(QtWidgets.QWidget):
             maximum = max(220, int(self.width() * 0.74))
             for widget in self._segments:
                 widget.setMaximumWidth(maximum)
+
+
+class _AttachmentStrip(QtWidgets.QWidget):
+    """What travelled with a message: previews for images, chips for the rest.
+
+    Read-only by design — this is a record of what was sent, so there is no
+    remove button here (that belongs to the composer, before sending) and no
+    click target: the panel is not a file manager.
+
+    A conversation restored from disk keeps the chips and loses the pixels
+    (`transcript_model._attachment_record` strips the payload rather than
+    write megabytes of base64 into the history), so an image with nothing
+    decodable behind it falls back to its own chip instead of a blank hole.
+    """
+
+    def __init__(self, blocks: list[dict], from_user: bool, parent=None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        if from_user:
+            # The artist's own messages sit against the right edge; their
+            # attachments line up with them rather than drifting left.
+            layout.addStretch(1)
+        for block in blocks:
+            preview = attachment_view.pixmap(block, _ATTACHMENT_PREVIEW)
+            if preview is not None:
+                layout.addWidget(self._image(block, preview))
+            else:
+                layout.addWidget(self._chip(block))
+        if not from_user:
+            layout.addStretch(1)
+
+    def _image(self, block: dict, preview: "QtGui.QPixmap") -> QtWidgets.QWidget:
+        label = QtWidgets.QLabel(self)
+        label.setPixmap(preview)
+        label.setFixedSize(preview.size())
+        label.setToolTip(attachment_view.label(block))
+        label.setStyleSheet("QLabel { border-radius: 8px; }")
+        return label
+
+    def _chip(self, block: dict) -> QtWidgets.QWidget:
+        chip = QtWidgets.QFrame(self)
+        chip.setObjectName("sentAttachment")
+        chip.setStyleSheet(
+            "QFrame#sentAttachment {"
+            " border-radius: 8px;"
+            " background: palette(alternate-base);"
+            "}"
+        )
+        layout = QtWidgets.QHBoxLayout(chip)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+        text = attachment_view.label(block)
+        name = QtWidgets.QLabel(text, chip)
+        name.setToolTip(attachment_view.source_uri(block) or text)
+        layout.addWidget(name)
+        return chip
 
 
 class _ProseBlock(QtWidgets.QTextBrowser):
@@ -845,11 +924,7 @@ class _PlanRow(QtWidgets.QWidget):
             self._step_labels.append(label)
             self._layout.addWidget(label)
         while len(self._step_labels) > len(steps):
-            label = self._step_labels.pop()
-            self._layout.removeWidget(label)
-            label.hide()  # before orphaning: a parentless widget is a window
-            label.setParent(None)
-            label.deleteLater()
+            discard(self._step_labels.pop(), self._layout)
 
         for label, step in zip(self._step_labels, steps):
             glyph = {"pending": "○", "in_progress": "◐", "completed": "✓"}.get(step.status, "○")

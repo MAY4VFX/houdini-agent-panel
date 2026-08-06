@@ -593,3 +593,41 @@ def test_client_works_under_a_haio_like_event_loop_policy(
     )
 
     assert finished.calls[0] == (session_id, "end_turn")
+
+
+# --- chunks the feed cannot render -------------------------------------------
+
+
+async def test_a_chunk_with_no_text_never_opens_an_empty_message(qapp):
+    """An image or audio block in a reply yields no text for the feed.
+
+    Forwarding it anyway opened a message row with nothing in it, which
+    reads as the agent answering with silence. Nothing renders those blocks
+    today, so the honest thing is to let the chunk pass without a row.
+    """
+    from types import SimpleNamespace
+
+    from houdini_agent_panel.client import AcpWorker
+
+    worker = AcpWorker()
+    seen: list[tuple] = []
+    worker.message_chunk.connect(lambda *args: seen.append(args))
+    worker.thought_chunk.connect(lambda *args: seen.append(args))
+
+    image = SimpleNamespace(type="image", data="", mime_type="image/png")
+    for kind in ("agent_message_chunk", "agent_thought_chunk"):
+        await worker.session_update(
+            "s1", SimpleNamespace(session_update=kind, content=image, message_id="m1")
+        )
+    assert seen == []
+
+    await worker.session_update(
+        "s1",
+        SimpleNamespace(
+            session_update="agent_message_chunk",
+            content=SimpleNamespace(type="text", text="real words"),
+            message_id="m1",
+        ),
+    )
+    assert seen == [("s1", "m1", "real words")]
+    worker.loop.close()

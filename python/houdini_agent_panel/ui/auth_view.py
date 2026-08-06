@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import theme
-from .qt import QtCore, QtWidgets, Signal
+from .qt import QtCore, QtWidgets, Signal, clear_layout
 
 if TYPE_CHECKING:
     from ..client import AuthMethod
@@ -22,16 +22,6 @@ if TYPE_CHECKING:
 _RAIL_WIDTH = 736
 #: Floor for the centred rail — see `Composer._MIN_RAIL_WIDTH`.
 _MIN_RAIL_WIDTH = 180
-
-
-def _clear_layout(layout: "QtWidgets.QLayout") -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        if widget is not None:
-            widget.hide()  # before orphaning: a parentless widget is a window
-            widget.setParent(None)
-            widget.deleteLater()
 
 
 class AuthView(QtWidgets.QWidget):
@@ -219,7 +209,7 @@ class AuthView(QtWidgets.QWidget):
         explanation — `no_methods_help`, when the caller has it, replaces
         the generic "no sign-in methods" line with that agent's own real
         instructions (`AgentPanel._no_methods_advice`)."""
-        _clear_layout(self._methods_layout)
+        clear_layout(self._methods_layout)
         methods = list(methods)
         self._empty_label.setText(
             no_methods_help if (not methods and no_methods_help) else "The agent offered no sign-in methods."

@@ -66,6 +66,44 @@ def test_new_session_is_never_born_busy(qapp):
     widget.shutdown()
 
 
+def test_an_error_clears_busy_on_the_session_it_belongs_to(qapp):
+    """Not only on the composer: the flag is what a switch restores."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+
+    for name in ("a", "b"):
+        client.session_started.emit(name, _state(name))
+    qapp.processEvents()
+    for state in widget._pool.all():
+        state.busy = True
+
+    # "b" is the visible one (the last session started), so this reports a
+    # failure in the conversation the artist is NOT looking at.
+    client.error.emit("a", "the agent lost the plot")
+    qapp.processEvents()
+
+    assert not widget._pool.get("a").busy
+    assert widget._pool.get("b").busy, "an unrelated conversation keeps its turn"
+    widget.shutdown()
+
+
+def test_a_failed_start_clears_busy_everywhere(qapp):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    client.session_started.emit("a", _state("a"))
+    qapp.processEvents()
+    widget._pool.get("a").busy = True
+
+    client.failed.emit("node is missing")
+    qapp.processEvents()
+
+    assert not widget._pool.get("a").busy
+    assert not widget._composer._busy
+    widget.shutdown()
+
+
 def test_submitting_while_busy_explains_itself(qapp):
     """Silence here is indistinguishable from a dead panel."""
     from houdini_agent_panel.ui.composer import Composer

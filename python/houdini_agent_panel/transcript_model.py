@@ -65,6 +65,12 @@ class Entry:
     plan: list[PlanEntry] = field(default_factory=list)
     permission: PermissionView | None = None
     activity: ActivityView | None = None
+    #: The non-text blocks the artist sent along with this line — the same
+    #: dicts that went to the agent (`image`/`resource`/`audio`). Only ever
+    #: set on a `user` entry: an attachment belongs to the message it was
+    #: attached to, and showing it anywhere else would be a lie about what
+    #: was sent.
+    attachments: list[dict] = field(default_factory=list)
 
 
 def _plain(value: Any) -> Any:
@@ -87,6 +93,26 @@ def _plain_list(values: Any) -> list[dict]:
     return [_plain(item) for item in (values or [])]
 
 
+def _attachment_record(block: dict) -> dict:
+    """An attachment as it goes to disk — everything except the payload.
+
+    A sent image is a base64 blob of the whole file; a scene reference can
+    be tens of megabytes. Writing that into `conversations.json` on every
+    autosave would turn a folder of chat history into a folder of pictures,
+    and a restored conversation is a read-only replay — nothing can resend
+    those bytes anyway. What survives is what the artist needs to recognise
+    the message later: what kind of thing it was and what it was called.
+    """
+    record = {"type": str(block.get("type") or "")}
+    uri = block.get("uri") or (block.get("resource") or {}).get("uri")
+    if uri:
+        record["uri"] = str(uri)
+    mime = block.get("mimeType") or (block.get("resource") or {}).get("mimeType")
+    if mime:
+        record["mimeType"] = str(mime)
+    return record
+
+
 #: Marks an entry built from chunks that carried no `messageId`, so a
 #: following chunk can tell "keep appending to this" from "this belongs to
 #: a message the agent actually named".
@@ -107,8 +133,9 @@ class TranscriptModel:
         self._entries: list[Entry] = []
         # Indexes by id — so streaming stitches together and updates find
         # their entry in O(1), instead of scanning the whole feed on every
-        # chunk.
-        self._by_message_id: dict[str, Entry] = {}
+        # chunk. The message index is keyed by `(kind, message_id)`: see
+        # `apply_chunk` for the agent that reuses one id for both streams.
+        self._by_message_id: dict[tuple[str, str], Entry] = {}
         self._by_tool_call_id: dict[str, Entry] = {}
         self._by_request_key: dict[str, Entry] = {}
         self._plan_entry: Entry | None = None
@@ -116,8 +143,13 @@ class TranscriptModel:
 
     # --- appending -----------------------------------------------------
 
-    def append_user(self, text: str) -> Entry:
-        entry = Entry(kind="user", id=str(uuid.uuid4()), text=text)
+    def append_user(self, text: str, attachments: list[dict] | None = None) -> Entry:
+        entry = Entry(
+            kind="user",
+            id=str(uuid.uuid4()),
+            text=text,
+            attachments=[a for a in (attachments or []) if isinstance(a, dict)],
+        )
         self._entries.append(entry)
         return entry
 
@@ -140,12 +172,22 @@ class TranscriptModel:
         kind: EntryKind = "thought" if thought else "agent"
 
         if message_id:
-            existing = self._by_message_id.get(message_id)
-            if existing is not None and existing.kind == kind:
+            # Keyed by KIND AND id, and the entry's own id carries the kind
+            # too. `messageId` identifies the agent's message, not one
+            # stream within it: opencode sends its reasoning and its answer
+            # under the SAME id (measured — reasoning arrived, the answer
+            # never appeared on screen). Two entries then shared one id, and
+            # `TranscriptView._refresh_one` resolves an id by taking the
+            # FIRST entry that carries it — so every chunk of the answer was
+            # rendered into the thought's row and the answer itself stayed
+            # invisible until the feed happened to be rebuilt from scratch.
+            key = (kind, message_id)
+            existing = self._by_message_id.get(key)
+            if existing is not None:
                 existing.text += text
                 return existing
-            entry = Entry(kind=kind, id=message_id, text=text)
-            self._by_message_id[message_id] = entry
+            entry = Entry(kind=kind, id=f"{kind}:{message_id}", text=text)
+            self._by_message_id[key] = entry
         else:
             # No message_id at all. `messageId` is optional in ACP, and Grok
             # omits it on every chunk — which used to mean one entry per
@@ -241,11 +283,17 @@ class TranscriptModel:
     # reads back is the conversation, which is the part that was theirs.
 
     def to_records(self) -> list[dict]:
-        return [
-            {"kind": entry.kind, "id": entry.id, "text": entry.text}
-            for entry in self._entries
-            if entry.kind in ("user", "agent", "error") and entry.text
-        ]
+        records: list[dict] = []
+        for entry in self._entries:
+            if entry.kind not in ("user", "agent", "error"):
+                continue
+            if not entry.text and not entry.attachments:
+                continue
+            record = {"kind": entry.kind, "id": entry.id, "text": entry.text}
+            if entry.attachments:
+                record["attachments"] = [_attachment_record(a) for a in entry.attachments]
+            records.append(record)
+        return records
 
     def load_records(self, records: list[dict]) -> None:
         self._entries = [
@@ -253,9 +301,12 @@ class TranscriptModel:
                 kind=record.get("kind", "agent"),
                 id=str(record.get("id") or uuid.uuid4()),
                 text=str(record.get("text") or ""),
+                attachments=[
+                    a for a in (record.get("attachments") or []) if isinstance(a, dict)
+                ],
             )
             for record in records or []
-            if isinstance(record, dict) and record.get("text")
+            if isinstance(record, dict) and (record.get("text") or record.get("attachments"))
         ]
         self._by_message_id.clear()
         self._by_tool_call_id.clear()

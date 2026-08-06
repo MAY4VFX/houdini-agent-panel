@@ -513,11 +513,17 @@ class AcpWorker(QtCore.QThread):
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         kind = update.session_update
         if kind == "agent_message_chunk":
+            # Only text reaches the feed. A chunk carrying an image or audio
+            # block yields "" here, and forwarding that would open an empty
+            # message row for content the panel has no way to show — an
+            # empty bubble reads as the agent answering with nothing.
             text = _chunk_text(update.content)
-            self.message_chunk.emit(session_id, update.message_id or "", text)
+            if text:
+                self.message_chunk.emit(session_id, update.message_id or "", text)
         elif kind == "agent_thought_chunk":
             text = _chunk_text(update.content)
-            self.thought_chunk.emit(session_id, update.message_id or "", text)
+            if text:
+                self.thought_chunk.emit(session_id, update.message_id or "", text)
         elif kind == "tool_call":
             self.tool_call.emit(session_id, update)
         elif kind == "tool_call_update":

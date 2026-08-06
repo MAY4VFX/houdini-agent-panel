@@ -1193,6 +1193,12 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_failed(self, message: str) -> None:
         self._composer.cancel_boot()
+        # Same reasoning as `_on_disconnected`: whatever was in flight has no
+        # process left to finish it. A restart that fails must not leave the
+        # conversations it interrupted permanently stuck on "stop".
+        for state in self._pool.all():
+            state.busy = False
+        self._composer.set_busy(False)
         self._note(f"Agent failed to start: {message}")
         self._open_agent_management()
         self._pending_auth_target = None
@@ -1515,6 +1521,16 @@ class AgentPanel(QtWidgets.QWidget):
             return
         entry = self._model(target).append_error(message)
         self._touch(target, entry.id)
+        # On the STATE, not only on the composer. The turn this error ended
+        # is never coming back, and a session left marked busy comes back
+        # that way on the next switch (`_show_session` restores `state.busy`)
+        # — a send button stuck as a stop button that does nothing when
+        # pressed. `_on_disconnected` and `_release_if_still_busy` both
+        # already clear it for exactly this reason; an error in a background
+        # conversation was the one path that didn't.
+        state = self._pool.get(target)
+        if state is not None:
+            state.busy = False
         if self._is_current(target):
             self._composer.set_busy(False)
         self._finish_activity(target)
@@ -1941,8 +1957,12 @@ class AgentPanel(QtWidgets.QWidget):
         text = " ".join(
             block.get("text", "") for block in blocks if block.get("type") == "text"
         ).strip()
-        if text:
-            entry = self._model(current.session_id).append_user(text)
+        # Everything that isn't typed words travelled with this message and
+        # belongs to it — a picture the artist attached is part of what they
+        # said, not something that happened next to it.
+        attachments = [block for block in blocks if block.get("type") != "text"]
+        if text or attachments:
+            entry = self._model(current.session_id).append_user(text, attachments)
             self._touch(current.session_id, entry.id)
             # `client.py.do_new_session` seeds every fresh session with the
             # placeholder title, and this is where the first thing the artist
@@ -1950,7 +1970,7 @@ class AgentPanel(QtWidgets.QWidget):
             # conversations written before the rename are on disk with that
             # exact title — dropping it would leave them called "New
             # conversation" forever, no matter what was said in them.
-            if current.title in ("", "New chat", "New conversation"):
+            if text and current.title in ("", "New chat", "New conversation"):
                 current.title = summarize_title(text)
                 self._pool.mark_changed(current.session_id)
             # On disk before it is sent anywhere: this is the artist's own

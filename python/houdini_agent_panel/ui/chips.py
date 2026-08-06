@@ -10,7 +10,7 @@ from __future__ import annotations
 from ..sessions import SessionMode
 from . import theme
 from .conversations import compose_icon as _compose_icon, sidebar_icon
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal, clear_layout
 
 _RAIL_WIDTH = 736
 #: Floor for the centered rail. Without it — and without the
@@ -286,11 +286,7 @@ class ChoiceButton(QtWidgets.QWidget):
     def _rebuild_popup(self) -> None:
         if self._popup is None or self._popup_layout is None:
             return
-        while self._popup_layout.count():
-            item = self._popup_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        clear_layout(self._popup_layout)
         # Straight from the live palette, same reasoning as `sidebar_icon`
         # and `theme.popup_background` — not `theme.color()`'s `hou.qt`-
         # first path.
@@ -566,11 +562,7 @@ class HeaderBar(QtWidgets.QWidget):
     def _rebuild_agent_popup(self) -> None:
         if self._agent_popup is None or self._agent_popup_layout is None:
             return
-        while self._agent_popup_layout.count():
-            item = self._agent_popup_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        clear_layout(self._agent_popup_layout)
         for agent_id, label in self._agent_items:
             button = QtWidgets.QPushButton(label, self._agent_popup)
             button.setProperty("checkedChoice", agent_id == self._agent_current_id)

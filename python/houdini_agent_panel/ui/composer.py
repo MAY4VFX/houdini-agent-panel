@@ -22,10 +22,10 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import theme
+from . import attachments, theme
 from .chips import ChoiceButton, ModeChip
 from .boot_status import BootStatus
-from .qt import QtCore, QtGui, QtWidgets, Signal
+from .qt import QtCore, QtGui, QtWidgets, Signal, clear_layout, discard
 from .thinking import BuddyEntrance, _BuddySprite
 from .voice import VoiceButton
 
@@ -266,6 +266,13 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
             "type": "image",
             "data": base64.b64encode(data).decode("ascii"),
             "mimeType": mime_type,
+            # `uri` is ImageContentBlock's own optional field ("where this
+            # image came from") — not something invented on top of the
+            # protocol. The pixels still travel in `data`; this is what
+            # lets the chip and the sent message say `render.exr` instead
+            # of a flat "Image", and it is the only trace of the file's
+            # name that survives into the saved conversation.
+            "uri": path.resolve().as_uri(),
         }
     if info.supports_embedded_context:
         uri = path.resolve().as_uri()
@@ -291,37 +298,12 @@ _ATTACHMENT_THUMBNAIL = 20
 
 
 def _attachment_thumbnail(block: dict) -> "QtGui.QPixmap | None":
-    """A small preview for an image block, None for anything else."""
-    if block.get("type") != "image":
-        return None
-    data = block.get("data")
-    if not isinstance(data, str):
-        return None
-    try:
-        raw = base64.b64decode(data)
-    except (ValueError, TypeError):
-        return None
-    pixmap = QtGui.QPixmap()
-    if not pixmap.loadFromData(raw):
-        return None
-    return pixmap.scaled(
-        _ATTACHMENT_THUMBNAIL,
-        _ATTACHMENT_THUMBNAIL,
-        QtCore.Qt.KeepAspectRatio,
-        QtCore.Qt.SmoothTransformation,
-    )
+    """A chip-sized preview for an image block, None for anything else."""
+    return attachments.pixmap(block, _ATTACHMENT_THUMBNAIL)
 
 
 def _attachment_label(block: dict) -> str:
-    kind = block.get("type")
-    if kind == "image":
-        return "Image"
-    if kind == "audio":
-        return "Audio"
-    if kind == "resource":
-        uri = (block.get("resource") or {}).get("uri", "")
-        return uri.rsplit("/", 1)[-1] if uri else "File"
-    return "Attachment"
+    return attachments.label(block)
 
 
 class _ComposerSurface(QtWidgets.QFrame):
@@ -843,11 +825,7 @@ class Composer(QtWidgets.QWidget):
         while len(self._config_chips) > len(wanted):
             # Only when the agent genuinely offers FEWER options than before,
             # which is rare — not on every update.
-            chip = self._config_chips.pop()
-            self._config_layout.removeWidget(chip)
-            chip.hide()  # before orphaning: a parentless widget is a window
-            chip.setParent(None)
-            chip.deleteLater()
+            discard(self._config_chips.pop(), self._config_layout)
         while len(self._config_chips) < len(wanted):
             chip = ChoiceButton(self._config_bar)
             self._config_layout.addWidget(chip)
@@ -1210,15 +1188,7 @@ class Composer(QtWidgets.QWidget):
             self._refresh_attachments_bar()
 
     def _refresh_attachments_bar(self) -> None:
-        while self._attachments_layout.count():
-            item = self._attachments_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                # `setParent(None)` right away: otherwise the chip still
-                # counts as a child of the composer until the next event-loop pass.
-                widget.hide()  # before orphaning: a parentless widget is a window
-                widget.setParent(None)
-                widget.deleteLater()
+        clear_layout(self._attachments_layout)
         for index, block in enumerate(self._attachments):
             self._attachments_layout.addWidget(self._build_attachment_chip(index, block))
         # A trailing stretch keeps chips packed to the left instead of

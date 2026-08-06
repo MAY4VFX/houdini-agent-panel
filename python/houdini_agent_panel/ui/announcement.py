@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from ..announcements import Announcement
 from ..updates import Update
-from .qt import QtWidgets, Signal
+from .qt import QtWidgets, Signal, clear_layout, discard
 
 
 class NoticeStrip(QtWidgets.QWidget):
@@ -80,9 +80,7 @@ class NoticeStrip(QtWidgets.QWidget):
             # still counts as a child until the next event-loop pass, and
             # re-showing an announcement would briefly show the old and new
             # buttons at once).
-            self._buttons_row.hide()  # before orphaning: a parentless widget is a window
-            self._buttons_row.setParent(None)
-            self._buttons_row.deleteLater()
+            discard(self._buttons_row)
             self._buttons_row = None
         if not buttons:
             return
@@ -155,13 +153,7 @@ class BlockingNotice(QtWidgets.QWidget):
         self._body.setText(ann.body)
         self._body.setVisible(bool(ann.body))
 
-        while self._buttons_layout.count():
-            item = self._buttons_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()  # before orphaning: a parentless widget is a window
-                widget.setParent(None)
-                widget.deleteLater()
+        clear_layout(self._buttons_layout)
 
         for button in ann.buttons:
             # Parented straight to `self._buttons_row`, not adopted after —
