@@ -1,4 +1,6 @@
-# 🐉 houdini-agent-panel
+<img src="docs/images/logo-256.png" width="96" align="left" alt="" hspace="12">
+
+# houdini-agent-panel
 
 **An AI agent inside Houdini. One command to install, no terminal to keep open.**
 
