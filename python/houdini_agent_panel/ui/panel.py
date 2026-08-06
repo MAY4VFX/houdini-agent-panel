@@ -33,6 +33,7 @@ from typing import Any
 from .. import client as acp_client
 from .. import refresh, scene, sessions, settings as settings_mod
 from ..announcements import Announcement
+from ..logbook import logger as _logbook_logger
 from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
@@ -45,6 +46,8 @@ from .transcript import TranscriptView
 from . import worker as worker_module
 from .worker import Worker
 
+_log = _logbook_logger("houdini_agent_panel.ui.panel")
+
 #: One connection per agent id, not one for the whole Houdini process. Two
 #: tabs both talking to Claude share the same process; a tab that switches
 #: to Gemini gets Gemini's own connection, and switching it again must not
@@ -52,6 +55,9 @@ from .worker import Worker
 #: Not a widget attribute — otherwise closing one tab would take the
 #: conversation open in another tab (using the same agent) down with it.
 _shared_clients: dict[str, acp_client.AcpClient] = {}
+
+#: Coalescing window for `_persist_conversations_soon` — see its docstring.
+_PERSIST_COOLDOWN_MS = 500
 
 #: Live panels, per agent id — weak references, since Qt deletes the widgets
 #: itself and holding a strong reference here would just stop them from ever
@@ -479,6 +485,12 @@ class AgentPanel(QtWidgets.QWidget):
         #: that update actually finishes (`_on_agent_install_succeeded`).
         self._restart_after_update: str | None = None
         self._closed = False
+        #: `_persist_conversations_soon`'s coalescing state — see its
+        #: docstring. `_cooldown_active` gates further calls into the
+        #: dirty-flag path instead of a fresh write each; `_dirty` is what
+        #: the trailing write at the end of the window checks.
+        self._persist_cooldown_active = False
+        self._persist_dirty = False
 
         self._build()
         # Wired to the "" (no agent yet) client/pool for now — `_boot()`
@@ -1465,6 +1477,11 @@ class AgentPanel(QtWidgets.QWidget):
         if stop_reason and stop_reason not in ("end_turn", "cancelled"):
             entry = self._model(session_id).append_error(f"Agent stopped: {stop_reason}")
             self._touch(session_id, entry.id)
+        # The agent's side of the exchange, on disk the moment it lands —
+        # otherwise a hang on the artist's NEXT prompt would cost this
+        # whole answer too, not just the one that never came back. See
+        # `_persist_conversations_soon`.
+        self._persist_conversations_soon()
 
     def _on_error(self, session_id: str, message: str) -> None:
         if self._pending_logout_agent == self._agent_id:
@@ -1936,6 +1953,11 @@ class AgentPanel(QtWidgets.QWidget):
             if current.title in ("", "New chat", "New conversation"):
                 current.title = summarize_title(text)
                 self._pool.mark_changed(current.session_id)
+            # On disk before it is sent anywhere: this is the artist's own
+            # typed words, the one part of a conversation nothing can
+            # reconstruct if the turn that follows never comes back (a hang,
+            # a wedged agent, a crash). See `_persist_conversations_soon`.
+            self._persist_conversations_soon()
         current.busy = True
         self._composer.set_busy(True)
         activity = self._model(current.session_id).start_activity()
@@ -3207,11 +3229,18 @@ class AgentPanel(QtWidgets.QWidget):
     # --- conversations that outlive the agent and Houdini -----------------
 
     def _persist_conversations(self) -> None:
-        """Write every transcript we have to disk.
+        """Write every transcript we have to disk, right now, synchronously.
 
         Called whenever a conversation could be about to lose its live agent
-        session: an agent switch, a panel closing. Failures are swallowed —
-        losing history is bad, taking the panel down with it is worse.
+        session: an agent switch, a panel closing — and, via
+        `_persist_conversations_soon`, a prompt just sent or a turn just
+        finished. Failures are swallowed — losing history is bad, taking the
+        panel down with it is worse.
+
+        Kept as an unconditional, un-debounced write for the switch/close
+        call sites on purpose: those are already single, deliberate events,
+        and `shutdown()` in particular must not leave anything to a timer
+        that a process about to go away may never get to run.
         """
         try:
             from .. import conversations_store as store
@@ -3264,6 +3293,59 @@ class AgentPanel(QtWidgets.QWidget):
             store.save(list(existing.values()), active_id=active_id)
         except Exception:  # noqa: BLE001 - history is never worth a crash
             pass
+
+    def _persist_conversations_soon(self) -> None:
+        """Persist, coalescing a burst of calls into at most one extra write.
+
+        Written after a real loss: an artist's prompt went out, the agent
+        was still working on it, and Houdini hung — a hard restart followed,
+        `shutdown()` never ran, and the conversation had never touched disk.
+        Persisting only at agent-switch/panel-close missed exactly this
+        case, because neither happens while a turn is quietly in flight.
+        Wired to two more moments now — a prompt going out (`_on_submitted`)
+        and a turn finishing (`_on_turn_finished`) — so the worst a hang can
+        cost is whatever happened since the last of those, not the whole
+        conversation.
+
+        The FIRST call reaching here writes immediately and synchronously,
+        on the leading edge — measured on the real store on this machine
+        (43 conversations, ~128KB): parse + rebuild + write is well under a
+        millisecond, so there is no case for delaying the call that actually
+        matters behind a timer. A crash in that gap would just reproduce the
+        bug this exists to fix, only smaller, and a timer cannot promise it
+        never happens — so it isn't given the chance to.
+
+        Calls arriving again inside the short cooldown that follows (this
+        tab's own turn finishing right on the heels of its own prompt, a
+        second tab's trigger landing around the same moment) don't each pay
+        for a full read-modify-write; they set a dirty flag instead, and one
+        trailing write at the end of the window drains it — so a burst of N
+        calls costs at most 2 writes, not N.
+
+        What that trailing write is NOT is a second promise of durability.
+        The call that OPENED the cooldown is the one guaranteed safe — it
+        already went to disk before this method returns. Anything that
+        arrives WHILE the cooldown is running is only as safe as the
+        `QTimer` that will flush it, and a `QTimer` only fires if the event
+        loop is still turning — the same condition under which "a hang"
+        stops meaning anything. A crash inside that short window can cost
+        the dirty delta (at most `_PERSIST_COOLDOWN_MS` of agent output);
+        it cannot cost the prompt that started the window, because that was
+        never deferred in the first place.
+        """
+        if self._persist_cooldown_active:
+            self._persist_dirty = True
+            return
+        self._persist_conversations()
+        self._persist_cooldown_active = True
+        QtCore.QTimer.singleShot(_PERSIST_COOLDOWN_MS, self._end_persist_cooldown)
+
+    def _end_persist_cooldown(self) -> None:
+        """The trailing half of `_persist_conversations_soon`'s window."""
+        self._persist_cooldown_active = False
+        if self._persist_dirty:
+            self._persist_dirty = False
+            self._persist_conversations()
 
     def _restore_conversations(self) -> None:
         """Show what was written last time, before any agent is up.
@@ -3356,7 +3438,19 @@ class AgentPanel(QtWidgets.QWidget):
         if self._closed:
             return
         self._closed = True
+        # The one marker that says "this tab went down in an orderly way".
+        # Its absence right before the next `--- panel start ---` is what
+        # tells a later reader a hang forced a hard restart instead — see
+        # the incident `_persist_conversations_soon` was written for. No
+        # session id, no prompt text: `logbook`'s one rule.
+        _log.info("panel tab closing")
         self._persist_conversations()
+        # Whatever `_persist_conversations_soon`'s cooldown was doing is
+        # moot now — the line above already wrote the latest state, and
+        # dropping the flag stops its trailing timer from writing again
+        # (harmlessly, but pointlessly) into a tab that is on its way out.
+        self._persist_cooldown_active = False
+        self._persist_dirty = False
         _live_panels_for(self._agent_id).discard(self)
 
         # Background threads are asked to stop, but a thread in the middle of
