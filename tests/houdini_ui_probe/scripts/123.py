@@ -104,10 +104,6 @@ def _capture():
     state_root = QtWidgets.QWidget()
     state_layout = QtWidgets.QVBoxLayout(state_root)
     state_header = HeaderBar()
-    state_header.set_agent("Codex", None)
-    state_header.set_agent_menu(
-        [("codex-acp", "Codex"), ("opencode", "OpenCode")], "codex-acp"
-    )
     state_header.set_cwd("/Users/may")
     transcript = TranscriptView()
     transcript_model = TranscriptModel()
@@ -118,6 +114,20 @@ def _capture():
     transcript_model.append_error("Codex 1.1.9 · /Users/may")
     transcript.set_model(transcript_model)
     state_composer = Composer()
+    state_layout.addWidget(state_header)
+    state_layout.addWidget(transcript, 1)
+    state_layout.addWidget(state_composer)
+    state_root.resize(968, 700)
+    state_root.show()
+    app.processEvents()
+    app.processEvents()
+    # ACP data arrives after the pane is already visible. Houdini 21 used to
+    # retain the empty controls' 36–38px hints here, although a preview that
+    # populated everything before show looked correct.
+    state_header.set_agent("Codex", None)
+    state_header.set_agent_menu(
+        [("codex-acp", "Codex"), ("opencode", "OpenCode")], "codex-acp"
+    )
     state_composer.set_modes(
         [SessionMode("agent", "Agent"), SessionMode("plan", "Plan")], "agent"
     )
@@ -145,11 +155,6 @@ def _capture():
             ),
         ]
     )
-    state_layout.addWidget(state_header)
-    state_layout.addWidget(transcript, 1)
-    state_layout.addWidget(state_composer)
-    state_root.resize(968, 700)
-    state_root.show()
     app.processEvents()
     app.processEvents()
     state_image = state_root.grab().toImage()

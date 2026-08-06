@@ -32,6 +32,7 @@ def test_agent_chip_sizes_for_its_text_when_houdini_style_ignores_it(qapp, monke
 
     text_width = QtGui.QFontMetrics(header._agent_button.font()).horizontalAdvance("Claude Agent")
     assert header._agent_button.sizeHint().width() >= text_width + 24
+    assert header._agent_button.minimumWidth() >= text_width + 24
 
 
 def test_choice_sizes_for_late_text_when_houdini_style_ignores_it(qapp, monkeypatch):
@@ -42,6 +43,7 @@ def test_choice_sizes_for_late_text_when_houdini_style_ignores_it(qapp, monkeypa
     shown = choice._button.text()
     text_width = QtGui.QFontMetrics(choice._button.font()).horizontalAdvance(shown)
     assert choice._button.sizeHint().width() >= text_width + 16
+    assert choice._button.minimumWidth() >= text_width + 16
 
 
 def test_header_uses_centered_precision_rail_and_no_native_combobox(qapp):

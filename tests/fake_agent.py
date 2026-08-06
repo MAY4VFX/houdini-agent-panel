@@ -123,7 +123,7 @@ class FakeAgent:
         self._session_counter += 1
         session_id = f"sess-{self._session_counter}"
         modes = None
-        if SCENARIO == "modes":
+        if SCENARIO in ("modes", "modes-no-echo"):
             modes = SessionModeState(
                 current_mode_id="ask",
                 available_modes=[
@@ -136,7 +136,7 @@ class FakeAgent:
 
     async def set_session_mode(self, session_id, mode_id, **kwargs):
         self._sessions[session_id] = mode_id
-        if self._client is not None:
+        if self._client is not None and SCENARIO != "modes-no-echo":
             update = CurrentModeUpdate(
                 session_update="current_mode_update", current_mode_id=mode_id
             )

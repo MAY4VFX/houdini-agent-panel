@@ -457,6 +457,7 @@ class AcpWorker(QtCore.QThread):
         # carries the new currentModeId, while modes_changed must hand out a
         # full SessionModeState (see docs/architecture.md §6).
         self._session_modes: dict[str, list] = {}
+        self._session_current_modes: dict[str, str] = {}
 
     # --- loop plumbing ------------------------------------------------
 
@@ -526,6 +527,9 @@ class AcpWorker(QtCore.QThread):
         elif kind == "available_commands_update":
             self.commands_changed.emit(session_id, list(update.available_commands))
         elif kind == "current_mode_update":
+            if self._session_current_modes.get(session_id) == update.current_mode_id:
+                return
+            self._session_current_modes[session_id] = update.current_mode_id
             available = self._session_modes.get(session_id, [])
             state = SessionModeState(
                 current_mode_id=update.current_mode_id, available_modes=available
@@ -890,6 +894,7 @@ class AcpWorker(QtCore.QThread):
         if response.modes is not None:
             current_mode_id = response.modes.current_mode_id
             self._session_modes[response.session_id] = list(response.modes.available_modes)
+            self._session_current_modes[response.session_id] = current_mode_id
             available_modes = [
                 _SessionMode(id=m.id, name=m.name, description=m.description or "")
                 for m in response.modes.available_modes
@@ -988,6 +993,23 @@ class AcpWorker(QtCore.QThread):
         except acp.RequestError as exc:
             if not self._emit_if_auth_required(exc):
                 self.error.emit(session_id, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(session_id, str(exc))
+            return
+
+        # ACP only promises a successful response to session/set_mode. Some
+        # agents (measured on Codex 1.1.9) do not also send the optional
+        # current_mode_update notification, so acknowledge the confirmed RPC
+        # ourselves. If the notification arrived first, the cache suppresses
+        # this duplicate.
+        if self._session_current_modes.get(session_id) != mode_id:
+            self._session_current_modes[session_id] = mode_id
+            state = SessionModeState(
+                current_mode_id=mode_id,
+                available_modes=self._session_modes.get(session_id, []),
+            )
+            self.modes_changed.emit(session_id, state)
 
     # --- internals -----------------------------------------------------------
 

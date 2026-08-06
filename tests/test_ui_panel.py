@@ -1139,7 +1139,8 @@ def test_mode_selection_survives_switching_away_and_back(qapp, monkeypatch):
 
     widget = _make_panel(qapp)
     client = panel_mod.shared_client(widget._agent_id)
-    monkeypatch.setattr(client, "set_mode", lambda _sid, _mode_id: None)
+    sent = []
+    monkeypatch.setattr(client, "set_mode", lambda sid, mode_id: sent.append((sid, mode_id)))
 
     first = _session("s1")
     client.session_started.emit(first.session_id, first)
@@ -1152,6 +1153,7 @@ def test_mode_selection_survives_switching_away_and_back(qapp, monkeypatch):
 
     widget._on_mode_selected("plan")
     assert widget._pool.get("s1").current_mode_id == "plan"
+    assert sent == [("s1", "plan")]
 
     second = _session("s2")
     client.session_started.emit(second.session_id, second)

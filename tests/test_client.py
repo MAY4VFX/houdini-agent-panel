@@ -386,6 +386,24 @@ def test_modes_from_new_session_and_set_mode_update(qapp, make_client, tmp_path)
     assert [m.id for m in mode_state.available_modes] == ["ask", "code"]
 
 
+def test_successful_set_mode_is_acknowledged_when_agent_sends_no_update(
+    qapp, make_client, tmp_path
+):
+    """Codex returns success but does not emit ``current_mode_update``."""
+    client = make_client()
+    _connect(qapp, client, "modes-no-echo", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+    modes_changed = _Recorder(client.modes_changed)
+
+    client.set_mode(session_id, "code")
+    _pump_until(qapp, lambda: modes_changed.calls, "set_mode RPC acknowledgement")
+
+    changed_session_id, mode_state = modes_changed.calls[-1]
+    assert changed_session_id == session_id
+    assert mode_state.current_mode_id == "code"
+    assert [m.id for m in mode_state.available_modes] == ["ask", "code"]
+
+
 # --- plan and tool_call ------------------------------------------------------
 
 

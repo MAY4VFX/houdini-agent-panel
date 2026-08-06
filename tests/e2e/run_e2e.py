@@ -125,7 +125,7 @@ class Harness:
         self.panel: panel_mod.AgentPanel | None = None
         self._restore_agent: str = ""
         self._restore_autostart: bool = False
-        self.events: dict = {"chunks": [], "tools": [], "notes": [], "stderr": []}
+        self.events: dict = {"chunks": [], "tools": [], "notes": [], "stderr": [], "modes": []}
 
     def __enter__(self) -> "Harness":
         panel_mod.reset_shared_state_for_tests()
@@ -153,6 +153,9 @@ class Harness:
         client.session_started.connect(lambda sid, _s: e.__setitem__("session", sid))
         client.message_chunk.connect(lambda _s, _m, t: e["chunks"].append(t))
         client.tool_call.connect(lambda _s, tc: e["tools"].append(getattr(tc, "title", "?")))
+        client.modes_changed.connect(
+            lambda sid, modes: e["modes"].append((sid, modes.current_mode_id))
+        )
         client.turn_finished.connect(lambda _s, r: e.__setitem__("stop", r))
         client.error.connect(lambda _s, m: e.__setitem__("error", m))
         client.log_line.connect(lambda line: e["stderr"].append(line))
@@ -349,7 +352,40 @@ def check_config_options(agent_id: str) -> str:
         names = [o.id for o in options]
         if not any("model" in n for n in names):
             raise Failure(f"no model option among {names}")
-        return f"options: {', '.join(names)}"
+        details = []
+        for option in options:
+            choices = "/".join(choice.value for choice in option.choices)
+            details.append(f"{option.id}={option.current_value} [{choices}]")
+        return f"options: {', '.join(details)}"
+
+
+def check_modes(agent_id: str) -> str:
+    """A mode pick must make the full ACP round trip, not only relabel the chip."""
+    with Harness(agent_id) as h:
+        h.connect()
+        session_id = h.open_session()
+        state = h.panel._pool.get(session_id)
+        if not state or len(state.available_modes) < 2:
+            names = [m.id for m in (state.available_modes if state else [])]
+            raise Failure(f"agent offered fewer than two modes: {names}")
+
+        original = state.current_mode_id
+        target = next(m.id for m in state.available_modes if m.id != original)
+        h.panel._on_mode_selected(target)
+        wait_for(
+            lambda: (session_id, target) in h.events["modes"],
+            30_000,
+            f"the agent to acknowledge mode {target}",
+        )
+        # Leave this disposable session in the agent's own original mode.
+        h.panel._on_mode_selected(original)
+        wait_for(
+            lambda: (session_id, original) in h.events["modes"],
+            30_000,
+            f"the agent to restore mode {original}",
+        )
+        names = [m.id for m in state.available_modes]
+        return f"modes: {', '.join(names)}; round trip {original} -> {target} -> {original}"
 
 
 def check_sign_in_reachable(agent_id: str) -> str:
@@ -551,6 +587,7 @@ CHECKS = {
     "stop": check_stop_never_traps,
     "restart": check_restart_after_stop,
     "options": check_config_options,
+    "modes": check_modes,
     "signin": check_sign_in_reachable,
     "panels": check_two_panels_share_one_agent,
     "panels_independent": check_two_tabs_independent_current,

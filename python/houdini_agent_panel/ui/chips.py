@@ -54,6 +54,17 @@ class _ContentSizedToolButton(QtWidgets.QToolButton):
                 width = max(width, self.iconSize().width() + 16)
         return QtCore.QSize(max(hint.width(), width), hint.height())
 
+    def reserve_content_width(self) -> None:
+        """Make Houdini's layout honour the content-aware hint.
+
+        Its pane layout was also measured compressing these controls to the
+        native 36–38px minimum while hundreds of stretch pixels remained
+        unused. Reserving the hint moves that space from the stretch to the
+        label. The panel/composer's own ``minimumSizeHint`` caps still let a
+        genuinely narrow pane dock at 180px.
+        """
+        self.setMinimumWidth(self.sizeHint().width() if self.text() else 0)
+
 
 class ChoiceButton(QtWidgets.QWidget):
     """Small custom dropdown with a styled, non-native popup."""
@@ -236,6 +247,7 @@ class ChoiceButton(QtWidgets.QWidget):
         shown = metrics.elidedText(label, QtCore.Qt.ElideMiddle, _MAX_CHOICE_LABEL_PX)
         self._button.setText(f"{shown}  ⌄" if self._show_caret else shown)
         self._button.setToolTip(description or (label if shown != label else ""))
+        self._button.reserve_content_width()
         self._button.updateGeometry()
 
     def _toggle_popup(self) -> None:
@@ -504,6 +516,7 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_button.setText(name)
         self._agent_has_custom_icon = icon is not None
         self._agent_button.setIcon(icon if icon is not None else self._fallback_agent_icon())
+        self._agent_button.reserve_content_width()
         self._agent_button.updateGeometry()
 
     def _fallback_agent_icon(self) -> QtGui.QIcon:
