@@ -1472,11 +1472,21 @@ def test_update_failure_is_reported_in_the_feed_not_silently(qapp, monkeypatch, 
     widget.shutdown()
 
 
-def test_panel_or_fx_update_gets_instructions_not_a_silent_attempt(qapp, monkeypatch):
-    """The panel can't safely replace the pip package it's currently running
-    from — telling the artist how beats pretending an in-place update
-    happened."""
+def test_panel_or_fx_update_runs_a_real_worker_not_just_instructions(qapp, monkeypatch):
+    """Measured safe before this changed (`self_update.py`'s own docstring:
+    both Houdini installs, macOS and Linux, a real hython with
+    pydantic_core actually imported and used) — the panel now runs the
+    update for real, in its own process, instead of only ever printing the
+    command and hoping the artist runs it. `SelfUpdateWorker.work` is
+    stubbed here (no real subprocess/network in a unit test); the signal
+    wiring itself is the real thing, same as every other worker in this
+    file — see the module docstring on preferring real signals to fakes.
+    """
     from houdini_agent_panel.updates import Update
+    from houdini_agent_panel.ui.self_update import SelfUpdateWorker
+
+    started: list[str] = []
+    monkeypatch.setattr(SelfUpdateWorker, "work", lambda self: started.append(self._target))
 
     widget = _make_panel(qapp)
     update = Update(
@@ -1493,17 +1503,191 @@ def test_panel_or_fx_update_gets_instructions_not_a_silent_attempt(qapp, monkeyp
 
     widget._notice.action_clicked.emit(update.target, "")
 
-    current_session = widget._current_session()
-    session_id = current_session.session_id if current_session else "__idle__"
-    feed_text = " ".join(e.text for e in widget._model(session_id).entries())
-    # `uvx --refresh`, not pip: that is how the README installs it, and
-    # without --refresh uvx would serve its cached copy of the old version.
-    assert "uvx --refresh --from houdini-agent-panel" in feed_text
-    # And the banner goes. It used to stay, on the reasoning that nothing had
-    # been done about the update — but pressing Update again can only repeat
-    # the same instruction, and it was reported as three identical messages
-    # stacked in the feed.
-    assert widget._notice.isHidden() is True
+    assert widget._panel_update_worker is not None, "the notice's Update button must start a real worker"
+    # The offer is replaced by the running update, not left stacked
+    # alongside it — pressing Update again while one is already in flight
+    # is a no-op (`_start_update`'s own guard), not a second update.
+    assert widget._active_update is None
+    assert "Updating" in widget._notice._label.text()
+
+    widget._panel_update_worker.wait(3000)
+    qapp.processEvents()
+    assert started == ["houdini-agent-panel"]
+
+    widget.shutdown()
+
+
+def test_panel_update_progress_updates_the_visible_notice(qapp):
+    """The artist watching a strip that keeps changing is the difference
+    between "it's working" and "did my click even land" — pip/uv's own
+    output lines ARE the progress signal, there is no separate percentage
+    computed anywhere."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+
+    widget._on_panel_update_progressed(update, "Downloading houdini_agent_panel-1.2.0-py3-none-any.whl")
+
+    assert "Downloading houdini_agent_panel-1.2.0" in widget._notice._label.text()
+    assert widget._notice.isHidden() is False
+
+    widget.shutdown()
+
+
+def test_panel_update_success_shows_a_persistent_restart_notice(qapp):
+    """"Say plainly that the new version is installed and takes effect
+    after Houdini restarts, and keep saying it — a persistent state, not a
+    line that scrolls away in the feed." Also names the lazy-import hazard
+    `self_update.py` measured, rather than staying silent about it."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+
+    widget._on_panel_update_succeeded(update)
+
+    assert widget._panel_update_worker is None
+    assert widget._panel_update_restart_pending is update
+    text = widget._notice._label.text()
+    assert "1.2.0" in text
+    assert "restart" in text.lower()
+    assert "new agent" in text.lower() or "new" in text.lower()
+    assert widget._notice.isHidden() is False
+
+    widget.shutdown()
+
+
+def test_panel_update_success_notice_survives_a_later_refresh_cycle(qapp):
+    """The restart reminder must not be silently replaced by some OTHER
+    agent's update banner or a fresh announcement arriving from the next
+    periodic refresh — that reads as the reminder being resolved when it
+    never was, and there is only one notice strip to show either in."""
+    from houdini_agent_panel.announcements import Announcement
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._on_panel_update_succeeded(update)
+
+    other_update = Update(kind="agent", target="kimi", label="Kimi CLI 2.0", current="1.0", latest="2.0")
+
+    class _Result:
+        announcements: list = [Announcement(id="a1", severity="info", title="unrelated announcement")]
+        updates = [other_update]
+
+    widget._on_refresh_done(_Result(), [])
+    qapp.processEvents()
+
+    assert widget._panel_update_restart_pending is update
+    text = widget._notice._label.text()
+    assert "1.2.0" in text and "restart" in text.lower()
+
+    widget.shutdown()
+
+
+def test_a_refresh_arriving_mid_update_does_not_clobber_the_progress_notice(qapp, monkeypatch):
+    """A periodic update-check landing WHILE `SelfUpdateWorker` is still
+    running is a real timing window, not a hypothetical — `_on_refresh_
+    done`'s own early return used to trigger only once the update had
+    already SUCCEEDED (`_panel_update_restart_pending`), leaving the
+    IN-FLIGHT progress display unprotected: an announcement or another
+    agent's update banner arriving during the run would erase the only
+    indicator the artist has that anything is happening at all."""
+    from houdini_agent_panel.announcements import Announcement
+    from houdini_agent_panel.updates import Update
+    from houdini_agent_panel.ui.self_update import SelfUpdateWorker
+
+    # A worker that stays "running" for a moment — this test only needs
+    # `_panel_update_worker is not None` to still be true when the refresh
+    # lands, not a real result.
+    monkeypatch.setattr(SelfUpdateWorker, "work", lambda self: QtCore.QThread.msleep(500))
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._start_update(update)
+    widget._on_panel_update_progressed(update, "Downloading…")
+    progress_text = widget._notice._label.text()
+
+    other_update = Update(kind="agent", target="kimi", label="Kimi CLI 2.0", current="1.0", latest="2.0")
+
+    class _Result:
+        announcements: list = [Announcement(id="a1", severity="info", title="unrelated announcement")]
+        updates = [other_update]
+
+    widget._on_refresh_done(_Result(), [])
+    qapp.processEvents()
+
+    assert widget._notice._label.text() == progress_text
+
+    widget._panel_update_worker.requestInterruption()
+    widget._panel_update_worker.wait(3000)
+    widget.shutdown()
+
+
+def test_panel_update_failure_names_the_reason_and_restores_the_offer(qapp, monkeypatch):
+    """On failure: the exact reason, and only THEN the manual command as a
+    fallback — never the only route any more. The original offer comes
+    back so retrying is one click, not a re-explanation."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._panel_update_worker = object()  # stands in for "one was running"
+
+    widget._on_panel_update_failed(
+        update,
+        "Could not write the new files for houdini-agent-panel — something still has "
+        "them open. Close Houdini and run the update again.",
+    )
+
+    assert widget._panel_update_worker is None
+    assert any("close houdini" in n.lower() for n in notes)
+    assert widget._active_update is update
+    assert widget._notice.isHidden() is False
+
+    widget.shutdown()
+
+
+def test_dismissing_the_restart_notice_does_not_pollute_seen_announcements(qapp):
+    """The restart-pending id is synthetic, not a real feed announcement —
+    `_remember_seen` writing it to `settings.seen_announcements` would be
+    silently wrong (it can never match anything a real feed sends) even
+    though nothing outwardly breaks; the dismiss path has to know the
+    difference, the same way it already knows an update offer's id isn't
+    one either."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._on_panel_update_succeeded(update)
+    notice_id = panel_mod._panel_update_notice_id(update)
+
+    widget._on_notice_dismissed(notice_id)
+
+    assert widget._panel_update_restart_pending is None
+    saved = settings_mod.load()
+    assert notice_id not in saved.seen_announcements
 
     widget.shutdown()
 
@@ -1665,11 +1849,16 @@ def test_a_first_install_refreshes_the_menu_and_says_what_to_do(qapp, monkeypatc
     widget.shutdown()
 
 
-def test_the_panels_own_update_gives_a_command_that_works_and_stops_repeating(qapp, monkeypatch):
-    """Pressing Update on a panel update printed `pip install --upgrade` —
-    not how anyone installed this — and left the notice up, so pressing it
-    again repeated the line. Reported as three identical messages stacked."""
+def test_the_panels_own_update_runs_immediately_and_clears_the_offer(qapp, monkeypatch):
+    """Pressing Update on a panel update used to only ever print `uvx
+    --refresh --from ... install` and leave the notice up so pressing it
+    again repeated the same line (reported as three identical messages
+    stacked). Now it runs that exact command for real
+    (`SelfUpdateWorker.work` stubbed here — no real subprocess in a unit
+    test) and clears the offer immediately, since a second click while one
+    is already in flight must be a no-op, not a second update."""
     from houdini_agent_panel.ui import panel as panel_mod
+    from houdini_agent_panel.ui.self_update import SelfUpdateWorker
 
     class _Update:
         kind = "panel"
@@ -1678,16 +1867,20 @@ def test_the_panels_own_update_gives_a_command_that_works_and_stops_repeating(qa
         current = "0.1.4"
         label = "houdini-agent-panel 0.1.6"
 
+    started: list[str] = []
+    monkeypatch.setattr(SelfUpdateWorker, "work", lambda self: started.append(self._target))
+
     widget = panel_mod.AgentPanel()
-    notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
     widget._active_update = _Update()
 
     widget._start_update(_Update())
 
-    assert "uvx" in notes[-1], f"the command must be the one that installs it: {notes[-1]!r}"
-    assert "--refresh" in notes[-1], "without --refresh uvx serves its cached copy"
-    assert widget._active_update is None, "the notice stays up and repeats on the next press"
+    assert widget._panel_update_worker is not None, "the manual command alone is no longer the whole story"
+    assert widget._active_update is None, "the offer stays up and repeats on the next press"
+
+    widget._panel_update_worker.wait(3000)
+    qapp.processEvents()
+    assert started == ["houdini-agent-panel"]
     widget.shutdown()
 
 

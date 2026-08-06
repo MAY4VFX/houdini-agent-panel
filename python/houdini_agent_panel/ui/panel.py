@@ -32,6 +32,7 @@ from typing import Any
 
 from .. import client as acp_client
 from .. import refresh, scene, sessions, settings as settings_mod
+from ..announcements import Announcement
 from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
@@ -124,6 +125,18 @@ def _apply_network_settings(current: settings_mod.Settings) -> None:
         )
     except Exception:  # noqa: BLE001 - a misconfigured proxy must not stop the panel
         pass
+
+
+def _panel_update_notice_id(update: Any) -> str:
+    """The synthetic `Announcement.id` a self-update's persistent "restart
+    Houdini" notice uses — distinct from `update.target` itself (the id
+    `NoticeStrip.show_update`/`_on_notice_action` already use for the
+    OFFER), so a leftover `_active_update` for some other package can
+    never be mistaken for this one, and so `_on_notice_dismissed` can tell
+    "dismissed the restart reminder" from "dismissed a real announcement"
+    without guessing from shape alone.
+    """
+    return f"panel-update-restart-pending:{update.target}"
 
 
 def _update_is_stale(update: Any) -> bool:
@@ -447,6 +460,19 @@ class AgentPanel(QtWidgets.QWidget):
         #: (same signal, same slot); this is how `_on_notice_action` tells
         #: them apart.
         self._active_update: Any = None
+        #: The in-flight `SelfUpdateWorker`, if the notice strip's "Update"
+        #: button is currently running a panel/fxhoudinimcp update — see
+        #: `_start_update`. `None` the rest of the time, including right
+        #: after it finishes (`_on_panel_update_succeeded`/`_failed` clear
+        #: it themselves, same shape as every other worker field here).
+        self._panel_update_worker: Any = None
+        #: The `Update` a self-update just finished installing, set by
+        #: `_on_panel_update_succeeded` and never cleared by anything
+        #: except this panel actually closing — a fact true for the rest
+        #: of THIS Houdini session belongs on screen the whole time, not
+        #: as a line the feed scrolls away (`_on_refresh_done` defers to
+        #: it instead of replacing it with some other banner).
+        self._panel_update_restart_pending: Any = None
         #: Set right before stopping the currently-running agent to update
         #: it out from under itself — the agent_id to bring back up once
         #: that update actually finishes (`_on_agent_install_succeeded`).
@@ -1880,6 +1906,22 @@ class AgentPanel(QtWidgets.QWidget):
     # ------------------------------------------------- announcements and updates
 
     def _on_refresh_done(self, result: Any, entries: Any = ()) -> None:
+        # A self-update is running, or one just finished and Houdini hasn't
+        # restarted since — either way the notice strip is already saying
+        # something this panel needs the artist to keep seeing. An agent-
+        # update banner or an announcement arriving from a periodic refresh
+        # that happens to land in the middle must not silently replace it:
+        # mid-update that would erase the ONLY progress indicator there is;
+        # afterwards it reads as the restart reminder being resolved when
+        # it never was. There is only one notice strip to show either in.
+        # Registry entries still update underneath it (the settings
+        # screen's own agent rows need them regardless), only the STRIP is
+        # held.
+        if self._panel_update_worker is not None or self._panel_update_restart_pending is not None:
+            if entries:
+                self._registry_entries = list(entries)
+            self._refresh_agent_chip_menu()
+            return
         # The agents section doesn't hit the network itself: its
         # `refresh_from_registry` is synchronous, so calling it from the
         # main thread would freeze Houdini for the length of a network
@@ -1949,38 +1991,122 @@ class AgentPanel(QtWidgets.QWidget):
         if self._active_update is not None and self._active_update.target == identifier:
             self._active_update = None
             return  # an update dismissal isn't an announcement id — nothing to remember
+        pending = self._panel_update_restart_pending
+        if pending is not None and _panel_update_notice_id(pending) == identifier:
+            # Dismissed on purpose, not resolved — closing the ✕ doesn't
+            # mean Houdini got restarted. The artist saw it once and chose
+            # to move on; that's their call, same as any other notice. It
+            # will not come back on its own (`_on_refresh_done` only
+            # RE-shows it, never re-fires it after a dismissal) — matching
+            # every other announcement's own dismiss-is-final shape.
+            self._panel_update_restart_pending = None
+            return  # not a real announcement id either — nothing to remember
         self._remember_seen(identifier)
 
     def _start_update(self, update: Any) -> None:
         """The notice strip's "Update" button, actually doing something.
 
-        Only agents update through this panel: `update.kind` "panel"/"fx"
-        names a package on PyPI, and this process can't safely replace the
-        package it is currently running FROM out from under itself — that
-        needs the artist to run pip and restart Houdini, the same as the
-        first install (docs/design.md, "Installation"). Pretending to do it
-        in place would be the more dangerous silence, not the honest one.
+        Agents update through `AgentsView`/`runtime.install_agent` already
+        (a subprocess of its own, on `_InstallWorker`'s thread) — this
+        branch is `update.kind` "panel"/"fx", a package this SAME process
+        is running from. It used to just tell the artist the command to
+        type by hand, reasoning that a process cannot safely rewrite the
+        tree it imported itself from. That half is true; the conclusion
+        was too cautious.
+
+        Measured before this changed (both Houdini installs, macOS and
+        Linux, a real `hython` with `pydantic_core` actually imported and
+        a model actually validated, not just constructed): `pip install
+        --upgrade --target <tree>` against a tree the running process has
+        ALREADY loaded from succeeds, and the process survives — POSIX
+        lets you unlink and rewrite a file that's open or mapped, and an
+        already-imported module stays exactly as it was in memory. So the
+        update itself is safe to run automatically; running it IN this
+        process is what would not be (`self_update.py`'s own docstring has
+        the rest, including what does NOT survive: a module this process
+        had not imported yet at the moment the tree changes).
+
+        So `_start_update` now runs it for real, in a separate process
+        (`SelfUpdateWorker`, off this thread) — the exact command that used
+        to be the manual advice, `uvx --refresh --from <target> python -m
+        houdini_agent_panel install`, just run by the panel instead of
+        typed by the artist. The manual command is still what's offered on
+        failure (`_on_panel_update_failed`), now a fallback rather than the
+        only route.
         """
         if update.kind != "agent":
-            # Say the command that actually works, and say it once. The
-            # advice used to be `pip install --upgrade`, which is not how
-            # anyone installed this — the README's one-liner is uvx, and pip
-            # would miss the `--refresh` that stops uvx serving its cached
-            # copy. And the notice stayed up afterwards, so pressing Update
-            # again just repeated the same line; reported as three identical
-            # messages stacked in the feed.
-            self._note(
-                f"{update.target} can't replace itself while Houdini is running it. Run:\n"
-                f"    uvx --refresh --from {update.target} python -m houdini_agent_panel install\n"
-                "then restart Houdini."
+            if self._panel_update_worker is not None:
+                return  # already running — a second click while it's in flight is a no-op, not a second update
+            from .self_update import SelfUpdateWorker
+
+            self._panel_update_worker = SelfUpdateWorker(update.target, parent=self)
+            self._panel_update_worker.progressed.connect(
+                lambda line, u=update: self._on_panel_update_progressed(u, line)
+            )
+            self._panel_update_worker.succeeded.connect(
+                lambda u=update: self._on_panel_update_succeeded(u)
+            )
+            self._panel_update_worker.failed.connect(
+                lambda message, u=update: self._on_panel_update_failed(u, message)
             )
             self._active_update = None
-            self._notice.hide_notice()
+            self._on_panel_update_progressed(update, "starting…")
+            self._panel_update_worker.start()
             return
         self._show_page(self.PAGE_SETTINGS)
         self._settings_view.focus_agents()
         if not self._settings_view.trigger_agent_update(update.target):
             self._note(f"Could not find {update.label} to update — try Settings → Agents.")
+
+    def _on_panel_update_progressed(self, update: Any, line: str) -> None:
+        # The strip becomes the progress display for as long as this
+        # runs — pip/uv's own lines ("Downloading X", "Collecting Y") ARE
+        # the progress signal, there is no separate percentage to compute,
+        # and the artist watching a strip that keeps changing is the
+        # difference between "it's working" and "did my click even land".
+        self._notice.show_notice(
+            Announcement(
+                id=f"panel-update-progress:{update.target}",
+                severity="info",
+                title=f"Updating {update.label}… {line}",
+            )
+        )
+
+    def _on_panel_update_succeeded(self, update: Any) -> None:
+        self._panel_update_worker = None
+        self._panel_update_restart_pending = update
+        self._show_panel_update_restart_notice()
+
+    def _show_panel_update_restart_notice(self) -> None:
+        update = self._panel_update_restart_pending
+        if update is None:
+            return
+        self._notice.show_notice(
+            Announcement(
+                id=_panel_update_notice_id(update),
+                severity="info",
+                title=(
+                    f"Updated {update.label} to {update.latest} — takes effect after "
+                    "Houdini restarts. Starting a different agent for the first time "
+                    "before then isn't recommended: some of the panel's own code may "
+                    "now be a mix of old and new."
+                ),
+            )
+        )
+
+    def _on_panel_update_failed(self, update: Any, message: str) -> None:
+        self._panel_update_worker = None
+        # `message` is already classified (`self_update._classify_failure`)
+        # — a download failure, a write failure (the Windows sharing-
+        # violation case above all), or the manual command if `uv` itself
+        # couldn't be found. Whichever it is, it goes to the feed: unlike
+        # success, a failure doesn't need to keep being said once the
+        # artist has read it, and the ORIGINAL offer comes back so trying
+        # again is one click, not a re-explanation.
+        self._note(f"Updating {update.label} failed.\n{message}")
+        if self._active_update is None:
+            self._active_update = update
+        self._notice.show_update(update)
 
     def _before_agent_install(self, agent_id: str) -> None:
         """About to overwrite `agent_id`'s files on disk (install OR update,
@@ -3160,6 +3286,15 @@ class AgentPanel(QtWidgets.QWidget):
                 sweep.done.disconnect(self._on_orphans_swept)
             worker_module.release(sweep)
             self._orphan_sweep_worker = None
+
+        panel_update = getattr(self, "_panel_update_worker", None)
+        if panel_update is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                panel_update.progressed.disconnect()
+                panel_update.succeeded.disconnect()
+                panel_update.failed.disconnect()
+            worker_module.release(panel_update)
+            self._panel_update_worker = None
 
         # Same reasoning as `_switch_agent_process`/`_show_page`: this
         # process polls indefinitely on its own (docs/facts/acp-sdk.md
