@@ -36,12 +36,21 @@ fi
 # Neither is available. Bring in uv — a single static binary in the user's
 # home folder, no root, no system package manager. The same trick Houdini
 # itself uses by shipping its own Python.
+#
+# `--connect-timeout`/`--timeout` on both fetches below: measured for real
+# on a studio machine whose firewall silently drops (not refuses) egress to
+# some hosts unless a proxy is exported first — plain `curl`/`wget` with no
+# timeout of their own then hang with ZERO output for minutes, past any
+# patience a "one command to install" is supposed to need. 15s is generous
+# for a TLS handshake to a CDN and still fails fast enough to read as "the
+# network, not the installer" — which is the one sentence this needs to get
+# across if it fails here.
 if has curl; then
     say "Couldn't find uvx or pipx, fetching uv…"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl --connect-timeout 15 -LsSf https://astral.sh/uv/install.sh | sh
 elif has wget; then
     say "Couldn't find uvx or pipx, fetching uv…"
-    wget -qO- https://astral.sh/uv/install.sh | sh
+    wget --timeout=15 -qO- https://astral.sh/uv/install.sh | sh
 else
     die "Need curl or wget to download anything. Install either one and try again."
 fi

@@ -25,7 +25,7 @@ themselves belong upstream. 🙏
 **macOS · Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.sh | sh
+curl -fsSL --connect-timeout 15 https://raw.githubusercontent.com/MAY4VFX/houdini-agent-panel/main/scripts/install.sh | sh
 ```
 
 **Windows** (PowerShell)
@@ -45,6 +45,12 @@ Restart Houdini → **Tab → Python Panels → Agent**. 🎉
 The installer finds every Houdini on the machine and installs into each one's
 own Python — 20.5 ships 3.11, 22 ships 3.13, and `pydantic`'s compiled core
 means one shared tree for both is impossible.
+
+Behind a proxy? Export it in the shell running the command above —
+`export HTTPS_PROXY=http://proxy.studio.local:8080` before the `curl`/`irm`
+line. This install step runs before the panel exists, so it can't yet read
+the **Settings → Network** field described in "Behind a studio proxy" below;
+once it's installed, the panel picks up the same variable on its own.
 
 ## 🤖 Agents
 
