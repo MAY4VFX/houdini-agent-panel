@@ -539,11 +539,12 @@ EntryKind = Literal["user", "agent", "thought", "tool", "plan", "permission", "e
 @dataclass
 class Entry:
     kind: EntryKind
-    id: str              # message_id / tool_call_id / uuid
+    id: str              # "<kind>:<message_id>" / tool_call_id / uuid
     text: str = ""
     tool: ToolCallView | None = None
     plan: list[PlanEntry] = ...
     permission: PermissionView | None = None
+    attachments: list[dict] = ...   # user entries only: the blocks sent with the line
 
 @dataclass
 class ToolCallView:
@@ -564,13 +565,24 @@ class PermissionView:
 class TranscriptModel:
     """Folds the session/update stream into a list of Entry.
 
-    Chunks sharing a message_id are stitched into a single entry —
-    otherwise the feed turns into a hundred one-letter paragraphs.
+    Chunks sharing a message_id AND a kind are stitched into a single
+    entry — otherwise the feed turns into a hundred one-letter paragraphs.
+    Kind matters as much as the id: `messageId` names the agent's MESSAGE,
+    not one stream inside it, and opencode sends its reasoning and its
+    answer under the same one. Keying on the id alone gave two entries the
+    same `Entry.id`, and `TranscriptView` resolves an id by taking the first
+    entry that carries it — so the answer was drawn into the thought's row
+    and never appeared. Hence the `"<kind>:<message_id>"` id above.
     tool_call_update finds the entry by tool_call_id and patches only the
     fields that arrived (None = "unchanged"). plan replaces the previous
     plan wholesale (the protocol sends the full list).
+
+    Persistence keeps text and, for a user line, a NAME-ONLY record of what
+    was attached (`to_records`): the base64 payload of an image is never
+    written to the conversation store — a restored transcript is a
+    read-only replay and could not resend those bytes anyway.
     """
-    def append_user(self, text: str) -> Entry
+    def append_user(self, text: str, attachments: list[dict] | None = None) -> Entry
     def apply_chunk(self, message_id: str, text: str, *, thought: bool = False) -> Entry
     def apply_tool_call(self, call) -> Entry
     def apply_tool_update(self, update) -> Entry | None
@@ -753,7 +765,15 @@ class TranscriptView(QtWidgets.QScrollArea):
     def reset_thinking_after_tool(self) -> None
     def refresh(self, entry_id: str | None = None) -> None
         """entry_id=None — redraw everything (session switch). Otherwise — only one
-        entry: redrawing the whole feed on every streamed chunk is visibly janky."""
+        entry: redrawing the whole feed on every streamed chunk is visibly janky.
+
+        Always synchronous: this view draws when asked. HOW OFTEN it is asked is
+        `AgentPanel._touch`'s decision — chunks (`streamed=True`) are collected in
+        `_dirty_entries` and drawn once per event-loop pass, everything else draws
+        at once. Drawing a message re-parses its whole text through
+        `QTextDocument.setMarkdown`, so an answer that grows chunk by chunk is
+        quadratic: measured, 3000 chunks (~150 KB) cost 8.5s of the UI thread
+        undrained, 0.47s when a burst of 20 collapses into one render."""
     def current_gutter(self) -> int
         """The empty margin left of the 706-736px reading column at the current
         width. AgentPanel sizes the conversation drawer to fit inside it."""

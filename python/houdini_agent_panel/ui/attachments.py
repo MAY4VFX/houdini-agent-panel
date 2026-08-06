@@ -66,11 +66,33 @@ def pixmap(block: dict, size: int) -> "QtGui.QPixmap | None":
     image = QtGui.QPixmap()
     if not image.loadFromData(raw):
         return None
-    if image.width() <= size and image.height() <= size:
-        return image
-    return image.scaled(
-        size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
-    )
+    if image.width() > size or image.height() > size:
+        image = image.scaled(
+            size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+    return image
 
 
-__all__ = ["label", "pixmap", "source_uri"]
+def rounded(source: "QtGui.QPixmap", radius: int) -> "QtGui.QPixmap":
+    """The same preview with its corners cut.
+
+    A stylesheet `border-radius` does nothing to a `QLabel`'s pixmap — the
+    label's own background is what gets rounded, and the picture keeps its
+    square corners on top of it. Rounding has to happen in the pixels.
+    """
+    result = QtGui.QPixmap(source.size())
+    result.setDevicePixelRatio(source.devicePixelRatio())
+    result.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(result)
+    try:
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(source.rect()), radius, radius)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, source)
+    finally:
+        painter.end()
+    return result
+
+
+__all__ = ["label", "pixmap", "rounded", "source_uri"]

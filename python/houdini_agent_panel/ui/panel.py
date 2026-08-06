@@ -388,6 +388,10 @@ class AgentPanel(QtWidgets.QWidget):
         #: agent changes turns a useful sentence into noise.
         self._said_about_older_conversations = False
         self._models: dict[str, TranscriptModel] = {}
+        #: Entries of the VISIBLE session waiting to be drawn, in the order
+        #: they were touched (a dict for its ordering; values unused). See
+        #: `_touch` for why a streamed burst is collapsed into one render.
+        self._dirty_entries: dict[str, None] = {}
         self._pending_permissions: dict[str, str] = {}
         self._permission_views: dict[str, PermissionView] = {}
         self._permission_popover: PermissionRow | None = None
@@ -491,6 +495,13 @@ class AgentPanel(QtWidgets.QWidget):
         #: the trailing write at the end of the window checks.
         self._persist_cooldown_active = False
         self._persist_dirty = False
+        #: Drains `_dirty_entries` once the event queue has been. Parented to
+        #: `self`, never a bare `QTimer.singleShot`: a panel closed with a
+        #: render still queued must simply never fire it, not call into a
+        #: widget Qt has already deleted.
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_transcript)
 
         self._build()
         # Wired to the "" (no agent yet) client/pool for now — `_boot()`
@@ -1441,11 +1452,11 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
         entry = self._model(session_id).apply_chunk(message_id, text)
-        self._touch(session_id, entry.id)
+        self._touch(session_id, entry.id, streamed=True)
 
     def _on_thought_chunk(self, session_id: str, message_id: str, text: str) -> None:
         entry = self._model(session_id).apply_chunk(message_id, text, thought=True)
-        self._touch(session_id, entry.id)
+        self._touch(session_id, entry.id, streamed=True)
 
     def _on_tool_call(self, session_id: str, call: Any) -> None:
         entry = self._model(session_id).apply_tool_call(call)
@@ -1683,6 +1694,10 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _show_session(self, session_id: str) -> None:
         state = self._pool.get(session_id)
+        # Whatever was queued belongs to the conversation being left, and
+        # the full redraw below covers this one from scratch anyway.
+        self._dirty_entries.clear()
+        self._render_timer.stop()
         self._transcript.set_model(self._model(session_id))
         self._transcript.refresh(None)
         if state is not None:
@@ -1913,7 +1928,7 @@ class AgentPanel(QtWidgets.QWidget):
         current = self._current_session()
         return current is not None and current.session_id == session_id
 
-    def _touch(self, session_id: str, entry_id: str) -> None:
+    def _touch(self, session_id: str, entry_id: str, *, streamed: bool = False) -> None:
         """Redraw a single entry — only if the human is looking at this session.
 
         Otherwise streaming into a background session would make Qt reflow a
@@ -1922,14 +1937,48 @@ class AgentPanel(QtWidgets.QWidget):
         the first touch after it goes quiet, not on every following chunk —
         one `changed` signal per conversation going stale beats rebuilding
         the drawer for every streamed token.
+
+        `streamed=True` marks the one caller that arrives in bursts: a
+        message or thought chunk. Those are QUEUED, and everything touched
+        before the event loop comes back round is drawn once. Drawing a
+        message hands its whole text to `QTextDocument.setMarkdown`, so a
+        growing answer is re-parsed from the top on every chunk — measured,
+        a 150 KB answer arriving in 3000 chunks costs about eight seconds of
+        Houdini's own UI thread while the artist is trying to work.
+        Collapsing a burst into one render per pass costs a fraction of that
+        and looks identical: a frame that was never on screen is a frame
+        nobody saw.
+
+        Everything else — a tool call, the activity row, a plan, an error —
+        arrives at human speed and draws immediately, so that whatever reads
+        the feed's widgets next (`reset_thinking_after_tool`, for one) sees
+        a view that is actually up to date.
         """
         if self._is_current(session_id):
+            if streamed:
+                self._dirty_entries[entry_id] = None  # a set that keeps its order
+                if not self._render_timer.isActive():
+                    # 0 ms is not "right now": Qt fires a zero timer once the
+                    # event queue it is sitting in has drained — exactly the
+                    # burst this is here to collapse.
+                    self._render_timer.start(0)
+                return
+            self._flush_transcript()
             self._transcript.refresh(entry_id)
             return
         state = self._pool.get(session_id)
         if state is not None and not state.unread:
             state.unread = True
             self._pool.mark_changed(session_id)
+
+    def _flush_transcript(self) -> None:
+        """Draw every streamed chunk queued for the visible session."""
+        if not self._dirty_entries:
+            return
+        self._render_timer.stop()
+        pending, self._dirty_entries = self._dirty_entries, {}
+        for entry_id in pending:
+            self._transcript.refresh(entry_id)
 
     # ------------------------------------------------------------- input
 

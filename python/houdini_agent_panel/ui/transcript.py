@@ -555,10 +555,9 @@ class _AttachmentStrip(QtWidgets.QWidget):
 
     def _image(self, block: dict, preview: "QtGui.QPixmap") -> QtWidgets.QWidget:
         label = QtWidgets.QLabel(self)
-        label.setPixmap(preview)
+        label.setPixmap(attachment_view.rounded(preview, 8))
         label.setFixedSize(preview.size())
         label.setToolTip(attachment_view.label(block))
-        label.setStyleSheet("QLabel { border-radius: 8px; }")
         return label
 
     def _chip(self, block: dict) -> QtWidgets.QWidget:
