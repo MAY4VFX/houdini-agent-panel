@@ -35,26 +35,33 @@ class _ContentSizedToolButton(QtWidgets.QToolButton):
     ``QToolButton.sizeHint()`` regardless of whether the button said
     ``Claude Agent`` or ``Opus (1M context)``. The layout faithfully gave
     every control that width, leaving only ellipses. Keep the host's height
-    and chrome, but provide the missing content width ourselves. The native
-    minimum width remains zero, so a genuinely narrow dock can still shrink
-    the row instead of forcing the whole pane wider.
+    and chrome, but provide the missing content width ourselves. The
+    containing panel still advertises a narrow 180px minimum, so a
+    genuinely narrow dock can compress the row without making the pane itself
+    refuse to dock.
     """
 
-    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
-        hint = super().sizeHint()
+    def _content_width(self, horizontal_padding: int) -> int:
         text = self.text()
         if not text:
-            return hint
-        width = QtGui.QFontMetrics(self.font()).horizontalAdvance(text) + 16
+            return 0
+        width = QtGui.QFontMetrics(self.font()).horizontalAdvance(text) + horizontal_padding
         if not self.icon().isNull():
             style = self.toolButtonStyle()
             if style == QtCore.Qt.ToolButtonTextBesideIcon:
                 width += self.iconSize().width() + 4
             elif style == QtCore.Qt.ToolButtonTextUnderIcon:
-                width = max(width, self.iconSize().width() + 16)
+                width = max(width, self.iconSize().width() + horizontal_padding)
+        return width
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
+        hint = super().sizeHint()
+        width = self._content_width(16)
+        if not width:
+            return hint
         return QtCore.QSize(max(hint.width(), width), hint.height())
 
-    def reserve_content_width(self) -> None:
+    def reserve_content_width(self, horizontal_padding: int = 16) -> None:
         """Make Houdini's layout honour the content-aware hint.
 
         Its pane layout was also measured compressing these controls to the
@@ -63,7 +70,8 @@ class _ContentSizedToolButton(QtWidgets.QToolButton):
         label. The panel/composer's own ``minimumSizeHint`` caps still let a
         genuinely narrow pane dock at 180px.
         """
-        self.setMinimumWidth(self.sizeHint().width() if self.text() else 0)
+        width = self._content_width(horizontal_padding)
+        self.setMinimumWidth(max(self.sizeHint().width(), width) if width else 0)
 
 
 class ChoiceButton(QtWidgets.QWidget):
@@ -247,7 +255,9 @@ class ChoiceButton(QtWidgets.QWidget):
         shown = metrics.elidedText(label, QtCore.Qt.ElideMiddle, _MAX_CHOICE_LABEL_PX)
         self._button.setText(f"{shown}  ⌄" if self._show_caret else shown)
         self._button.setToolTip(description or (label if shown != label else ""))
-        self._button.reserve_content_width()
+        # A docked H20.5/H21 Python Pane Tab paints 16px of inset on each
+        # side but reports neither through sizeHint()/sizeFromContents().
+        self._button.reserve_content_width(32)
         self._button.updateGeometry()
 
     def _toggle_popup(self) -> None:

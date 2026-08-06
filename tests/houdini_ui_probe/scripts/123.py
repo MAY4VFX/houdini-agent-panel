@@ -164,6 +164,8 @@ def _capture():
     installed_panel_image = None
     installed_note_prose = None
     if os.environ.get("HAP_USE_INSTALLED_PANEL") == "1":
+        import hou
+
         from houdini_agent_panel import settings as settings_mod
         from houdini_agent_panel.ui import panel as panel_mod
 
@@ -176,16 +178,57 @@ def _capture():
         )
         panel_mod._RefreshWorker.start = lambda self: None
         panel_mod._OrphanSweepWorker.start = lambda self: None
-        installed_panel = panel_mod.AgentPanel()
-        installed_panel.resize(968, 700)
-        installed_panel.show()
+        # Exercise the real host hierarchy. A standalone AgentPanel looked
+        # correct while Houdini's Python Pane Tab compressed the exact same
+        # controls, so the old probe could green-light the user's bug.
+        desktop = hou.ui.curDesktop()
+        anchor = next(iter(desktop.paneTabs()))
+        pane_tab = anchor.pane().createTab(hou.paneTabType.PythonPanel)
+        pane_tab.setActiveInterface(hou.pypanel.interfaceByName("hap::agent"))
         app.processEvents()
         app.processEvents()
+        installed_panel = pane_tab.activeInterfaceRootWidget()
+        if installed_panel is None:
+            raise RuntimeError(
+                "hap::agent did not create a root widget: "
+                + pane_tab.activeInterfaceScriptErrors()
+            )
         installed_panel._show_page(installed_panel.PAGE_TRANSCRIPT)
         installed_panel._header.set_agent("Codex", None)
         installed_panel._note("Codex 1.1.9 · /Users/may")
         installed_panel._composer.set_modes(
-            [SessionMode("agent", "Agent"), SessionMode("plan", "Plan")], "agent"
+            [
+                SessionMode("read-only", "Read Only"),
+                SessionMode("agent", "Agent"),
+                SessionMode("agent-full-access", "Agent Full Access"),
+            ],
+            "agent",
+        )
+        installed_panel._composer.set_config_options(
+            [
+                SimpleNamespace(
+                    id="model",
+                    name="Model",
+                    current_value="gpt-5.6-sol",
+                    category="model_config",
+                    choices=(
+                        SimpleNamespace(
+                            value="gpt-5.6-sol", name="GPT-5.6-Sol", description=""
+                        ),
+                        SimpleNamespace(value="gpt-5.5", name="GPT-5.5", description=""),
+                    ),
+                ),
+                SimpleNamespace(
+                    id="reasoning_effort",
+                    name="Reasoning effort",
+                    current_value="medium",
+                    category="thought_level",
+                    choices=(
+                        SimpleNamespace(value="medium", name="Medium", description=""),
+                        SimpleNamespace(value="high", name="High", description=""),
+                    ),
+                ),
+            ]
         )
         app.processEvents()
         app.processEvents()
@@ -335,6 +378,19 @@ def _capture():
         label_width = QtGui.QFontMetrics(chip._button.font()).horizontalAdvance(label)
         if chip._button.width() < label_width + 8:
             failures.append("Composer choice clips its label: " + label)
+    if installed_panel is not None:
+        installed_choices = [
+            installed_panel._composer.mode_chip._combo,
+            *installed_panel._composer._config_chips,
+        ]
+        for chip in installed_choices:
+            label = chip._button.text()
+            label_width = QtGui.QFontMetrics(chip._button.font()).horizontalAdvance(label)
+            # Houdini's docked Python Pane Tab paints 16px of inset on BOTH
+            # sides although its native QToolButton hint reports only 38px.
+            # A merely nominal text-width geometry still renders A...t.
+            if chip._button.width() < label_width + 32:
+                failures.append("Python Pane Tab clips its composer choice: " + label)
     if expect_fx and fx_port is None:
         failures.append("fxhoudinimcp plugin did not start in this Houdini")
     result["failures"] = failures
