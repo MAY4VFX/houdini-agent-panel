@@ -944,6 +944,38 @@ def test_open_drawer_never_moves_the_conversation(qapp):
     widget.shutdown()
 
 
+def test_bug_report_link_does_not_shift_when_the_drawer_opens(qapp):
+    """The same "the drawer never moves anything" guarantee
+    (`test_open_drawer_never_moves_the_conversation`), for the newest
+    thing living in that footer band: the "Report a bug…" link sits below
+    the composer's own input box, and the drawer draws inside `Transcript
+    View`'s existing gutter without ever touching `_body`/`Composer`'s
+    own geometry — this link was never wired to hear about the drawer at
+    all, so nothing about it CAN shift; checked here at the panel level,
+    not just the composer-only claim `test_ui_composer.py` already covers,
+    since this is what the owner actually asked to be sure of.
+    """
+    widget = _make_panel(qapp)
+    widget.resize(1000, 700)
+    widget.show()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_TRANSCRIPT)
+    qapp.processEvents()
+
+    link = widget._composer._bug_report_link
+    link_x_before = link.mapTo(widget, QtCore.QPoint(0, 0)).x()
+
+    widget._conversations.open_drawer()
+    qapp.processEvents()
+    assert link.mapTo(widget, QtCore.QPoint(0, 0)).x() == link_x_before
+
+    widget._conversations.close_drawer()
+    qapp.processEvents()
+    assert link.mapTo(widget, QtCore.QPoint(0, 0)).x() == link_x_before
+
+    widget.shutdown()
+
+
 def test_narrow_panel_also_never_moves_the_feed(qapp):
     widget = _make_panel(qapp)
     widget.resize(320, 700)

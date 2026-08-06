@@ -43,6 +43,12 @@ _RAIL_WIDTH = 736
 #: minimum — which pinned the whole panel at 736px and made it impossible to
 #: dock the panel in a normal, narrow Houdini pane.
 _MIN_RAIL_WIDTH = 180
+#: Below this surface width, the "Report a bug…" footer link hides rather
+#: than clip or wrap — see `_position_bug_report_link`'s own docstring.
+#: `_MIN_RAIL_WIDTH` (180) plus enough for the link's own text at the panel's
+#: default font, measured, plus a margin so it never sits flush against the
+#: surface's own right edge even right at the threshold.
+_LINK_MIN_SURFACE_WIDTH = 260
 
 
 class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
@@ -529,6 +535,12 @@ class Composer(QtWidgets.QWidget):
     config_option_selected = Signal(str, str)  # config_id, value
     attachment_rejected = Signal(str)
     buddy_selected = Signal(str)
+    #: The footer's own "Report a bug" link. Placement was the owner's own
+    #: call, by screenshot: the thin strip below the input box, not the
+    #: header, not a floating corner control — see `_position_bug_report_
+    #: link`'s own docstring for how it avoids moving the input box or the
+    #: conversation drawer moving it sideways.
+    bug_report_link_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -640,7 +652,13 @@ class Composer(QtWidgets.QWidget):
         surface_layout.addLayout(action_row)
 
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 42, 0, 14)
+        # Bottom margin grew from 14 to make permanent room for the bug-
+        # report link below the input box — a FIXED part of this layout
+        # from construction on, not something that appears/disappears and
+        # shifts the box around later. `self._surface`'s own position is
+        # governed by the TOP margin and its own height, both unaffected by
+        # this, so the input box's position does not move because of it.
+        main_layout.setContentsMargins(0, 42, 0, 30)
         main_layout.setAlignment(QtCore.Qt.AlignHCenter)
         main_layout.addWidget(self._surface, 0, QtCore.Qt.AlignHCenter)
 
@@ -663,6 +681,21 @@ class Composer(QtWidgets.QWidget):
         self._boot_scrim = _BootScrim(self)
         self._entrance = BuddyEntrance(self)
         self._entrance.finished.connect(self._on_entrance_finished)
+
+        # "где-нибудь в правом углу мелким текстом кнопочка" (owner) — a
+        # small, quiet text control, not a toolbar button competing with
+        # Send/voice/mode for attention; findable when wanted, invisible
+        # otherwise. Same free-floating-child, positioned-in-`resizeEvent`
+        # technique as `_buddy`/`_boot_status` just above, for the same
+        # reason stated on both of those: living outside `main_layout`
+        # means its own size is never what determines where the input box
+        # sits, so it cannot be the thing that nudges the box around.
+        self._bug_report_link = QtWidgets.QPushButton("Report a bug…", self)
+        self._bug_report_link.setObjectName("bugReportLink")
+        self._bug_report_link.setCursor(QtCore.Qt.PointingHandCursor)
+        self._bug_report_link.setFlat(True)
+        self._bug_report_link.clicked.connect(self.bug_report_link_clicked.emit)
+        self._bug_report_link.adjustSize()
 
         self.setStyleSheet(
             "QFrame#composerSurface {"
@@ -695,6 +728,17 @@ class Composer(QtWidgets.QWidget):
             " background: palette(alternate-base);"
             " border-radius: 6px;"
             "}"
+            # A footer link, not a toolbar button: no border, no fill, no
+            # radius pill — just muted text that reads as "text" until
+            # hovered, matching the owner's own description of it.
+            "QPushButton#bugReportLink {"
+            " border: none; background: transparent; padding: 0;"
+            " color: palette(disabled, text); font-size: 11px;"
+            " text-align: left;"
+            "}"
+            "QPushButton#bugReportLink:hover {"
+            " color: palette(text); text-decoration: underline;"
+            "}"
         )
 
         self._adjust_text_height()
@@ -725,6 +769,7 @@ class Composer(QtWidgets.QWidget):
         )
         self._buddy.raise_()
         self._layout_boot_widgets(surface_x, surface_y)
+        self._position_bug_report_link(surface_x, surface_y)
 
     # --- public contract (docs/architecture.md §10) -----------------------
 
@@ -864,6 +909,44 @@ class Composer(QtWidgets.QWidget):
         # animation ends exactly where the sprite sits.
         self._entrance.setGeometry(self._entrance.geometry_for(self._buddy.geometry()))
         self._entrance.raise_()
+
+    def _position_bug_report_link(self, surface_x: int, surface_y: int) -> None:
+        """The footer strip, below the input box.
+
+        Free-floating (never added to `main_layout`), same as `_buddy`/the
+        boot widgets above — its own size can never be the thing that
+        determines where the input box sits, which is what "must not add
+        height that pushes the input box up" (owner's own placement brief)
+        actually requires: not that no pixel anywhere ever changed, but
+        that the link's presence can't be the cause. `surface_x`/`surface_
+        y` are the SAME numbers the input box and the buddy sprite are
+        already positioned from, so this can never drift out of alignment
+        with either of them, whether or not the conversation drawer is
+        open — the drawer draws inside `TranscriptView`'s own gutter
+        (`AgentPanel._body_layout`'s own note) and never touches the
+        composer's geometry at all.
+
+        Below `_LINK_MIN_SURFACE_WIDTH`, hidden rather than clipped or
+        wrapped — a deliberate choice, not a fallthrough: at the panel's
+        narrowest docked widths the surface itself is already down to its
+        180px floor, where a link squeezed in below it would either
+        overlap the surface or read as illegible clipped text. Settings
+        keeps its own "Report a bug…" entry reachable at any width
+        (`SettingsView`'s Data section), so hiding this one narrow does
+        not remove the feature, only this particular shortcut to it.
+        """
+        width = self._surface.width()
+        if width < _LINK_MIN_SURFACE_WIDTH:
+            self._bug_report_link.hide()
+            return
+        self._bug_report_link.show()
+        self._bug_report_link.adjustSize()
+        link = self._bug_report_link
+        link.move(
+            surface_x + width - link.width(),
+            surface_y + self._surface.height() + 6,
+        )
+        link.raise_()
 
     def boot_status(self) -> BootStatus:
         """The strip, for whoever drives the phases (the panel)."""

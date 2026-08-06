@@ -578,6 +578,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._composer.config_option_selected.connect(self._on_config_option_selected)
         self._composer.attachment_rejected.connect(self._note)
         self._composer.buddy_selected.connect(self._on_buddy_selected)
+        self._composer.bug_report_link_clicked.connect(self._open_bug_report)
 
         self._notice.action_clicked.connect(self._on_notice_action)
         self._notice.dismissed.connect(self._on_notice_dismissed)

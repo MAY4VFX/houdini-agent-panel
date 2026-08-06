@@ -196,6 +196,95 @@ def test_composer_uses_same_centered_736px_rail_as_precision_mockup(qapp):
     assert abs(surface_pos.x() - right_gutter) <= 1
 
 
+def _hosted_composer(qapp, width: int, height: int = 200) -> tuple["QtWidgets.QWidget", "Composer"]:
+    """Same wrapping `test_composer_uses_same_centered_736px_rail_as_
+    precision_mockup` already uses, not a bare top-level `Composer()`.
+
+    A `Composer()` with no parent IS itself the top-level window in a
+    test, and Qt clamps an explicit `resize()` on a layout-managed
+    top-level window to the layout's CURRENT minimum size before
+    `resizeEvent` ever runs — so shrinking it below whatever the surface's
+    fixed width happened to be a moment ago silently no-ops (confirmed
+    directly: asked for 200px, got back 572, the previous width, until a
+    SECOND resize finally took). A host widget with its own layout does
+    not have that quirk; `composer.resize(...)` inside it behaves like
+    real embedding inside `AgentPanel`'s own `_body_layout`.
+    """
+    host = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    composer = Composer(host)
+    layout.addWidget(composer)
+    host.resize(width, height)
+    host.show()
+    qapp.processEvents()
+    return host, composer
+
+
+def test_bug_report_link_click_emits_signal(qapp):
+    _host, composer = _hosted_composer(qapp, 600)
+
+    seen = []
+    composer.bug_report_link_clicked.connect(lambda: seen.append(True))
+    composer._bug_report_link.click()
+
+    assert seen == [True]
+
+
+def test_bug_report_link_sits_under_the_input_box_not_beside_it(qapp):
+    """Owner's placement, by screenshot: the thin strip BELOW the composer,
+    not the header, not a corner floating over the transcript. Checked
+    against the input box's own geometry (not a fixed pixel guess) so this
+    stays true if either one's size ever changes."""
+    _host, composer = _hosted_composer(qapp, 600)
+
+    link = composer._bug_report_link
+    surface = composer._surface
+    assert link.y() >= surface.y() + surface.height()
+    # Right-aligned under the surface's own right edge, not centred or
+    # left-aligned — reads as a quiet footer note, not a second call to
+    # action next to Send.
+    assert abs((link.x() + link.width()) - (surface.x() + surface.width())) <= 1
+
+
+def test_bug_report_link_tracks_the_surface_so_a_drawer_cannot_shift_it(qapp):
+    """The conversation drawer draws INSIDE `TranscriptView`'s existing
+    gutter and never touches the composer's own geometry at all
+    (`AgentPanel._body_layout`'s own note) — this composer never even
+    hears about the drawer. What this actually guards is the weaker, more
+    local claim that has to hold for that to matter: the link's X is
+    derived from THE SAME `surface_x`/width used to position the input
+    box and the buddy sprite, at every width, not a value that could ever
+    independently drift from them.
+    """
+    host, composer = _hosted_composer(qapp, 400)
+
+    for width in (400, 900, 500):
+        host.resize(width, 200)
+        qapp.processEvents()
+        surface = composer._surface
+        link = composer._bug_report_link
+        expected_x = surface.x() + surface.width() - link.width()
+        assert abs(link.x() - expected_x) <= 1
+
+
+def test_bug_report_link_hides_on_a_narrow_docked_panel(qapp):
+    """Deliberate choice for the narrowest docked widths (owner asked for
+    one, rather than whatever clipping/wrapping fell out of the layout):
+    hidden, not clipped illegibly against the surface's own edge — Settings
+    keeps its own entry point reachable regardless of width."""
+    host, composer = _hosted_composer(qapp, 600)
+    assert composer._bug_report_link.isVisible() is True
+
+    host.resize(200, 200)
+    qapp.processEvents()
+    assert composer._bug_report_link.isVisible() is False
+
+    host.resize(600, 200)
+    qapp.processEvents()
+    assert composer._bug_report_link.isVisible() is True
+
+
 def test_submitted_includes_attachments_after_text(qapp, tmp_path):
     composer = Composer()
     composer.show()
