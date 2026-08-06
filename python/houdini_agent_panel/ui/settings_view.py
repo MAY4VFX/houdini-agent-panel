@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
+from .. import bugreport
 from .. import paths
 from .. import settings as settings_module
 from .agents import AgentsView
@@ -56,7 +57,9 @@ _MIN_RAIL_WIDTH = 180
 # fixed px" — otherwise the grid computed today quietly comes apart the
 # day someone runs Houdini with a larger UI font scale, which is exactly
 # the kind of drift this rewrite exists to stop.
-_ROW_LABELS = ("Whisper endpoint", "Data folder", "Proxy", "No proxy", "CA bundle")
+_ROW_LABELS = (
+    "Whisper endpoint", "Data folder", "Proxy", "No proxy", "CA bundle", "Bug report endpoint",
+)
 
 
 @dataclass(frozen=True)
@@ -83,8 +86,10 @@ class _GridMetrics:
       run-on line.
     - `label_width` = the widest `QLabel.sizeHint()` among `_ROW_LABELS`,
       measured directly rather than estimated. At this codebase's default
-      font that's 104px ("Whisper endpoint" — still the widest after
-      "Default agent" was removed as a row entirely, issue owner's call).
+      font that's 118px ("Bug report endpoint" — the widest label since
+      the bug-reporter's endpoint setting was added; "Whisper endpoint"
+      at 104px held that spot before it, after "Default agent" was
+      removed as a row entirely, issue owner's call).
       Below `_MIN_RAIL_WIDTH` (180px) that leaves the value column under
       50px — cramped, but not broken: `QLineEdit` scrolls instead of
       truncating, and the data-folder path label already wraps
@@ -274,6 +279,12 @@ class SettingsView(QtWidgets.QWidget):
     #: session persistence, none of which this screen has any business
     #: touching (`AgentPanel._restart_agent`).
     restart_agent_requested = Signal()
+    #: "Report a bug…" clicked — opening the report screen and gathering
+    #: what it shows needs `AgentPanel`'s own state (the current session's
+    #: transcript, `hou`-derived versions), none of which this view has
+    #: any business touching; it only reports the click, same shape as
+    #: `restart_agent_requested`.
+    bug_report_requested = Signal()
 
     def __init__(
         self,
@@ -367,6 +378,15 @@ class SettingsView(QtWidgets.QWidget):
 
         self._copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics", self)
         self._copy_diagnostics_button.clicked.connect(self._on_copy_diagnostics)
+
+        # Blank means "use bugreport.DEFAULT_ENDPOINT" — same empty-string-
+        # as-sentinel shape `proxy_url`/`whisper_endpoint` already use, not
+        # a hardcoded default baked into this dataclass field.
+        self._bugreport_endpoint_edit = QtWidgets.QLineEdit(self)
+        self._bugreport_endpoint_edit.setPlaceholderText(bugreport.DEFAULT_ENDPOINT)
+        self._bugreport_endpoint_edit.textChanged.connect(self._on_field_changed)
+        self._report_bug_button = QtWidgets.QPushButton("Report a bug…", self)
+        self._report_bug_button.clicked.connect(self.bug_report_requested.emit)
 
         # --- Network — see docs/2026-08-03-proxy-support.md and issue #26.
         # `settings.py`'s `proxy_url`/`no_proxy`/`ca_bundle` and their
@@ -494,6 +514,8 @@ class SettingsView(QtWidgets.QWidget):
         data_section = _Section("Data", self, expanded=False, grid=grid_metrics)
         data_section.add_row("Data folder", data_dir_row)
         data_section.add_action_row(self._copy_diagnostics_button)
+        data_section.add_row("Bug report endpoint", self._bugreport_endpoint_edit)
+        data_section.add_action_row(self._report_bug_button)
 
         # Kept as attributes (not just locals) so a test can reach a given
         # section's grid directly, the same way `test_ui_settings.py`
@@ -629,6 +651,7 @@ class SettingsView(QtWidgets.QWidget):
             self._show_announcements_checkbox.setChecked(current.show_announcements)
             self._telemetry_checkbox.setChecked(current.telemetry)
             self._whisper_edit.setText(current.whisper_endpoint)
+            self._bugreport_endpoint_edit.setText(current.bugreport_endpoint)
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
             self._ca_bundle_edit.setText(current.ca_bundle)
@@ -658,6 +681,7 @@ class SettingsView(QtWidgets.QWidget):
         current.show_announcements = self._show_announcements_checkbox.isChecked()
         current.telemetry = self._telemetry_checkbox.isChecked()
         current.whisper_endpoint = self._whisper_edit.text().strip()
+        current.bugreport_endpoint = self._bugreport_endpoint_edit.text().strip()
         current.proxy_url = self._proxy_edit.text().strip()
         current.no_proxy = self._no_proxy_edit.text().strip()
         current.ca_bundle = self._ca_bundle_edit.text().strip()

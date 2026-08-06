@@ -346,6 +346,7 @@ class AgentPanel(QtWidgets.QWidget):
     PAGE_TRANSCRIPT = 0
     PAGE_SETTINGS = 1
     PAGE_AUTH = 2
+    PAGE_BUGREPORT = 3
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -512,6 +513,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._pages.insertWidget(self.PAGE_TRANSCRIPT, self._transcript)
         self._pages.insertWidget(self.PAGE_SETTINGS, self._make_settings_view())
         self._pages.insertWidget(self.PAGE_AUTH, self._make_auth_view())
+        self._pages.insertWidget(self.PAGE_BUGREPORT, self._make_bug_report_view())
 
         # Everything except the header lives in its own column below it, and
         # `_body_layout`'s margins never change — NOT while the drawer opens
@@ -565,6 +567,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._header.conversations_clicked.connect(self._toggle_conversations)
         self._header.new_session_clicked.connect(self._start_new_session)
         self._header.settings_clicked.connect(lambda: self._show_page(self.PAGE_SETTINGS))
+        self._header.bug_report_clicked.connect(self._open_bug_report)
         self._conversations.new_session_clicked.connect(self._start_new_session)
         self._conversations.session_selected.connect(self._set_current_session)
         self._conversations.session_renamed.connect(self._on_session_renamed)
@@ -596,6 +599,7 @@ class AgentPanel(QtWidgets.QWidget):
         view.sign_in_requested.connect(self._on_agent_row_sign_in)
         view.sign_out_requested.connect(self._on_agent_row_sign_out)
         view.restart_agent_requested.connect(self._restart_agent)
+        view.bug_report_requested.connect(self._open_bug_report)
         return view
 
     def _make_auth_view(self) -> QtWidgets.QWidget:
@@ -614,6 +618,15 @@ class AgentPanel(QtWidgets.QWidget):
         view.logout_requested.connect(self._on_logout_requested)
         view.cancel_pending.connect(self._on_auth_cancel_pending)
         view.terminal_login_input_submitted.connect(self._on_terminal_login_input_submitted)
+        return view
+
+    def _make_bug_report_view(self) -> QtWidgets.QWidget:
+        from .bugreport_view import BugReportView
+
+        view = BugReportView(self)
+        self._bug_report_view = view
+        view.closed.connect(lambda: self._show_page(self.PAGE_TRANSCRIPT))
+        view.attachments_changed.connect(self._on_bugreport_attachments_changed)
         return view
 
     def _show_page(self, index: int) -> None:
@@ -657,6 +670,48 @@ class AgentPanel(QtWidgets.QWidget):
         """
         self._show_page(self.PAGE_SETTINGS)
         self._settings_view.focus_agents()
+
+    def _open_bug_report(self) -> None:
+        """Gathers everything the report screen shows and opens it — the
+        owner's ask: a button he can press, type a comment into, and send.
+
+        Gathered here, on the main thread, not in `BugReportView` itself
+        or the worker: `bugreport.gather_system_fields` can fall back to
+        `import hou` (`hou` is never touched off the main thread, this
+        project's own rule), and the conversation tail needs THIS tab's
+        own `TranscriptModel`, which this widget is the only thing that
+        knows how to find (`self._model`, `self._current_session`).
+        """
+        from .. import bugreport, logbook
+
+        current = settings_mod.load()
+        system_fields = bugreport.gather_system_fields(self._agent_id)
+        log_tail, log_redacted = bugreport.read_log_tail(logbook.log_path())
+
+        session = self._current_session()
+        entries = self._model(session.session_id).entries() if session is not None else []
+        conversation_tail, conversation_redacted = bugreport.conversation_tail_text(entries)
+
+        self._bug_report_view.open_for(
+            system_fields=system_fields,
+            log_tail=log_tail,
+            log_redacted=log_redacted,
+            conversation_tail=conversation_tail,
+            conversation_redacted=conversation_redacted,
+            attachment_prefs=current.bugreport_attachments,
+            endpoint=current.bugreport_endpoint or bugreport.DEFAULT_ENDPOINT,
+        )
+        self._show_page(self.PAGE_BUGREPORT)
+
+    def _on_bugreport_attachments_changed(self, prefs: dict) -> None:
+        """Remembered right away, on every toggle — not only when the
+        report is actually sent — so leaving this screen without sending
+        still keeps the choice for next time (the NDA case the feature
+        exists to answer)."""
+        current = settings_mod.load()
+        current.bugreport_attachments = dict(prefs)
+        settings_mod.save(current)
+        self._settings = current
 
     # --------------------------------------------------------------- boot
 
@@ -3310,6 +3365,7 @@ class AgentPanel(QtWidgets.QWidget):
         # needs this, not only the four constructed directly in this file).
         self._settings_view.shutdown()
         self._composer.shutdown()
+        self._bug_report_view.shutdown()
 
         for signal, slot in (
             *getattr(self, "_client_wiring", ()),

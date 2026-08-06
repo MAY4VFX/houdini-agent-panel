@@ -144,6 +144,17 @@ class Settings:
     agent_auth_info: dict[str, AgentAuthInfo] = field(default_factory=dict)
     #: The last sign-in/sign-out attempt per agent id — see `AuthAttempt`.
     auth_attempts: dict[str, AuthAttempt] = field(default_factory=dict)
+    #: Where the in-panel bug reporter files to — configurable because the
+    #: service isn't the only thing that can move (`bugreport.
+    #: DEFAULT_ENDPOINT` is only the starting value).
+    bugreport_endpoint: str = ""
+    #: The artist's last choice for each attachment, remembered so it
+    #: doesn't have to be re-made every time — someone working under NDA
+    #: removes "conversation" once and it stays removed, rather than
+    #: fighting the same checkbox on every report (the report this
+    #: feature exists to answer). Missing keys default to included; see
+    #: `ui/bugreport_view.py`.
+    bugreport_attachments: dict[str, bool] = field(default_factory=dict)
 
     # --- serialization
 
@@ -211,6 +222,10 @@ class Settings:
                         str(config_id): str(v) for config_id, v in mapping.items()
                     }
                 settings.config_options_by_agent = by_agent
+            elif name == "bugreport_attachments":
+                settings.bugreport_attachments = {
+                    str(k): bool(v) for k, v in (value or {}).items()
+                }
             elif name == "agent_auth_info":
                 auth_info: dict[str, AgentAuthInfo] = {}
                 for agent_id, item in (value or {}).items():

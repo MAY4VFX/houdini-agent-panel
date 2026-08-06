@@ -299,6 +299,7 @@ class HeaderBar(QtWidgets.QWidget):
     conversations_clicked = Signal()
     new_session_clicked = Signal()
     settings_clicked = Signal()
+    bug_report_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -364,9 +365,19 @@ class HeaderBar(QtWidgets.QWidget):
         self._settings_button = QtWidgets.QToolButton(self._rail)
         self._settings_button.setObjectName("contextIcon")
         self._settings_button.setText("⋯")
-        self._settings_button.setToolTip("Settings")
-        self._settings_button.clicked.connect(self.settings_clicked)
+        self._settings_button.setToolTip("More")
+        self._settings_button.clicked.connect(self._on_more_clicked)
         layout.addWidget(self._settings_button)
+        #: Lazily built, reused — never rebuilt per click. A popup is a real
+        #: top-level window (`QtCore.Qt.Popup`), and measured inside a live
+        #: Houdini (`_ensure_popup`'s own note on `ChoiceButton`, same
+        #: reasoning here): building one per click and never getting the
+        #: window back is exactly the leak `conversations.py`'s own
+        #: row-menu comment already found once, in a different popup.
+        self._overflow_menu: QtWidgets.QFrame | None = None
+        self._overflow_settings_button: QtWidgets.QPushButton | None = None
+        self._overflow_bug_report_button: QtWidgets.QPushButton | None = None
+        self._overflow_stylesheet = theme.popup_stylesheet("overflowMenu")
 
         self.setStyleSheet(
             "QToolButton#contextButton, QToolButton#contextIcon {"
@@ -404,6 +415,9 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_popup_stylesheet = theme.popup_stylesheet("agentPopup")
         if self._agent_popup is not None:
             self._agent_popup.setStyleSheet(self._agent_popup_stylesheet)
+        self._overflow_stylesheet = theme.popup_stylesheet("overflowMenu")
+        if self._overflow_menu is not None:
+            self._overflow_menu.setStyleSheet(self._overflow_stylesheet)
         if not self._agent_has_custom_icon:
             self._agent_button.setIcon(self._fallback_agent_icon())
 
@@ -428,6 +442,8 @@ class HeaderBar(QtWidgets.QWidget):
     def eventFilter(self, watched, event):  # noqa: N802 - Qt override
         if watched is self._agent_popup and event.type() == QtCore.QEvent.Hide:
             QtCore.QTimer.singleShot(0, self._release_agent_popup)
+        elif watched is self._overflow_menu and event.type() == QtCore.QEvent.Hide:
+            QtCore.QTimer.singleShot(0, self._release_overflow_menu)
         return super().eventFilter(watched, event)
 
     def _release_agent_popup(self) -> None:
@@ -437,6 +453,59 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_popup = None
         self._agent_popup_layout = None
         popup.deleteLater()
+
+    def _ensure_overflow_menu(self) -> QtWidgets.QFrame:
+        """"Settings" and "Report a bug…" — the header's own catch-all,
+        same reused-popup shape as the agent switcher just above (built
+        once, never rebuilt per click — see that method's own note on why
+        that matters for a `Qt.Popup`, a real top-level window)."""
+        if self._overflow_menu is not None:
+            return self._overflow_menu
+        menu = QtWidgets.QFrame(None, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
+        menu.setObjectName("overflowMenu")
+        menu.setStyleSheet(self._overflow_stylesheet)
+        menu.installEventFilter(self)
+        layout = QtWidgets.QVBoxLayout(menu)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
+        settings_button = QtWidgets.QPushButton("Settings", menu)
+        settings_button.clicked.connect(lambda: (menu.hide(), self.settings_clicked.emit()))
+        layout.addWidget(settings_button)
+        bug_report_button = QtWidgets.QPushButton("Report a bug…", menu)
+        bug_report_button.clicked.connect(lambda: (menu.hide(), self.bug_report_clicked.emit()))
+        layout.addWidget(bug_report_button)
+        self._overflow_menu = menu
+        self._overflow_settings_button = settings_button
+        self._overflow_bug_report_button = bug_report_button
+        return menu
+
+    def _release_overflow_menu(self) -> None:
+        menu = self._overflow_menu
+        if menu is None or menu.isVisible():
+            return
+        self._overflow_menu = None
+        self._overflow_settings_button = None
+        self._overflow_bug_report_button = None
+        menu.deleteLater()
+
+    def _on_more_clicked(self) -> None:
+        menu = self._ensure_overflow_menu()
+        if menu.isVisible():
+            menu.hide()
+            return
+        width = max(self._settings_button.width(), 170)
+        menu.setFixedWidth(width)
+        menu.adjustSize()
+        point = self._settings_button.mapToGlobal(QtCore.QPoint(0, self._settings_button.height() + 4))
+        screen = QtWidgets.QApplication.screenAt(point)
+        below_screen = (
+            screen is not None
+            and point.y() + menu.height() > screen.availableGeometry().bottom()
+        )
+        if below_screen:
+            point = self._settings_button.mapToGlobal(QtCore.QPoint(0, -menu.height() - 4))
+        menu.move(point)
+        menu.show()
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt override
         hint = super().minimumSizeHint()
