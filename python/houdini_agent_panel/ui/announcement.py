@@ -38,10 +38,10 @@ class NoticeStrip(QtWidgets.QWidget):
         self._id = ""
         self._buttons_row: QtWidgets.QWidget | None = None
 
-        self._label = QtWidgets.QLabel()
+        self._label = QtWidgets.QLabel(self)
         self._label.setWordWrap(True)
 
-        close_button = QtWidgets.QToolButton()
+        close_button = QtWidgets.QToolButton(self)
         close_button.setText("✕")
         close_button.setAutoRaise(True)
         close_button.setToolTip("Dismiss")
@@ -86,11 +86,15 @@ class NoticeStrip(QtWidgets.QWidget):
             self._buttons_row = None
         if not buttons:
             return
-        row = QtWidgets.QWidget()
+        # Parented at construction, both the row and every button in it —
+        # this runs every time the buttons change, not just once, so a
+        # parentless construction here would flash a window on every
+        # announcement/update shown, not merely once at startup.
+        row = QtWidgets.QWidget(self)
         row_layout = QtWidgets.QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         for label, url in buttons:
-            btn = QtWidgets.QPushButton(label)
+            btn = QtWidgets.QPushButton(label, row)
             btn.clicked.connect(lambda checked=False, u=url: self.action_clicked.emit(self._id, u))
             row_layout.addWidget(btn)
         # Buttons come right after the text, before the close cross.
@@ -127,14 +131,14 @@ class BlockingNotice(QtWidgets.QWidget):
         super().__init__(parent)
         self._id = ""
 
-        self._title = QtWidgets.QLabel()
+        self._title = QtWidgets.QLabel(self)
         self._title.setWordWrap(True)
         self._title.setStyleSheet("font-weight: bold;")
 
-        self._body = QtWidgets.QLabel()
+        self._body = QtWidgets.QLabel(self)
         self._body.setWordWrap(True)
 
-        self._buttons_row = QtWidgets.QWidget()
+        self._buttons_row = QtWidgets.QWidget(self)
         self._buttons_layout = QtWidgets.QHBoxLayout(self._buttons_row)
         self._buttons_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -160,7 +164,9 @@ class BlockingNotice(QtWidgets.QWidget):
                 widget.deleteLater()
 
         for button in ann.buttons:
-            btn = QtWidgets.QPushButton(button.label)
+            # Parented straight to `self._buttons_row`, not adopted after —
+            # this runs on every `show_notice`, not just once.
+            btn = QtWidgets.QPushButton(button.label, self._buttons_row)
             btn.clicked.connect(lambda checked=False, url=button.url: self.action_clicked.emit(self._id, url))
             self._buttons_layout.addWidget(btn)
         self._buttons_layout.addStretch(1)
@@ -195,11 +201,11 @@ class ConsentStrip(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        self._label = QtWidgets.QLabel()
+        self._label = QtWidgets.QLabel(self)
         self._label.setWordWrap(True)
 
-        self._yes = QtWidgets.QPushButton("Allow")
-        self._no = QtWidgets.QPushButton("No thanks")
+        self._yes = QtWidgets.QPushButton("Allow", self)
+        self._no = QtWidgets.QPushButton("No thanks", self)
         self._yes.clicked.connect(lambda: self._answer(True))
         self._no.clicked.connect(lambda: self._answer(False))
 

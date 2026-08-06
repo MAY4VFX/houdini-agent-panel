@@ -372,13 +372,13 @@ class AgentsView(QtWidgets.QWidget):
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
 
-        self._custom_name = QtWidgets.QLineEdit()
+        self._custom_name = QtWidgets.QLineEdit(self)
         self._custom_name.setPlaceholderText("Name")
-        self._custom_command = QtWidgets.QLineEdit()
+        self._custom_command = QtWidgets.QLineEdit(self)
         self._custom_command.setPlaceholderText("Command")
-        self._custom_args = QtWidgets.QLineEdit()
+        self._custom_args = QtWidgets.QLineEdit(self)
         self._custom_args.setPlaceholderText("Arguments, space-separated")
-        add_custom_btn = QtWidgets.QPushButton("Add custom agent")
+        add_custom_btn = QtWidgets.QPushButton("Add custom agent", self)
         add_custom_btn.clicked.connect(self._on_add_custom)
 
         custom_form = QtWidgets.QHBoxLayout()
@@ -394,10 +394,10 @@ class AgentsView(QtWidgets.QWidget):
         # directly) — it just has no explained audience yet. Comes back
         # once someone can say who needs it; until then the code stays put
         # so that day doesn't mean rewriting it.
-        self._custom_section = QtWidgets.QWidget()
+        self._custom_section = QtWidgets.QWidget(self)
         custom_section_layout = QtWidgets.QVBoxLayout(self._custom_section)
         custom_section_layout.setContentsMargins(0, 0, 0, 0)
-        custom_section_layout.addWidget(QtWidgets.QLabel("Custom agent"))
+        custom_section_layout.addWidget(QtWidgets.QLabel("Custom agent", self._custom_section))
         custom_section_layout.addLayout(self._custom_rows_layout)
         custom_section_layout.addLayout(custom_form)
         self._custom_section.setVisible(False)

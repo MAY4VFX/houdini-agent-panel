@@ -51,7 +51,7 @@ class AuthView(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        title = QtWidgets.QLabel("Sign in")
+        title = QtWidgets.QLabel("Sign in", self)
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._methods_layout = QtWidgets.QVBoxLayout()
@@ -64,12 +64,12 @@ class AuthView(QtWidgets.QWidget):
         #: has them (`AgentPanel._no_methods_advice`); word-wrapped and
         #: selectable so a command in it can be copied, same as the error
         #: label below.
-        self._empty_label = QtWidgets.QLabel("The agent offered no sign-in methods.")
+        self._empty_label = QtWidgets.QLabel("The agent offered no sign-in methods.", self)
         self._empty_label.setWordWrap(True)
         self._empty_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self._empty_label.setVisible(False)
 
-        self._logout_button = QtWidgets.QPushButton("Sign out")
+        self._logout_button = QtWidgets.QPushButton("Sign out", self)
         self._logout_button.setVisible(False)
         self._logout_button.clicked.connect(self.logout_requested.emit)
 
@@ -78,7 +78,7 @@ class AuthView(QtWidgets.QWidget):
         #: itself into a transcript they could not see, so the screen simply
         #: sat there — which is exactly what a refused login looks like when
         #: nobody tells you it was refused.
-        self._error_label = QtWidgets.QLabel()
+        self._error_label = QtWidgets.QLabel(self)
         self._error_label.setWordWrap(True)
         self._error_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self._error_label.setVisible(False)
@@ -104,7 +104,7 @@ class AuthView(QtWidgets.QWidget):
         # `QLabel` sitting directly in `rail_layout`, exactly like `_error_
         # label` two lines below, has no such extra hop and measures
         # correctly the same way `_error_label` already does.
-        self._pending_label = QtWidgets.QLabel()
+        self._pending_label = QtWidgets.QLabel(self)
         self._pending_label.setWordWrap(True)
         self._pending_label.setVisible(False)
         #: The agent's own raw stderr while pending, one line at a time —
@@ -114,11 +114,11 @@ class AuthView(QtWidgets.QWidget):
         #: nothing on the ACP channel itself). Replaced on each new line
         #: rather than accumulated — this is "what's happening right now",
         #: not a log the artist has to scroll.
-        self._pending_detail_label = QtWidgets.QLabel()
+        self._pending_detail_label = QtWidgets.QLabel(self)
         self._pending_detail_label.setWordWrap(True)
         self._pending_detail_label.setVisible(False)
         self._pending_detail_label.setStyleSheet("color: palette(disabled, text);")
-        self._cancel_pending_button = QtWidgets.QPushButton("Cancel")
+        self._cancel_pending_button = QtWidgets.QPushButton("Cancel", self)
         self._cancel_pending_button.setVisible(False)
         self._cancel_pending_button.clicked.connect(self._on_cancel_pending)
         self._cancel_pending_row = QtWidgets.QHBoxLayout()
@@ -131,11 +131,11 @@ class AuthView(QtWidgets.QWidget):
         # acp-sdk.md §14) — `AgentPanel` shows this from the child's OWN
         # output ("Paste code here"), never from a timer, so it never
         # appears for kimi (which polls, it never blocks on stdin).
-        self._terminal_input_edit = QtWidgets.QLineEdit()
+        self._terminal_input_edit = QtWidgets.QLineEdit(self)
         self._terminal_input_edit.setPlaceholderText("Paste the code from your browser")
         self._terminal_input_edit.setVisible(False)
         self._terminal_input_edit.returnPressed.connect(self._on_terminal_input_submit)
-        self._terminal_input_button = QtWidgets.QPushButton("Continue")
+        self._terminal_input_button = QtWidgets.QPushButton("Continue", self)
         self._terminal_input_button.setVisible(False)
         self._terminal_input_button.clicked.connect(self._on_terminal_input_submit)
         self._terminal_input_row = QtWidgets.QHBoxLayout()
@@ -229,7 +229,10 @@ class AuthView(QtWidgets.QWidget):
 
         self._buttons = {}
         for method in methods:
-            button = QtWidgets.QPushButton(method.name)
+            # Parented at construction — `set_methods` redraws this list on
+            # every reconnect and every `auth_required`, not just once, so a
+            # parentless button here would flash a window every time.
+            button = QtWidgets.QPushButton(method.name, self)
             if method.description:
                 button.setToolTip(method.description)
             button.clicked.connect(lambda checked=False, mid=method.id: self.method_chosen.emit(mid))

@@ -100,7 +100,7 @@ class _GridMetrics:
     label_width: int
 
     @staticmethod
-    def measure() -> "_GridMetrics":
+    def measure(parent: QtWidgets.QWidget) -> "_GridMetrics":
         metrics = QtGui.QFontMetrics(QtWidgets.QApplication.font())
         em = metrics.height()
         # `QLabel.sizeHint()`, not `QFontMetrics.horizontalAdvance` on the
@@ -113,7 +113,18 @@ class _GridMetrics:
         # real label, which put JUST that section's column-0 a pixel wider
         # than every other section's — the exact cross-section drift this
         # shared grid exists to prevent.
-        label_width = max(QtWidgets.QLabel(text).sizeHint().width() for text in _ROW_LABELS)
+        #
+        # `parent` (the `SettingsView` under construction) is passed in so
+        # these throwaway measuring labels are never parentless: a
+        # parentless QWidget is a top-level window, and this used to build
+        # and discard five of them every time settings opened. They're
+        # thrown away for real, not left dangling off `parent` forever —
+        # `deleteLater()` once each is measured, since nothing ever adds
+        # them to a layout.
+        probes = [QtWidgets.QLabel(text, parent) for text in _ROW_LABELS]
+        label_width = max(probe.sizeHint().width() for probe in probes)
+        for probe in probes:
+            probe.deleteLater()
         return _GridMetrics(
             indent=em,
             row_gap=round(em * 0.5),
@@ -284,7 +295,7 @@ class SettingsView(QtWidgets.QWidget):
         #: child's own state; this flag doesn't have that ambiguity.
         self._restart_pending = False
 
-        close_button = QtWidgets.QToolButton()
+        close_button = QtWidgets.QToolButton(self)
         close_button.setText("←")
         close_button.setToolTip("Back")
         close_button.clicked.connect(self.closed.emit)
@@ -293,12 +304,12 @@ class SettingsView(QtWidgets.QWidget):
         # below it, not with the panel's own edge. Full width put it out at
         # the very border, where an open conversation drawer covered it —
         # and the one control that leaves settings has no business hiding.
-        self._header_rail = QtWidgets.QWidget()
+        self._header_rail = QtWidgets.QWidget(self)
         header_rail_layout = QtWidgets.QHBoxLayout(self._header_rail)
         header_rail_layout.setContentsMargins(0, 10, 0, 4)
         header_rail_layout.setSpacing(6)
         header_rail_layout.addWidget(close_button)
-        header_rail_layout.addWidget(QtWidgets.QLabel("Settings"))
+        header_rail_layout.addWidget(QtWidgets.QLabel("Settings", self._header_rail))
         header_rail_layout.addStretch(1)
 
         header = QtWidgets.QHBoxLayout()
@@ -319,27 +330,29 @@ class SettingsView(QtWidgets.QWidget):
         self._agents_view.sign_in_requested.connect(self.sign_in_requested.emit)
         self._agents_view.sign_out_requested.connect(self.sign_out_requested.emit)
 
-        self._autostart_checkbox = QtWidgets.QCheckBox("Autostart agent when the panel opens")
+        self._autostart_checkbox = QtWidgets.QCheckBox(
+            "Autostart agent when the panel opens", self
+        )
         self._autostart_checkbox.toggled.connect(self._on_field_changed)
 
-        self._check_updates_checkbox = QtWidgets.QCheckBox("Check for updates")
+        self._check_updates_checkbox = QtWidgets.QCheckBox("Check for updates", self)
         self._check_updates_checkbox.toggled.connect(self._on_field_changed)
 
-        self._show_announcements_checkbox = QtWidgets.QCheckBox("Show announcements")
+        self._show_announcements_checkbox = QtWidgets.QCheckBox("Show announcements", self)
         self._show_announcements_checkbox.toggled.connect(self._on_field_changed)
 
         self._telemetry_checkbox = QtWidgets.QCheckBox(
-            "Telemetry (anonymous, off by default)"
+            "Telemetry (anonymous, off by default)", self
         )
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
-        self._whisper_edit = QtWidgets.QLineEdit()
+        self._whisper_edit = QtWidgets.QLineEdit(self)
         self._whisper_edit.setPlaceholderText("http://127.0.0.1:9000 (local whisper)")
         self._whisper_edit.textChanged.connect(self._on_field_changed)
 
-        self._data_dir_label = QtWidgets.QLabel()
+        self._data_dir_label = QtWidgets.QLabel(self)
         self._data_dir_label.setWordWrap(True)
-        self._open_data_dir_button = QtWidgets.QPushButton("Open")
+        self._open_data_dir_button = QtWidgets.QPushButton("Open", self)
         self._open_data_dir_button.clicked.connect(self._on_open_data_dir)
 
         data_dir_row = QtWidgets.QHBoxLayout()
@@ -352,7 +365,7 @@ class SettingsView(QtWidgets.QWidget):
         data_dir_row.addWidget(self._data_dir_label, 1)
         data_dir_row.addWidget(self._open_data_dir_button)
 
-        self._copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics")
+        self._copy_diagnostics_button = QtWidgets.QPushButton("Copy diagnostics", self)
         self._copy_diagnostics_button.clicked.connect(self._on_copy_diagnostics)
 
         # --- Network — see docs/2026-08-03-proxy-support.md and issue #26.
@@ -362,22 +375,22 @@ class SettingsView(QtWidgets.QWidget):
         # wired up (`AgentPanel._apply_network_settings`, called at startup
         # and on every `changed`); this section is only the missing UI for
         # fields that already work.
-        self._proxy_edit = QtWidgets.QLineEdit()
+        self._proxy_edit = QtWidgets.QLineEdit(self)
         self._proxy_edit.setPlaceholderText(
             "http://proxy.studio.local:8080 (blank = inherit from the machine)"
         )
         self._proxy_edit.textChanged.connect(self._on_network_field_changed)
 
-        self._no_proxy_edit = QtWidgets.QLineEdit()
+        self._no_proxy_edit = QtWidgets.QLineEdit(self)
         self._no_proxy_edit.setPlaceholderText(
             "extra hosts to bypass, comma-separated — localhost is always excluded"
         )
         self._no_proxy_edit.textChanged.connect(self._on_network_field_changed)
 
-        self._ca_bundle_edit = QtWidgets.QLineEdit()
+        self._ca_bundle_edit = QtWidgets.QLineEdit(self)
         self._ca_bundle_edit.setPlaceholderText("/path/to/ca-bundle.pem")
         self._ca_bundle_edit.textChanged.connect(self._on_network_field_changed)
-        self._browse_ca_bundle_button = QtWidgets.QPushButton("Browse…")
+        self._browse_ca_bundle_button = QtWidgets.QPushButton("Browse…", self)
         self._browse_ca_bundle_button.clicked.connect(self._on_browse_ca_bundle)
 
         ca_bundle_row = QtWidgets.QHBoxLayout()
@@ -397,7 +410,8 @@ class SettingsView(QtWidgets.QWidget):
             "A password typed into the proxy URL is written to settings.json "
             "as plain text — prefer a proxy with no login, or one restricted "
             "by IP. localhost is never sent through the proxy. HTTP/HTTPS "
-            "only — SOCKS is not supported."
+            "only — SOCKS is not supported.",
+            self,
         )
         self._network_caption.setWordWrap(True)
         # Muted, same idiom `agents.py` already uses for secondary text
@@ -417,12 +431,13 @@ class SettingsView(QtWidgets.QWidget):
         # section without clicking the button is a real choice the artist
         # can make, not a dead end they were never told about — see
         # `_on_network_section_toggled`.
-        self._restart_banner = QtWidgets.QWidget()
+        self._restart_banner = QtWidgets.QWidget(self)
         self._restart_label = QtWidgets.QLabel(
-            "The agent will pick this up after a restart — or the next time you switch agents."
+            "The agent will pick this up after a restart — or the next time you switch agents.",
+            self._restart_banner,
         )
         self._restart_label.setWordWrap(True)
-        self._restart_button = QtWidgets.QPushButton("Restart agent")
+        self._restart_button = QtWidgets.QPushButton("Restart agent", self._restart_banner)
         self._restart_button.clicked.connect(self._on_restart_agent_clicked)
         restart_banner_layout = QtWidgets.QHBoxLayout(self._restart_banner)
         restart_banner_layout.setContentsMargins(0, 0, 0, 0)
@@ -434,7 +449,7 @@ class SettingsView(QtWidgets.QWidget):
         # "Default agent", "Whisper endpoint" and "Data folder" share one
         # label column and one rhythm instead of each `_Section` sizing
         # its own — see `_GridMetrics`.
-        grid_metrics = _GridMetrics.measure()
+        grid_metrics = _GridMetrics.measure(self)
 
         agents_section = _Section("Agents", self, expanded=True, grid=grid_metrics)
         agents_section.add_widget(self._agents_view)
@@ -492,7 +507,13 @@ class SettingsView(QtWidgets.QWidget):
         self._network_section = network_section
         self._data_section = data_section
 
-        rail = QtWidgets.QWidget()
+        # Parented at construction, both `rail` and `content` below — not
+        # adopted after the fact. `rail` is only reparented into `content`
+        # via `content_layout.addWidget` a few lines down, and `content` is
+        # only reparented into `self._scroll` via `setWidget` further still
+        # — a parentless QWidget is a top-level window for however long that
+        # gap lasts, and macOS realises a native one for it immediately.
+        rail = QtWidgets.QWidget(self)
         rail_layout = QtWidgets.QVBoxLayout(rail)
         rail_layout.setContentsMargins(0, 8, 0, 24)
         rail_layout.setSpacing(grid_metrics.section_gap)
@@ -513,7 +534,7 @@ class SettingsView(QtWidgets.QWidget):
         rail_layout.addStretch(1)
         self._rail = rail
 
-        content = QtWidgets.QWidget()
+        content = QtWidgets.QWidget(self)
         content_layout = QtWidgets.QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         # NOT `AlignHCenter` — see `resizeEvent`. Centering here would center
@@ -529,7 +550,7 @@ class SettingsView(QtWidgets.QWidget):
         content_layout.addWidget(rail, 0, QtCore.Qt.AlignLeft)
         self._content_layout = content_layout
 
-        self._scroll = QtWidgets.QScrollArea()
+        self._scroll = QtWidgets.QScrollArea(self)
         self._scroll.setStyleSheet(theme.scrollbar_stylesheet())
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)

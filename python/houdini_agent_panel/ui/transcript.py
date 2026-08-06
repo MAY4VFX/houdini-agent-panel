@@ -758,7 +758,20 @@ class _ToolGroupRow(QtWidgets.QWidget):
         self._order.append(row._entry_id)
 
     def add_tool(self, entry: Entry) -> None:
-        self._adopt(_ToolCallRow(entry))
+        # Parented at construction (to `self._steps`, `_adopt`'s own target),
+        # not after: a parentless `_ToolCallRow` is a top-level window for
+        # the moment between construction and `_adopt`'s `setParent` call,
+        # and macOS hands it a real native window right then — this is the
+        # site that actually produced the reported burst. A run of N
+        # consecutive tool calls (an agent reading/editing many files in one
+        # turn, unremarkable at "Claude ships hundreds of tool calls" scale)
+        # collapses into one `_ToolGroupRow` after the second call, and every
+        # call from the third one on used to go through here: measured with
+        # 60 simulated consecutive tool calls, this one line accounted for
+        # 58 stray windows (60 - 2, the two calls that already went through
+        # an already-parented `_ToolCallRow`) — see
+        # test_transcript_tool_group_add_tool_does_not_flash_a_window.
+        self._adopt(_ToolCallRow(entry, self._steps))
         self._sync_summary()
 
     def update_tool(self, entry: Entry) -> None:

@@ -542,7 +542,11 @@ class Composer(QtWidgets.QWidget):
         self.setAcceptDrops(True)
 
         # --- attachments (a chip row above the field, only shown when there is something)
-        self._attachments_bar = QtWidgets.QWidget()
+        # Parented at construction (not adopted afterward by the layout that
+        # eventually holds it below) — a parentless QWidget is a top-level
+        # window in Qt, and macOS realises a native one for it immediately,
+        # same defect as `transcript.py`'s per-tool-call row.
+        self._attachments_bar = QtWidgets.QWidget(self)
         # Without a vertical Maximum the bar takes every spare pixel the
         # column has and the whole input card balloons to fill the panel —
         # which is exactly what attaching a file used to do.
@@ -577,7 +581,7 @@ class Composer(QtWidgets.QWidget):
         self._popup_command_name: str | None = None
 
         # --- left-hand buttons: attachments, voice
-        self._attach_button = QtWidgets.QToolButton()
+        self._attach_button = QtWidgets.QToolButton(self)
         self._attach_button.setObjectName("composerTool")
         self._attach_button.setText("+")
         self._attach_button.setToolTip("Attach a file")
@@ -597,17 +601,17 @@ class Composer(QtWidgets.QWidget):
         # One chip per option the agent declared, rebuilt whenever it changes
         # its mind. Empty by default: an agent that offers nothing gets no
         # chips rather than an invented "model" dropdown.
-        self._config_bar = QtWidgets.QWidget()
+        self._config_bar = QtWidgets.QWidget(self)
         self._config_layout = QtWidgets.QHBoxLayout(self._config_bar)
         self._config_layout.setContentsMargins(0, 0, 0, 0)
         self._config_layout.setSpacing(3)
         self._config_bar.setVisible(False)
 
         # --- right-hand side: counter, send/stop
-        self._usage_label = QtWidgets.QLabel()
+        self._usage_label = QtWidgets.QLabel(self)
         self._usage_label.setVisible(False)
 
-        self._send_button = QtWidgets.QPushButton("↑")
+        self._send_button = QtWidgets.QPushButton("↑", self)
         self._send_button.setObjectName("composerSend")
         self._send_button.setFixedSize(32, 32)
         self._send_button.setToolTip("Send")
@@ -1142,7 +1146,10 @@ class Composer(QtWidgets.QWidget):
         whether the click even registered — the point of the chip is to prove
         the file is really going along.
         """
-        chip = QtWidgets.QFrame()
+        # Parented at construction (to `self._attachments_bar`, the layout
+        # this chip goes into) — this runs once per attachment, every time
+        # the attachment list changes, not once at startup.
+        chip = QtWidgets.QFrame(self._attachments_bar)
         chip.setObjectName("attachmentChip")
         chip.setFixedHeight(_ATTACHMENT_CHIP_HEIGHT)
         layout = QtWidgets.QHBoxLayout(chip)
@@ -1151,16 +1158,16 @@ class Composer(QtWidgets.QWidget):
 
         thumbnail = _attachment_thumbnail(block)
         if thumbnail is not None:
-            preview = QtWidgets.QLabel()
+            preview = QtWidgets.QLabel(chip)
             preview.setPixmap(thumbnail)
             preview.setFixedSize(thumbnail.size())
             layout.addWidget(preview)
 
-        label = QtWidgets.QLabel(_attachment_label(block))
+        label = QtWidgets.QLabel(_attachment_label(block), chip)
         label.setToolTip(_attachment_label(block))
         layout.addWidget(label)
 
-        remove = QtWidgets.QToolButton()
+        remove = QtWidgets.QToolButton(chip)
         remove.setText("✕")
         remove.setAutoRaise(True)
         remove.setToolTip("Remove attachment")
