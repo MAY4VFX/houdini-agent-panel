@@ -445,6 +445,10 @@ class AgentPanel(QtWidgets.QWidget):
         #: Houdini — see that constant's own comment. Armed once, in
         #: `_boot()`; stopped in `shutdown()`.
         self._session_refresh_timer: Any = None
+        #: The handle `scene.watch_hip_dir_changes` returned, so `shutdown()`
+        #: can remove it — `None` before `_boot()` registers it, and once
+        #: more after. See `_on_hip_dir_changed` for what it's for.
+        self._hip_watch_handle: Any = None
         self._launch_worker: _LaunchPrepWorker | None = None
         self._registry_entries: list = []
         self._pending_agent_label: str = ""
@@ -847,6 +851,23 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._restore_conversations()
         self._header.set_cwd(scene.hip_dir())
+        # `_restore_conversations` and the header's cwd label are both
+        # scoped to `scene.hip_dir()` AT THIS MOMENT, and nothing above
+        # ever asks again. If the artist opens a real scene into a
+        # Houdini session this tab started against a different one (most
+        # often a fresh, unsaved file — `hip_dir()`'s own `$HOME`
+        # fallback), everything above stays wrong for the rest of the
+        # tab's life: not just the label, but which on-disk conversations
+        # ever get offered back. `_on_hip_dir_changed` is what re-runs
+        # both the moment the scene actually moves; see its own comment.
+        # Guarded like `_maybe_sweep_orphans` and every other optional
+        # extra in this method: a panel that cannot register this watcher
+        # still has an agent worth booting — it only keeps the older,
+        # boot-time-only scoping, not nothing.
+        try:
+            self._hip_watch_handle = scene.watch_hip_dir_changes(self._on_hip_dir_changed)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not watch for scene changes", exc_info=True)
         self._refresh_agent_chip_menu()
         self._refresh_worker = _RefreshWorker(self._settings, self)
         self._refresh_worker.done.connect(self._on_refresh_done)
@@ -884,6 +905,18 @@ class AgentPanel(QtWidgets.QWidget):
             self._note('No agent running. Press "+" to start a conversation.')
             return
         self._start_agent(agent_id)
+
+    def _on_hip_dir_changed(self) -> None:
+        """The scene underneath this tab may have just moved — File > Open,
+        File > New, a merge, a load — see `scene.watch_hip_dir_changes`'s
+        own docstring for the bug this closes. Re-does exactly what
+        `_boot()` did once, using `scene.hip_dir()`'s CURRENT answer:
+        `_restore_conversations` already reads it fresh and is already
+        idempotent (skips anything already in `self._pool`), so nothing
+        about what it does needed to change, only how often it runs.
+        """
+        self._header.set_cwd(scene.hip_dir())
+        self._restore_conversations()
 
     def _on_session_refresh_due(self) -> None:
         """The recurring half of `_SESSION_REFRESH_INTERVAL_MS` — a panel
@@ -3802,6 +3835,10 @@ class AgentPanel(QtWidgets.QWidget):
         self._persist_cooldown_active = False
         self._persist_dirty = False
         _live_panels_for(self._agent_id).discard(self)
+
+        if self._hip_watch_handle is not None:
+            scene.unwatch_hip_dir_changes(self._hip_watch_handle)
+            self._hip_watch_handle = None
 
         if self._session_refresh_timer is not None:
             self._session_refresh_timer.stop()

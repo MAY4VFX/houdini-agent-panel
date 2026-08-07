@@ -41,6 +41,23 @@ def _install_fake_hou(*, is_new_file: bool, path: str) -> None:
     sys.modules["hou"] = hou
 
 
+def _install_fake_hip_file_events():
+    """A `hou.hipFile` that actually records/removes callbacks, the way
+    `watch_hip_dir_changes`/`unwatch_hip_dir_changes` expect — real
+    Houdini's `addEventCallback` takes one positional arg (the callback)
+    and calls it with an event-type argument; `removeEventCallback` takes
+    back the exact object `addEventCallback` was given."""
+    registered: list = []
+    hip_file = types.SimpleNamespace(
+        addEventCallback=lambda cb: registered.append(cb),
+        removeEventCallback=lambda cb: registered.remove(cb),
+    )
+    hou = types.ModuleType("hou")
+    hou.hipFile = hip_file
+    sys.modules["hou"] = hou
+    return registered
+
+
 # --- fx_port -----------------------------------------------------------
 
 
@@ -142,6 +159,43 @@ def test_hip_dir_missing_directory_falls_back_to_home(tmp_path):
     _install_fake_hou(is_new_file=False, path=str(missing))
 
     assert scene.hip_dir() == str(Path.home())
+
+
+# --- watch_hip_dir_changes --------------------------------------------------
+
+
+def test_watch_hip_dir_changes_registers_with_hip_file():
+    registered = _install_fake_hip_file_events()
+    scene.watch_hip_dir_changes(lambda: None)
+    assert len(registered) == 1
+
+
+def test_watch_hip_dir_changes_callback_forwards_to_ours():
+    _install_fake_hip_file_events()
+    calls = []
+    handle = scene.watch_hip_dir_changes(lambda: calls.append(1))
+    # Houdini calls the registered callback with an event-type argument —
+    # `hipFileEventType` in real use — which `watch_hip_dir_changes` must
+    # swallow rather than pass through to a caller that only wants "the
+    # scene may have moved," not which of nine event kinds did it.
+    handle("AfterLoad")
+    assert calls == [1]
+
+
+def test_unwatch_hip_dir_changes_removes_the_same_callback():
+    registered = _install_fake_hip_file_events()
+    handle = scene.watch_hip_dir_changes(lambda: None)
+    assert registered  # sanity: something was actually added
+    scene.unwatch_hip_dir_changes(handle)
+    assert registered == []
+
+
+def test_unwatch_hip_dir_changes_on_an_unknown_handle_does_not_raise():
+    """`shutdown()` calls this unconditionally once `_boot()` has run; a
+    handle Houdini no longer recognises must not turn closing a tab into
+    a crash."""
+    _install_fake_hip_file_events()
+    scene.unwatch_hip_dir_changes(object())
 
 
 # --- houdini_version / is_fx_available -------------------------------------

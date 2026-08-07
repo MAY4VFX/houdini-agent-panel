@@ -29,6 +29,11 @@ def isolated_panel_state(qapp, monkeypatch):
         "mcp_servers",
         lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": []}],
     )
+    # `_boot` registers a real `hou.hipFile` callback outside this fixture —
+    # no `hou` here, so stand in with something `shutdown()` can still hand
+    # back to `unwatch_hip_dir_changes` symmetrically.
+    monkeypatch.setattr(panel_mod.scene, "watch_hip_dir_changes", lambda callback: "fake-watch-handle")
+    monkeypatch.setattr(panel_mod.scene, "unwatch_hip_dir_changes", lambda handle: None)
     monkeypatch.setattr(panel_mod._RefreshWorker, "start", lambda self: None)
     # `_boot` also kicks off an orphan sweep (may-hub task, 2026-08-04) —
     # same reasoning as `_RefreshWorker` above: no real background thread
@@ -76,6 +81,85 @@ def test_without_default_agent_panel_opens_on_agents_settings(qapp):
 
     assert widget._pages.currentIndex() == panel_mod.AgentPanel.PAGE_SETTINGS
     assert widget._settings_view._scroll.verticalScrollBar().value() == 0
+    widget.shutdown()
+
+
+# --- rescoping when the scene changes underneath an open tab ---------------
+#
+# `_boot()` used to compute `scene.hip_dir()` and run `_restore_conversations`
+# exactly once. A tab that started against one scene (often a fresh, unsaved
+# one — `hip_dir()`'s own `$HOME` fallback) and then had the artist open a
+# real project file into the SAME Houdini session kept the old scope for the
+# rest of its life: conversations already on disk for the folder actually
+# open never appeared, because nothing ever asked `hip_dir()` again. Reported
+# for real: a live panel's pool held a "New chat" scoped to `$HOME` beside the
+# one correctly-scoped session that existed only because a brand-new message
+# reads `hip_dir()` fresh.
+
+
+def test_scene_change_rescopes_the_header_and_restores_its_conversations(qapp, monkeypatch, tmp_path):
+    from houdini_agent_panel import conversations_store as store
+
+    old_cwd = str(tmp_path / "untitled_fallback")
+    new_cwd = str(tmp_path / "shots" / "shot010")
+    current_cwd = {"value": old_cwd}
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: current_cwd["value"])
+
+    captured: list = []
+    monkeypatch.setattr(
+        panel_mod.scene, "watch_hip_dir_changes", lambda callback: captured.append(callback) or callback
+    )
+
+    conversation = store.StoredConversation.new(title="Rotor pyro", cwd=new_cwd, agent_id="claude-acp")
+    conversation.entries = [{"kind": "user", "id": "e1", "text": "make dust"}]
+    store.save([conversation])
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._boot()
+    assert captured, "watch_hip_dir_changes was never registered"
+    assert widget._header._cwd_label.text() == old_cwd
+    assert "Rotor pyro" not in [s.title for s in widget._pool.all()], (
+        "a conversation scoped to the scene not yet open must not appear early"
+    )
+
+    # The artist opens the real scene into this same Houdini session.
+    current_cwd["value"] = new_cwd
+    captured[0]()
+
+    assert widget._header._cwd_label.text() == new_cwd
+    assert "Rotor pyro" in [s.title for s in widget._pool.all()]
+    widget.shutdown()
+
+
+def test_shutdown_unwatches_the_exact_handle_it_was_given(qapp, monkeypatch):
+    handle = object()
+    unwatched = []
+    monkeypatch.setattr(panel_mod.scene, "watch_hip_dir_changes", lambda callback: handle)
+    monkeypatch.setattr(panel_mod.scene, "unwatch_hip_dir_changes", unwatched.append)
+
+    widget = panel_mod.AgentPanel()
+    widget._boot()
+
+    widget.shutdown()
+
+    assert unwatched == [handle]
+
+
+def test_a_watcher_registration_failure_does_not_stop_boot(qapp, monkeypatch):
+    """`hou.hipFile` behaving unexpectedly is not a reason to leave the
+    artist with no agent and no restored history — see `_maybe_sweep_
+    orphans` for the same posture applied to a different optional extra."""
+
+    def _boom(callback):
+        raise RuntimeError("no hipFile on this build")
+
+    monkeypatch.setattr(panel_mod.scene, "watch_hip_dir_changes", _boom)
+
+    widget = panel_mod.AgentPanel()
+    widget._boot()
+
+    assert widget._hip_watch_handle is None
     widget.shutdown()
 
 

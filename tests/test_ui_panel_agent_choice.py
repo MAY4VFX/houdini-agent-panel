@@ -30,6 +30,8 @@ def isolated_panel_state(qapp, monkeypatch):
         "mcp_servers",
         lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": []}],
     )
+    monkeypatch.setattr(panel_mod.scene, "watch_hip_dir_changes", lambda callback: "fake-watch-handle")
+    monkeypatch.setattr(panel_mod.scene, "unwatch_hip_dir_changes", lambda handle: None)
     monkeypatch.setattr(panel_mod._RefreshWorker, "start", lambda self: None)
     panel_mod.reset_shared_state_for_tests()
     yield

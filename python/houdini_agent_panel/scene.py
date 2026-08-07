@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 FX_SERVER_NAME = "fxhoudini"
 
@@ -175,6 +176,54 @@ def hip_dir() -> str:
     if not directory.is_dir():
         return str(Path.home())
     return str(directory)
+
+
+def watch_hip_dir_changes(callback: Callable[[], None]) -> object:
+    """Call `callback` whenever the scene underneath an already-open panel
+    might have moved — File > Open, File > New, a merge, a load. From the
+    main thread ONLY, same as `hip_dir()` itself: Houdini fires
+    `hipFile` events synchronously on the thread that did the File > Open,
+    which is always the main one.
+
+    Nothing before this ever re-read `$HIP` after boot. A panel opened
+    against a fresh, unsaved scene starts scoped to `$HOME`
+    (`hip_dir()`'s own fallback); if the artist then opens a real project
+    file into that SAME Houdini session, the panel kept the old scope
+    forever — its header, and worse, `_restore_conversations` (which reads
+    `scene.hip_dir()` at call time but is only ever CALLED at boot), so
+    conversations already on disk for the folder actually open never
+    appeared. Measured for real: a live panel's pool held a "New chat"
+    scoped to `$HOME` side by side with the real, correctly-scoped session
+    for the project the artist was actually in — the second only existed
+    because a NEW message reads `hip_dir()` fresh; nothing ever went back
+    and re-scoped the restore step.
+
+    Returns the actual registered callback, which `unwatch_hip_dir_changes`
+    needs back to remove the right one — `hou.hipFile.removeEventCallback`
+    takes the exact callable that was added, and `callback` itself isn't
+    it (it's wrapped, to swallow whatever this Houdini version passes an
+    event handler).
+    """
+    import hou  # noqa: PLC0415
+
+    def _on_hip_event(*_args, **_kwargs) -> None:
+        callback()
+
+    hou.hipFile.addEventCallback(_on_hip_event)
+    return _on_hip_event
+
+
+def unwatch_hip_dir_changes(handle: object) -> None:
+    """Undo `watch_hip_dir_changes`. Safe to call on a handle that is
+    already gone (a second `shutdown()`, a tab that never finished
+    booting) — a panel tearing down is not the place to raise over a
+    Houdini API that has nothing left to remove."""
+    import hou  # noqa: PLC0415
+
+    try:
+        hou.hipFile.removeEventCallback(handle)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def houdini_version() -> str:

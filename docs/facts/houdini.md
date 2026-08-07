@@ -521,6 +521,40 @@ before trusting `path()`.
 
 ---
 
+## 6.1. `hou.hipFile.addEventCallback` — noticing the scene changed under an open panel
+
+Verified live against a running 22.0.368 instance, via `execute_python`
+(read-only: registered a no-op probe, confirmed it via
+`inspect.signature`, then removed it — never fired, never touched the
+scene). Confirmed separately by reading `hou.py`'s source directly
+(`.../Houdini22.0.368/.../python3.13libs/hou.py`).
+
+Signature is **one positional argument**, unlike `OpNode.addEventCallback`
+(which additionally takes a tuple of event types to filter on):
+
+```python
+hou.hipFile.addEventCallback(callback)      # callback(event_type)
+hou.hipFile.removeEventCallback(callback)   # must be the SAME object added
+```
+
+Passing `(event_types, callback)` — the `OpNode` shape — raises
+`TypeError: addEventCallback() takes 2 positional arguments but 3 were
+given`. There is no way to filter which events reach `callback` at
+registration time; `callback` receives one argument (a
+`hou.hipFileEventType` member) and has to check it itself, or ignore it
+and treat every call as "the scene may have moved," which is all this
+project's own `scene.watch_hip_dir_changes` needs.
+
+`hou.hipFileEventType` members (from `hou.py`'s enum):
+`BeforeClear`, `AfterClear`, `BeforeLoad`, `AfterLoad`, `BeforeMerge`,
+`AfterMerge`, `BeforeSave`, `AfterSave`, `BeforeQuit`.
+
+Fires synchronously on whatever thread performed the action — for File >
+Open/New/Merge that is always the main thread, so a callback registered
+here can touch Qt widgets directly, the same as `hip_dir()` itself.
+
+---
+
 ## 7. The main thread and safely calling `hou` from a background thread
 
 Confirmed by the source of the `hdefereval.py` module, which genuinely
