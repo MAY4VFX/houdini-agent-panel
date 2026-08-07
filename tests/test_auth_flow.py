@@ -1001,6 +1001,88 @@ def test_terminal_login_input_requested_shows_the_field(qapp):
     widget.shutdown()
 
 
+def test_stuck_after_a_long_silence_names_the_fallback_and_offers_cancel(qapp):
+    """Live failure on the owner's own Linux box (docs/facts/acp-sdk.md
+    §18): a browser tab reached "you're all set up," the spawned process
+    was still running minutes later, and the panel never moved past its
+    first "still working" note — no field, no error, only a spinner with
+    no way forward besides a Cancel button nothing ever pointed at.
+    """
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
+    widget._terminal_login_input_requested_seen = False
+
+    widget._on_terminal_login_stuck(widget._agent_id)
+
+    text = widget._auth_view._pending_detail_label.text()
+    assert "Cancel" in text
+    assert "npx --yes @anthropic-ai/claude-code setup-token" in text
+    widget.shutdown()
+
+
+def test_stuck_says_nothing_once_a_real_prompt_already_appeared(qapp):
+    """Reaching an actual input prompt IS the conclusive event — the
+    artist has a field to use, so a stuck-notice arriving after that would
+    just be confusing, not helpful."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_input_requested_seen = True
+    widget._auth_view.set_pending_detail("earlier progress line")
+
+    widget._on_terminal_login_stuck(widget._agent_id)
+
+    assert widget._auth_view._pending_detail_label.text() == "earlier progress line"
+    widget.shutdown()
+
+
+def test_input_requested_cancels_the_stuck_timer(qapp):
+    """The one thing that actually resolves "stuck": a real prompt
+    appearing stops the longer timer from ever firing, the same way
+    `_on_terminal_login_line` already stops the shorter one."""
+    from houdini_agent_panel.ui.qt import QtCore
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_agent_id = widget._agent_id
+    timer = QtCore.QTimer(widget)
+    widget._terminal_login_stuck_timer = timer
+
+    widget._on_terminal_login_input_requested()
+
+    assert widget._terminal_login_stuck_timer is None
+    assert widget._terminal_login_input_requested_seen is True
+    widget.shutdown()
+
+
+def test_stuck_notice_ignores_a_mismatched_agent_id(qapp):
+    """Same belt-and-suspenders guard every other terminal-login handler
+    already has (`test_terminal_login_handlers_ignore_a_mismatched_agent_
+    id`) — a stale timer from an agent this tab has since left must not
+    paint over the new one's screen."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._auth_view.set_pending_detail("")
+
+    widget._on_terminal_login_stuck("some-other-agent-entirely")
+
+    assert widget._auth_view._pending_detail_label.text() == ""
+    widget.shutdown()
+
+
 def test_submitting_terminal_login_input_sends_it_to_the_worker(qapp):
     widget = panel_mod.AgentPanel()
     qapp.processEvents()

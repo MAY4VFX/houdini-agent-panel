@@ -21,6 +21,18 @@ at an actual input prompt ("Paste code here if prompted >") and waits for
 ONE line back — `send_line` is what answers that, still no terminal
 emulator, still not what opencode's arrow-key menu would need (§14 already
 settled that one: no).
+
+A live failure on the owner's own Linux box (docs/facts/acp-sdk.md §18)
+found a fourth shape from a newer `claude-code` build (2.1.224): a SECOND
+prompt string, "Or paste the redirect URL here: ", extracted from the
+installed binary itself — a build's own `no_tty_stdin` handling, going by
+the strings sitting next to it. Piped stdin (exactly what `subprocess.
+Popen(stdin=PIPE)` here gives it) is not a terminal, so that binary is
+free to be reformatting THIS panel's exact case differently from an
+interactive run — the one this module was originally measured against.
+Two changes follow from that: a second marker, and ANSI stripped from
+whatever's checked, since a build willing to reformat for a non-tty stdin
+is equally free to colour it.
 """
 
 from __future__ import annotations
@@ -52,11 +64,50 @@ _CODE_RE = re.compile(r"[?&]user_code=([\w-]+)")
 #: `_URL_RE` above didn't already claim the line, so a future agent that
 #: happens to print both shapes doesn't double-fire.
 _BARE_URL_RE = re.compile(r"https?://\S+")
-#: What Claude's `setup-token` prints right before it blocks on stdin,
-#: verbatim (§14): "Paste code here if prompted >". Matched loosely
-#: (case-insensitive substring) since the exact prompt text is exactly the
-#: kind of detail a future CLI version could reword.
-_INPUT_PROMPT_MARKER = "paste code here"
+#: What Claude's `setup-token` prints right before it blocks on stdin —
+#: two shapes measured so far (§14, §18), both matched loosely
+#: (case-insensitive substring) since the exact wording is exactly the
+#: kind of detail a future CLI version could reword again: "Paste code
+#: here if prompted >" (an interactive run) and "Or paste the redirect
+#: URL here:" (found in a build's own binary strings, apparently specific
+#: to a non-tty stdin — precisely what this module always gives it).
+_INPUT_PROMPT_MARKERS = ("paste code here", "paste the redirect url here")
+#: CSI escape sequences (`\x1b[` + parameters + a final letter) — cursor
+#: moves, colour, clearing. Stripped before anything is matched against
+#: `_INPUT_PROMPT_MARKERS`/the URL patterns, and before a line is shown to
+#: the artist: a build using colour or cursor tricks around its own prompt
+#: (§18: the build measured there uses `\r`-redraws for at least some of
+#: its output) must not be able to hide plain text inside escape noise
+#: either from our detection or from the artist's own eyes.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+#: A run this long with no line break, no carriage return and no
+#: recognised marker is almost certainly not a human-paced prompt —
+#: flushed as a line anyway so raw output is never invisible for good
+#: (§18: "must not be able to wait forever with no way forward"),
+#: regardless of whether the child ever sends a `\n`/`\r` at all.
+_FORCE_FLUSH_CHARS = 500
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+#: A device code (kimi's `user_code`, an OAuth redirect fragment) is meant
+#: to be read and typed by a human — not a secret, and the artist needs to
+#: SEE it to use it. An actual token/key is a different shape: long,
+#: opaque, never meant to be retyped. This is a width heuristic, not a
+#: parser: any run this long made of token-shaped characters is masked,
+#: whatever it actually is — the cost of a false positive (an unusually
+#: long device code, never measured) is a slightly less readable log line;
+#: the cost of a false negative is a credential on disk.
+_LOOKS_LIKE_A_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\.]{24,}")
+
+
+def _redact_for_log(line: str) -> str:
+    def _mask(match: "re.Match[str]") -> str:
+        return f"<{len(match.group(0))} chars redacted>"
+
+    return _LOOKS_LIKE_A_TOKEN_RE.sub(_mask, line)
 
 
 class TerminalLoginWorker(Worker):
@@ -136,6 +187,17 @@ class TerminalLoginWorker(Worker):
 
         env = self.build_env(ta)
 
+        # The command/args themselves are never secret — they're the
+        # panel's own recipe (a fixed npx invocation, or the SDK's own
+        # `TerminalAuth`) or, at most, a device-code CLI name. Nothing
+        # from `env` is logged here or anywhere below: an artist's proxy
+        # credentials or shell profile could easily be sitting in there.
+        _log.info(
+            "terminal login: spawning %s %s",
+            ta.command,
+            _redact_for_log(" ".join(ta.args)),
+        )
+
         process = subprocess.Popen(
             [ta.command, *ta.args],
             stdin=subprocess.PIPE,
@@ -164,6 +226,7 @@ class TerminalLoginWorker(Worker):
             )
         url_already_found = False
         buffer = ""
+        exit_code = None
         try:
             assert process.stdout is not None
             # Reading whole LINES (`for line in process.stdout`) was the
@@ -178,21 +241,39 @@ class TerminalLoginWorker(Worker):
             # small and human-paced, and lets the prompt marker be seen
             # (and `input_requested` fired) the instant it appears,
             # newline or not.
+            #
+            # `\r` flushes exactly like `\n` now (docs/facts/acp-sdk.md
+            # §18) — a build redrawing a status line with carriage returns
+            # used to leave everything it printed sitting unseen in
+            # `buffer` until (if ever) a real `\n` arrived; a spinner or a
+            # progress line drawn that way now actually reaches the
+            # artist, the same way a plain `\n`-terminated one already did.
             while True:
                 char = process.stdout.read(1)
                 if not char:
                     break  # EOF — the child closed its output
-                if char != "\n":
+                if char not in ("\n", "\r") and len(buffer) < _FORCE_FLUSH_CHARS:
                     buffer += char
-                    if _INPUT_PROMPT_MARKER in buffer.lower():
-                        line, buffer = buffer, ""
-                        self.line_received.emit(line)
+                    stripped = _strip_ansi(buffer)
+                    if any(marker in stripped.lower() for marker in _INPUT_PROMPT_MARKERS):
+                        self._emit_line(stripped)
+                        buffer = ""
                         self.input_requested.emit()
+                        _log.info("terminal login: input prompt detected")
                     continue
-                line, buffer = buffer, ""
-                if not line:
+                # A flush: a real separator, or `buffer` ran long enough
+                # that sitting on it any longer would mean invisible
+                # output again — see `_FORCE_FLUSH_CHARS`.
+                if char not in ("\n", "\r"):
+                    buffer += char
+                line = _strip_ansi(buffer)
+                buffer = ""
+                if not line.strip():
                     continue
-                self.line_received.emit(line)
+                self._emit_line(line)
+                if any(marker in line.lower() for marker in _INPUT_PROMPT_MARKERS):
+                    self.input_requested.emit()
+                    _log.info("terminal login: input prompt detected")
                 if not url_already_found:
                     match = _URL_RE.search(line)
                     if match:
@@ -209,7 +290,12 @@ class TerminalLoginWorker(Worker):
             exit_code = process.wait()
             with contextlib.suppress(Exception):
                 orphans.record_stopped(process.pid)
+            _log.info("terminal login: exited, code=%s", exit_code)
             self.exited.emit(exit_code)
+
+    def _emit_line(self, line: str) -> None:
+        self.line_received.emit(line)
+        _log.info("terminal login line: %s", _redact_for_log(line))
 
     def send_line(self, text: str) -> None:
         """Write one line to the child's stdin — the one thing Claude's
@@ -223,6 +309,10 @@ class TerminalLoginWorker(Worker):
         process = self._process
         if process is None or process.poll() is not None or process.stdin is None:
             return
+        # The content itself is never logged — it's what the artist just
+        # pasted from their browser, closer to a credential than a device
+        # code is. Only the fact that something was sent.
+        _log.info("terminal login: artist input submitted (%d chars)", len(text))
         with contextlib.suppress(OSError, ValueError):
             process.stdin.write(text.rstrip("\n") + "\n")
             process.stdin.flush()
@@ -243,6 +333,7 @@ class TerminalLoginWorker(Worker):
         process = self._process
         if process is None or process.poll() is not None:
             return
+        _log.info("terminal login: stop() requested")
         with contextlib.suppress(OSError):
             process.terminate()
 

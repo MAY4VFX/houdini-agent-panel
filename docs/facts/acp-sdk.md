@@ -1514,8 +1514,10 @@ credentials configured," so the offer never fires for an artist who is
 already signed in? `settings.signed_in_agents` only knows about agents
 this ONE install has watched complete a turn — worthless on a fresh
 install where the artist has used the CLI directly for months. Checked
-directly on mayfx02, a machine with all six agents in real, long-term use
-(`registry.FEATURED_AGENT_IDS`, the six agent ids the panel lists by name):
+directly on maymac01 (macOS — not to be confused with mayfx02, the
+separate Linux machine §14 and §18 were measured on), a machine with all
+six agents in real, long-term use (`registry.FEATURED_AGENT_IDS`, the six
+agent ids the panel lists by name):
 
 | agent id | on disk | env var(s) | measured shape |
 |---|---|---|---|
@@ -1708,3 +1710,115 @@ with §11.
   this machine also uses — not distinguished, and not needed for the
   question actually asked (whether the artist's OWN setup reaches the
   panel — it does, by whatever mechanism).
+
+## 18. The stuck sign-in on mayfx02 — a newer `claude-code` build's second prompt shape
+
+A live failure, not a reproduction: the owner pressed Sign in for Claude
+on mayfx02 (the Linux machine also used for §9/§11-14 — NOT maymac01,
+§16/§17's machine). The browser reached "You're all set up for Claude
+Code. You can now close this window." The panel stayed on "Still working
+— this can take a while over a slow connection" indefinitely: no code
+field, no error, no completion. `claude setup-token` was still running
+four minutes later. Investigated live, over SSH, while the stuck process
+was still running — not a later reconstruction.
+
+### What was actually running, measured directly
+
+- `~/.claude/.credentials.json`: absent, confirming the flow genuinely
+  never completed (not just a UI display bug).
+- The stuck process (`ps`, `/proc/<pid>/fd`): stdin and stdout still open
+  as UNCLOSED pipes (state `S`, sleeping) — not exited, not crashed.
+  **Zero network sockets open.** It had already finished whatever network
+  exchange it needed and was purely blocked on a local read, consistent
+  with waiting on stdin for input that was never going to arrive.
+- `ptrace` was not available (`ptrace_scope=1`, no passwordless sudo) —
+  the live process's exact byte stream could not be captured directly.
+  Nothing was written to its stdin and it was never killed.
+- The installed `@anthropic-ai/claude-code` package: version **2.1.224**
+  (`package.json`, next to the stuck process on disk) — a single compiled
+  binary (`bin/claude.exe`, ~282MB), not a package.json/JS tree the way
+  earlier versions apparently were: `grep`ing the package's `.cjs`/`.d.ts`
+  files for the prompt text this module looks for found nothing at all.
+  §14's own measurement did not record which version it ran against, so
+  this is not confirmed to be a regression from THAT specific build — only
+  confirmed to be a real, current mismatch against THIS one.
+- `grep -a` directly on the compiled binary (safe: reads embedded string
+  literals, never executes or attaches to anything) found the ORIGINAL
+  prompt string, "Paste code here if prompted > ", verbatim, still
+  present — and a SECOND, different prompt sitting right next to it in
+  the binary's own strings: **"Or paste the redirect URL here: "**,
+  next to `no_tty_stdin`, `"stdin isn't a terminal, so authentication
+  can't be completed here"`, and `"Re-run in an interactive terminal
+  (e.g. `ssh -t`) and paste the redirect URL when prompted."` in the same
+  neighbourhood of the binary's minified source. This module has always
+  given the child a plain, non-tty pipe (`subprocess.Popen(stdin=PIPE)`)
+  — exactly the condition those neighbouring strings are about.
+- A separate, independent, bounded (~20-48s, always terminated after)
+  test run of the SAME installed binary — never touching the live stuck
+  process — produced a real, observed network connection to Anthropic's
+  own infrastructure during its OAuth exchange, confirming the network
+  path itself works on this machine; it did not, within that bounded
+  window, get far enough to observe either prompt string directly.
+
+### Consequences for the fix
+
+1. **Ruled out**: "this flow variant completes server-side and never asks
+   for a code" (the second hypothesis offered before measuring). The
+   process was still alive, still blocked on a local read, with no
+   network activity — that is not what a completed, exited flow looks
+   like.
+2. **Best-supported reading**: a newer build's non-tty-stdin path uses
+   different prompt text than what `_INPUT_PROMPT_MARKER` (singular, at
+   the time) recognised, so `input_requested` never fired and the code
+   field never appeared — while the OAuth URL/browser flow completed
+   independently of what this module was managing to parse from stdout.
+   Not fully closed: the exact JS control flow deciding WHICH prompt a
+   given run gets was not traced through the minified bundle, and the
+   live process's own byte-for-byte output was never captured (ptrace
+   blocked, and reading its pipe directly without a consumer would have
+   risked stealing bytes from whatever, if anything, was still going to
+   read them — not done).
+3. **Fixed as `ui/terminal_login.py` now does**: both prompt strings are
+   recognised (`_INPUT_PROMPT_MARKERS`), ANSI is stripped before any
+   match is attempted (a build willing to reformat for a non-tty stdin is
+   equally free to colour it), and `\r` now flushes a line the same way
+   `\n` already did — a status line redrawn via carriage return used to
+   sit invisibly in an ever-growing buffer until, if ever, a literal `\n`
+   arrived.
+4. **Logging added** (the report's other, independent half): "not a
+   single line about the terminal login" is no longer true —
+   `ui/terminal_login.py` now logs the spawned command, every line
+   received (redacted past 24 token-shaped characters), when a prompt is
+   detected, and the exit code. The NEXT time this happens, the log
+   settles which hypothesis was true instead of requiring a live SSH
+   session and a compiled-binary `grep`.
+5. **The UI no longer waits forever with nothing to do**: a second,
+   longer timer (`_TERMINAL_LOGIN_STUCK_MS`, `ui/panel.py`) says so
+   explicitly and names the manual fallback command if nothing conclusive
+   (a real prompt, or the process ending) has happened in a while — the
+   Cancel button was already there and already worked; it had nothing
+   pointing at it before now.
+
+### A separate, unrelated finding from the same machine
+
+`panel.log` on mayfx02 logs, on every panel start: `fxhoudinimcp_server is
+unreachable from inside the process (the plugin isn't loaded or is out of
+date) — scanning 8100..8115 over HTTP; this may find SOMEONE ELSE's
+Houdini instead of this one` (`scene.py`'s own documented fallback,
+§ architecture.md §4). Confirmed reproducible: present at all three panel
+starts captured in this investigation (12:14, 12:21, 12:36). Not
+investigated further here — flagged, not fixed, and not the subject of
+this section's own fix.
+
+### Not established
+
+- The exact JS logic in the 2.1.224 bundle that chooses which of the two
+  prompt strings a given run prints, or under exactly which condition
+  (non-tty stdin was the strongest neighbouring signal in the binary's
+  own strings, not a traced code path).
+- Byte-for-byte what the ORIGINAL live stuck process actually printed —
+  only an independent, later run of the same binary was observed, not
+  that exact process.
+- Whether the fxhoudinimcp plugin issue above is related to this one in
+  any way (nothing found connecting them) or purely coincidental to both
+  showing up in the same log on the same machine.

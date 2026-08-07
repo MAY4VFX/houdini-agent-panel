@@ -33,7 +33,7 @@ from typing import Any
 
 from .. import client as acp_client
 from .. import refresh, scene, sessions, settings as settings_mod
-from .. import shellenv, signin_evidence
+from .. import shellenv, signin_evidence, updates as updates_mod
 from ..announcements import Announcement, Button
 from ..logbook import logger as _logbook_logger
 from ..transcript_model import PermissionView, TranscriptModel
@@ -204,9 +204,17 @@ class _RefreshWorker(Worker):
 
     done = Signal(object, object)  # RefreshResult | None, list[AgentEntry]
 
-    def __init__(self, current: settings_mod.Settings, parent=None) -> None:
+    def __init__(
+        self, current: settings_mod.Settings, parent=None, *, fresh_start: bool = True
+    ) -> None:
         super().__init__(parent)
         self._settings = current
+        #: Passed straight through to `updates.check` — see its own
+        #: docstring. `True` (the default) is a panel that just opened;
+        #: `False` is a periodic re-check from `AgentPanel`'s own recurring
+        #: timer (`_on_session_refresh_due`), for a panel that has already
+        #: been running a while.
+        self._fresh_start = fresh_start
 
     def work(self) -> None:  # pragma: no cover - covered via refresh.py
         entries: list = []
@@ -230,6 +238,7 @@ class _RefreshWorker(Worker):
                 settings=self._settings,
                 panel_version=settings_mod._panel_version(),
                 entries=entries,
+                fresh_start=self._fresh_start,
             )
         except Exception:  # noqa: BLE001 - the feed must never break the panel
             result = None
@@ -270,6 +279,30 @@ _CANCEL_GRACE_MS = 4000
 #: silence past this reads as a dead button, and a dead button is exactly
 #: what an artist reports when nothing at all appears after a click.
 _NEW_SESSION_GRACE_MS = 20_000
+
+#: A live failure on the owner's own Linux box (docs/facts/acp-sdk.md §18):
+#: a browser tab reached "you're all set up," the spawned `claude setup-
+#: token` was still running minutes later, and the panel never moved past
+#: `_on_terminal_login_slow`'s own "still working" note — which fires once,
+#: says nothing further, and has no way out besides the Cancel button that
+#: was already there but never pointed at. This is the second, LONGER
+#: timer: if neither a real prompt (`input_requested`) nor the process
+#: ending has happened by now, the artist gets an explicit next step
+#: instead of an indefinitely stale "still working." Long enough that a
+#: genuinely slow but working connection doesn't get told to give up
+#: (`_on_terminal_login_slow` above already covers the first 15s; this is
+#: what happens if THAT wasn't the end of it either).
+_TERMINAL_LOGIN_STUCK_MS = 75_000
+
+#: How often a panel that stays open re-checks for updates on its own,
+#: without a restart — reuses `_RefreshWorker`/`_on_refresh_done` exactly
+#: as the boot check does, `fresh_start=False` the only difference
+#: (`updates.py::_SESSION_MAX_AGE`, same duration, same reasoning: several
+#: releases in an hour on a busy day, so a panel left open all day must
+#: not need a restart to ever find out). Derived from that constant
+#: rather than a second number written here, so the two can never drift
+#: apart from each other by accident.
+_SESSION_REFRESH_INTERVAL_MS = int(updates_mod._SESSION_MAX_AGE.total_seconds() * 1000)
 
 #: Names for the featured six, for when the registry hasn't arrived yet. Not
 #: a source of truth — the registry always wins — this only keeps the chip
@@ -406,6 +439,12 @@ class AgentPanel(QtWidgets.QWidget):
         self._permission_views: dict[str, PermissionView] = {}
         self._permission_popover: PermissionRow | None = None
         self._refresh_worker: _RefreshWorker | None = None
+        #: Re-fires `_RefreshWorker` on its own, roughly every
+        #: `_SESSION_REFRESH_INTERVAL_MS`, so a panel left open for a day
+        #: still notices a new release without the artist ever restarting
+        #: Houdini — see that constant's own comment. Armed once, in
+        #: `_boot()`; stopped in `shutdown()`.
+        self._session_refresh_timer: Any = None
         self._launch_worker: _LaunchPrepWorker | None = None
         self._registry_entries: list = []
         self._pending_agent_label: str = ""
@@ -475,6 +514,15 @@ class AgentPanel(QtWidgets.QWidget):
         #: informational only, this NEVER kills the process (unlike
         #: `authenticate()`, this is ours to poll, but not to give up on).
         self._terminal_login_slow_timer: Any = None
+        #: The longer, second timer — see `_TERMINAL_LOGIN_STUCK_MS`'s own
+        #: comment. Also never kills anything; it only makes sure silence
+        #: this long stops looking identical to "still working normally."
+        self._terminal_login_stuck_timer: Any = None
+        #: Whether the child has reached an actual input prompt this
+        #: attempt — the one truly conclusive event short of exiting.
+        #: `_on_terminal_login_stuck` checks this before saying anything:
+        #: once the artist has a field to type into, they are not stuck.
+        self._terminal_login_input_requested_seen: bool = False
         #: The `Update` currently shown by the notice strip, if any — set
         #: only from `_on_refresh_done`. `NoticeStrip.action_clicked` fires
         #: for BOTH an announcement's button and this one's "Update" button
@@ -806,6 +854,14 @@ class AgentPanel(QtWidgets.QWidget):
         self._ask_telemetry_consent_once()
         self._maybe_sweep_orphans()
 
+        # See `_SESSION_REFRESH_INTERVAL_MS`'s own comment. Repeating, not
+        # single-shot — this IS the panel's own recurring schedule for
+        # checking again; nothing else re-arms it.
+        session_refresh_timer = QtCore.QTimer(self)
+        session_refresh_timer.timeout.connect(self._on_session_refresh_due)
+        session_refresh_timer.start(_SESSION_REFRESH_INTERVAL_MS)
+        self._session_refresh_timer = session_refresh_timer
+
         if not agent_id:
             self._open_agent_management()
             return
@@ -828,6 +884,27 @@ class AgentPanel(QtWidgets.QWidget):
             self._note('No agent running. Press "+" to start a conversation.')
             return
         self._start_agent(agent_id)
+
+    def _on_session_refresh_due(self) -> None:
+        """The recurring half of `_SESSION_REFRESH_INTERVAL_MS` — a panel
+        that has been open this long checks again on its own, the same way
+        `_boot()`'s own one-time check already does, just `fresh_start=
+        False` (`updates.py`'s own longer cache window applies, so this
+        doesn't hit PyPI on every single tick if a previous one — boot's,
+        or an earlier tick's — already answered recently enough).
+
+        Skips a tick outright if the LAST `_RefreshWorker` (whichever
+        triggered it) is somehow still running — `_SESSION_REFRESH_
+        INTERVAL_MS` is hours, a real check is seconds, so this is a
+        defensive backstop, not the expected path. Never force-stops
+        anything mid-flight; the next tick, hours later, tries again.
+        """
+        worker = self._refresh_worker
+        if worker is not None and worker.isRunning():
+            return
+        self._refresh_worker = _RefreshWorker(self._settings, self, fresh_start=False)
+        self._refresh_worker.done.connect(self._on_refresh_done)
+        self._refresh_worker.start()
 
     def _adopt_running_client(self) -> None:
         info = shared_client(self._agent_id).agent_info()
@@ -2870,6 +2947,7 @@ class AgentPanel(QtWidgets.QWidget):
         # got off the ground apart from a real authentication failure (see
         # `_terminal_login_no_output_message`'s own docstring).
         self._terminal_login_got_output = False
+        self._terminal_login_input_requested_seen = False
         # A belt-and-suspenders check alongside `_stop_terminal_login`'s
         # signal-disconnect: Qt does not retract an already-QUEUED cross-
         # thread signal delivery just because `disconnect()` ran before it
@@ -2904,6 +2982,17 @@ class AgentPanel(QtWidgets.QWidget):
         timer.start(15000)
         self._terminal_login_slow_timer = timer
 
+        # The second, longer timer — see `_TERMINAL_LOGIN_STUCK_MS`'s own
+        # comment for the report this answers. Independent of the one
+        # above: this fires even if SOME output already arrived (the
+        # owner's own case — a URL was found, a browser opened and
+        # finished), as long as nothing conclusive has happened since.
+        stuck_timer = QtCore.QTimer(self)
+        stuck_timer.setSingleShot(True)
+        stuck_timer.timeout.connect(lambda aid=self._agent_id: self._on_terminal_login_stuck(aid))
+        stuck_timer.start(_TERMINAL_LOGIN_STUCK_MS)
+        self._terminal_login_stuck_timer = stuck_timer
+
     def _on_terminal_login_line(self, line: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:
             return  # stale — see `_start_terminal_login`'s own comment
@@ -2933,12 +3022,40 @@ class AgentPanel(QtWidgets.QWidget):
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_terminal_login_link(url, code)
 
+    def _on_terminal_login_stuck(self, agent_id: str) -> None:
+        """Neither a real prompt nor the process ending has happened in
+        `_TERMINAL_LOGIN_STUCK_MS` — see that constant's own comment for
+        the report this answers. Unlike `_on_terminal_login_slow`, firing
+        here does not mean nothing arrived; a URL may already be showing
+        (the owner's own case: a browser tab that reached "you're all set
+        up") and the child can still be sitting there regardless, waiting
+        on something this panel never recognised. Says so explicitly and
+        names the manual fallback — the Cancel button was already there,
+        it just had no reason pointing at it before now.
+        """
+        self._terminal_login_stuck_timer = None
+        if agent_id != self._agent_id or self._terminal_login_worker is None:
+            return
+        if self._terminal_login_input_requested_seen:
+            return  # already actionable — the artist has a field to use
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_pending_detail(
+                "This is taking much longer than usual, and nothing recognisable "
+                "has come back since. Press Cancel below and run it yourself in "
+                f"a terminal instead:\n    {self._terminal_login_command}"
+            )
+
     def _on_terminal_login_input_requested(self) -> None:
         """The child printed its own input prompt (Claude's `setup-token`,
-        docs/facts/acp-sdk.md §14: "Paste code here if prompted >") —
-        detected from ITS output, never from a timer."""
+        docs/facts/acp-sdk.md §14: "Paste code here if prompted >", or a
+        newer build's own second shape, §18) — detected from ITS output,
+        never from a timer."""
         if self._terminal_login_agent_id != self._agent_id:
             return  # stale — see `_start_terminal_login`'s own comment
+        self._terminal_login_input_requested_seen = True
+        if self._terminal_login_stuck_timer is not None:
+            self._terminal_login_stuck_timer.stop()
+            self._terminal_login_stuck_timer = None
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_terminal_login_awaiting_input(True)
 
@@ -3017,6 +3134,9 @@ class AgentPanel(QtWidgets.QWidget):
         if self._terminal_login_slow_timer is not None:
             self._terminal_login_slow_timer.stop()
             self._terminal_login_slow_timer = None
+        if self._terminal_login_stuck_timer is not None:
+            self._terminal_login_stuck_timer.stop()
+            self._terminal_login_stuck_timer = None
         if self._pages.currentIndex() != self.PAGE_AUTH:
             return
         self._auth_view.set_terminal_login_awaiting_input(False)
@@ -3045,6 +3165,9 @@ class AgentPanel(QtWidgets.QWidget):
         if self._terminal_login_slow_timer is not None:
             self._terminal_login_slow_timer.stop()
             self._terminal_login_slow_timer = None
+        if self._terminal_login_stuck_timer is not None:
+            self._terminal_login_stuck_timer.stop()
+            self._terminal_login_stuck_timer = None
         if self._pages.currentIndex() != self.PAGE_AUTH:
             self._note(f"Terminal login failed: {message}")
             return
@@ -3090,6 +3213,9 @@ class AgentPanel(QtWidgets.QWidget):
         if self._terminal_login_slow_timer is not None:
             self._terminal_login_slow_timer.stop()
             self._terminal_login_slow_timer = None
+        if self._terminal_login_stuck_timer is not None:
+            self._terminal_login_stuck_timer.stop()
+            self._terminal_login_stuck_timer = None
         worker = self._terminal_login_worker
         if worker is None:
             return
@@ -3676,6 +3802,10 @@ class AgentPanel(QtWidgets.QWidget):
         self._persist_cooldown_active = False
         self._persist_dirty = False
         _live_panels_for(self._agent_id).discard(self)
+
+        if self._session_refresh_timer is not None:
+            self._session_refresh_timer.stop()
+            self._session_refresh_timer = None
 
         # Background threads are asked to stop, but a thread in the middle of
         # a network round trip does not stop on request — it stops when the
