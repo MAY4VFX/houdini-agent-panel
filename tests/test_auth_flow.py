@@ -8,6 +8,7 @@ returned in silence.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,7 @@ def _fake_terminal_worker(stopped: list) -> SimpleNamespace:
         input_requested=SimpleNamespace(disconnect=lambda *_a: None),
         exited=SimpleNamespace(disconnect=lambda *_a: None),
         failed=SimpleNamespace(disconnect=lambda *_a: None),
+        command_resolved=SimpleNamespace(disconnect=lambda *_a: None),
     )
 
 
@@ -912,6 +914,106 @@ def test_claudes_built_in_recipe_prefers_claude_on_path(qapp, monkeypatch):
     widget.shutdown()
 
 
+def test_resolve_claude_terminal_command_returns_the_bundled_binary_when_found(qapp, monkeypatch):
+    from houdini_agent_panel import node as node_mod
+
+    monkeypatch.setattr(
+        node_mod, "find_cached_npx_binary", lambda scope, prefix, name: Path("/found/claude")
+    )
+    result = panel_mod.AgentPanel._resolve_claude_terminal_command()
+    assert result == ("/found/claude", ["setup-token"])
+
+
+def test_resolve_claude_terminal_command_none_when_nothing_found(qapp, monkeypatch):
+    from houdini_agent_panel import node as node_mod
+
+    monkeypatch.setattr(node_mod, "find_cached_npx_binary", lambda scope, prefix, name: None)
+    assert panel_mod.AgentPanel._resolve_claude_terminal_command() is None
+
+
+def test_start_terminal_login_attaches_the_resolver_only_for_the_npx_placeholder(
+    qapp, monkeypatch
+):
+    """The resolver is real filesystem/subprocess work (~1.7s measured) —
+    it must never be attached when `claude` was already found on PATH
+    (nothing to improve on) or for another agent's own terminal_auth
+    (Kimi's `kimi login` needs no such thing)."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    # claude NOT on PATH -> the npx placeholder -> resolver attached.
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    assert widget._terminal_login_worker._resolve_command is not None
+    widget._stop_terminal_login()
+
+    # claude ON PATH -> nothing to improve on -> no resolver.
+    monkeypatch.setattr(
+        panel_mod.shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
+    )
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    assert widget._terminal_login_worker._resolve_command is None
+    widget.shutdown()
+
+
+def test_command_resolved_corrects_the_run_it_yourself_fallback_text(qapp, monkeypatch):
+    """`_on_terminal_login_stuck`'s manual-fallback advice is built from
+    `_terminal_login_command`, set BEFORE the worker even starts (the npx
+    placeholder) — if the resolver later found the bundled binary
+    instead, the advice has to say so, not the guess it began as."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    assert "npx" in widget._terminal_login_command
+
+    widget._on_terminal_login_command_resolved("/found/claude", ["setup-token"])
+
+    assert widget._terminal_login_command == "/found/claude setup-token"
+    widget.shutdown()
+
+
+def test_command_resolved_ignores_a_stale_agent_id(qapp, monkeypatch):
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    before = widget._terminal_login_command
+    widget._terminal_login_agent_id = "some-other-agent"
+
+    widget._on_terminal_login_command_resolved("/found/claude", ["setup-token"])
+
+    assert widget._terminal_login_command == before
+    widget.shutdown()
+
+
 def test_an_unknown_agents_no_methods_screen_gets_generic_advice(qapp):
     """Not every agent with zero methods is Claude — an id not in
     `_NO_METHODS_ADVICE` still gets SOMETHING actionable, not a blank
@@ -1080,6 +1182,90 @@ def test_stuck_notice_ignores_a_mismatched_agent_id(qapp):
     widget._on_terminal_login_stuck("some-other-agent-entirely")
 
     assert widget._auth_view._pending_detail_label.text() == ""
+    widget.shutdown()
+
+
+def test_stuck_timer_actually_fires_a_real_qtimer(qapp, monkeypatch):
+    """Team-lead's own doubt, checked directly rather than assumed: does
+    `_TERMINAL_LOGIN_STUCK_MS` really arm a timer that fires, or does it
+    just exist in the source? Shortened here — the real 75s would make
+    this test itself slow — and driven by a REAL running Qt event loop
+    (`QtTest.qWait`), not a direct call to the handler like the other
+    tests in this file."""
+    from PySide6 import QtTest
+
+    monkeypatch.setattr(panel_mod, "_TERMINAL_LOGIN_STUCK_MS", 50)
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+    widget._show_page(widget.PAGE_AUTH)
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    assert widget._terminal_login_stuck_timer is not None
+
+    QtTest.QTest.qWait(200)
+
+    assert widget._terminal_login_stuck_timer is None, "the timer never fired"
+    assert "Cancel" in widget._auth_view._pending_detail_label.text()
+    widget.shutdown()
+
+
+def test_stuck_notice_reaches_the_feed_even_when_the_artist_left_the_auth_page(qapp, monkeypatch):
+    """Measured gap, not assumed: `_on_terminal_login_stuck` used to only
+    write into `AuthView`'s own label, gated on the artist still being ON
+    PAGE_AUTH at the exact moment the timer fires — if they'd navigated
+    away (very plausible during a download that looks stuck for over a
+    minute), the message was computed and then silently discarded, no
+    record anywhere. This is the reported symptom directly: the owner
+    never mentioned seeing the "still working" notice, and this is
+    exactly the condition that explains never seeing it. Fixed by also
+    writing to the feed (`_note`), which persists regardless of which
+    page is showing when it fires."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_TRANSCRIPT)  # NOT PAGE_AUTH
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
+    widget._terminal_login_input_requested_seen = False
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_terminal_login_stuck(widget._agent_id)
+
+    assert notes, "nothing reached the artist at all — the message was simply lost"
+    assert "npx --yes @anthropic-ai/claude-code setup-token" in notes[0]
+    # The auth screen's own label is untouched — this tab isn't showing it.
+    assert widget._auth_view._pending_detail_label.text() == ""
+    widget.shutdown()
+
+
+def test_stuck_notice_still_updates_the_auth_screen_when_the_artist_is_on_it(qapp):
+    """The existing, contextual behaviour must survive the fix above —
+    someone actually watching the sign-in screen still sees the update
+    in place, not just a feed entry they'd have to go find."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    stopped: list[bool] = []
+    widget._terminal_login_worker = _fake_terminal_worker(stopped)
+    widget._terminal_login_agent_id = widget._agent_id
+    widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
+    widget._terminal_login_input_requested_seen = False
+
+    widget._on_terminal_login_stuck(widget._agent_id)
+
+    text = widget._auth_view._pending_detail_label.text()
+    assert "Cancel" in text
     widget.shutdown()
 
 

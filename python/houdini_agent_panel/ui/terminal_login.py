@@ -136,12 +136,40 @@ class TerminalLoginWorker(Worker):
     #: first, deliberately) — `AgentPanel` treats this as "the process is
     #: gone", nothing more.
     exited = Signal(int)
+    #: Fired once, right before spawning, ONLY when `resolve_command` was
+    #: given and actually changed what runs — the panel's own "run it
+    #: yourself" fallback advice (`_on_terminal_login_stuck`) is built from
+    #: `terminal_auth.command`/`.args` before this worker even starts, and
+    #: would otherwise go on naming the WRONG command once the real one was
+    #: decided off-thread (a bundled binary, not the npx line it started as
+    #: a placeholder for).
+    command_resolved = Signal(str, list)
 
-    def __init__(self, agent_id: str, terminal_auth, *, cwd: str, parent=None) -> None:
+    def __init__(
+        self,
+        agent_id: str,
+        terminal_auth,
+        *,
+        cwd: str,
+        parent=None,
+        resolve_command=None,
+    ) -> None:
         super().__init__(parent)
         self._agent_id = agent_id
         self._terminal_auth = terminal_auth
         self._cwd = cwd
+        #: Optional, called at the START of `work()` (already off the main
+        #: thread) to get the REAL `(command, args)`, overriding
+        #: `terminal_auth`'s own — for a caller whose best command needs
+        #: work too slow for the main thread to decide up front (a
+        #: filesystem search plus verifying each candidate actually runs).
+        #: `None` means `terminal_auth.command`/`.args` are already final,
+        #: the ordinary case (Kimi's own `kimi login`, the SDK's stock
+        #: `TerminalAuthMethod`). What the callable decides BETWEEN stays
+        #: entirely the caller's own knowledge — this only provides the
+        #: "figure it out off the main thread" mechanism, generic to any
+        #: terminal-auth command, not just Claude's.
+        self._resolve_command = resolve_command
         #: Read only from the thread that owns it, EXCEPT `stop()`/
         #: `send_line()` — see their own docstrings for why those two
         #: calls are safe from the main thread regardless.
@@ -177,7 +205,19 @@ class TerminalLoginWorker(Worker):
 
     def work(self) -> None:
         ta = self._terminal_auth
-        if not ta.command:
+        command, args = ta.command, list(ta.args)
+        if self._resolve_command is not None:
+            # Off the main thread now — this is exactly the point of
+            # accepting a callable instead of a final `(command, args)`:
+            # whatever it does (a filesystem search, running `--version`
+            # on each candidate to confirm it actually works) is free to
+            # take real time here, the same freedom every other worker in
+            # this codebase already has.
+            resolved = self._resolve_command()
+            if resolved is not None and resolved != (command, args):
+                command, args = resolved
+                self.command_resolved.emit(command, list(args))
+        if not command:
             # The SDK's stock `TerminalAuthMethod` shape (`client.
             # TerminalAuth.command is None`) — `AgentPanel._start_terminal_
             # login` is not supposed to construct this worker for that case
@@ -194,12 +234,12 @@ class TerminalLoginWorker(Worker):
         # credentials or shell profile could easily be sitting in there.
         _log.info(
             "terminal login: spawning %s %s",
-            ta.command,
-            _redact_for_log(" ".join(ta.args)),
+            command,
+            _redact_for_log(" ".join(args)),
         )
 
         process = subprocess.Popen(
-            [ta.command, *ta.args],
+            [command, *args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -220,8 +260,8 @@ class TerminalLoginWorker(Worker):
             orphans.record_started(
                 agent_id=f"{self._agent_id}:terminal-auth",
                 pid=process.pid,
-                command=ta.command,
-                args=list(ta.args),
+                command=command,
+                args=list(args),
                 cwd=self._cwd,
             )
         url_already_found = False

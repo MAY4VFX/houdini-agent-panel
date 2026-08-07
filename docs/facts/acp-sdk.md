@@ -1822,3 +1822,106 @@ this section's own fix.
 - Whether the fxhoudinimcp plugin issue above is related to this one in
   any way (nothing found connecting them) or purely coincidental to both
   showing up in the same log on the same machine.
+
+---
+
+## 19. The bundled Claude binary works for `setup-token` — and where it actually is
+
+The owner's real blocker on mayfx02 was not §18's stuck prompt but the
+manual fallback itself: `npx --yes @anthropic-ai/claude-code setup-token`
+downloads its own ~282 MB single-file binary, and that machine's direct
+link measured ~21 KB per 60s — not slow, never finishing. Asking an
+artist to install the Claude CLI separately (the first fix considered) was
+rejected by the owner: "either do it for everyone, or solve it without
+the CLI."
+
+The fix that shipped instead: `claude-agent-acp` (the ACP adapter this
+panel drives) already bundles the real Claude CLI, to run the agent
+itself, through `@anthropic-ai/claude-agent-sdk-<platform>` — a SEPARATE
+npm package from the standalone `@anthropic-ai/claude-code` the manual
+advice already used. Once ANY conversation with claude-acp has ever
+started on a machine, that platform binary is already sitting in npx's
+own cache, at no extra cost.
+
+### The bundled binary, confirmed live (mayfx02, real run)
+
+`timeout 15 script -qec '<path>/claude setup-token' out.log` (a real PTY
+was required — piping stdin from `/dev/null` produced NO output at all,
+even after 15s; the CLI appears to detect a non-interactive terminal and
+either behaves differently or blocks silently before printing anything).
+Killed before completing — no code was ever pasted. Output, byte for
+byte what an artist would see:
+
+```
+Welcome to Claude Code v2.1.220
+Opening browser to sign in…
+Browser didn't open? Use the url below to sign in (c to copy)
+https://claude.com/cai/oauth/authorize?...
+Paste code here if prompted >
+```
+
+Identical shape to every other measurement of `setup-token` in this
+document (§14, §18): the same OAuth URL format, the same input-prompt
+marker `ui/terminal_login.py` already recognises. No new parsing needed.
+
+### Finding it reliably — what's stable, what isn't
+
+npx keys its own cache by content hash, not by package name — measured
+on two real machines, not assumed:
+
+- mayfx02 (Linux): two different hash directories existed side by side,
+  `.../_npx/539edbc7afd0f13d/.../claude-agent-sdk-linux-x64/claude` and
+  `.../_npx/becf7b9e49303068/.../claude-code-linux-x64/claude` (the
+  LATTER is the standalone package, from an earlier manual attempt —
+  confirms the two packages really are separate, separately cached).
+- This Mac: THREE different hash directories all contained
+  `@anthropic-ai/claude-agent-sdk-darwin-arm64/claude` — stale entries
+  from earlier resolutions (a panel update, a fresh `claude-agent-acp`
+  launch each re-resolving the dependency tree). All three, independently
+  confirmed runnable (`--version` succeeded on every one).
+
+So the hash is never guessable and must never be hardcoded. What IS
+stable, confirmed on both machines: the cache ROOT itself — `npm config
+get cache` answered `~/.npm` on both (Linux and macOS); the platform
+suffix on the package directory name matches Node's own `(platform,
+arch)` naming exactly (`darwin-arm64`, `linux-x64` — the same values
+`node.py::node_platform()` already computes for nodejs.org's own
+archives, so no second mapping table was needed); and the relative
+layout inside a hash directory (`node_modules/@anthropic-ai/claude-agent-
+sdk-<platform>/claude`) was identical on both.
+
+`node.find_cached_npx_binary(scope, name_prefix, binary_name)` is the
+result: globs every hash directory under the (measured, not guessed)
+cache root, matches by name PREFIX within a given scope (not the full
+platform-suffixed name — no need to compute the suffix at all, since a
+wrong-architecture binary simply fails the next step and gets skipped),
+and verifies every candidate by actually running `--version` before
+trusting it — same discipline as `mcp_runtime.find()`'s own search for
+the fx server's interpreter, for the same reason: a path existing proves
+nothing (a half-finished download, a stale wrong-arch leftover). Ties
+(more than one candidate runs) broken by mtime, newest first.
+
+**Cost, measured, not assumed**: the full search-and-verify took ~1.7s on
+this Mac (3 candidates, each independently run and checked) — far too
+slow for the main thread that builds the `AuthMethod`/`TerminalAuth`
+`_builtin_terminal_auth_method` returns (this project's own "Houdini is
+never blocked" rule). Deferred to `TerminalLoginWorker`'s own thread via
+an optional `resolve_command` callable, run once `work()` has already
+started — `_builtin_terminal_auth_method` still returns the npx fallback
+as a synchronous placeholder, overwritten (and reported back via a new
+`command_resolved` signal, so the panel's own "run it yourself" fallback
+text names what's actually running) the moment the real answer is ready.
+
+### Command preference, and why this order
+
+1. `claude` on PATH — skips npx entirely, and measured (§14) to be the
+   only one of the three where nothing has to happen before the CLI
+   prints its first byte.
+2. The bundled binary above — no network at all once found; the ~1.7s
+   local search-and-verify cost is nothing next to a fetch that a bad
+   link may never complete.
+3. `npx --yes @anthropic-ai/claude-code setup-token` — the last resort,
+   kept because a machine that has never run claude-acp at all has
+   nothing bundled to find yet, and this is the only one of the three
+   that still works there. The one that can look exactly like a hang on
+   a bad connection, which is the entire reason for the other two.

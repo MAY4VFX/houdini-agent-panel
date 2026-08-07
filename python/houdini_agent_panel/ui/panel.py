@@ -2829,12 +2829,38 @@ class AgentPanel(QtWidgets.QWidget):
     _BUILTIN_TERMINAL_AUTH_IDS = frozenset({"claude-setup-token"})
 
     def _builtin_terminal_auth_method(self, agent_id: str) -> Any:
+        """The order here is deliberate, cheapest and most reliable first:
+
+        1. A `claude` already on PATH — skips npx's own fetch entirely,
+           measured to happen BEFORE the CLI prints anything at all (seven
+           TCP connections first, §14), and the single slowest, least
+           reliable part of this on a bad connection.
+        2. The bundled binary `claude-agent-acp` already downloaded to run
+           the agent itself — `claude-agent-acp` bundles the real Claude
+           CLI through `@anthropic-ai/claude-agent-sdk-<platform>`, so
+           once ANY conversation with this agent has ever started, on
+           THIS machine, the exact binary `setup-token` needs is already
+           sitting on disk, fetched once already. Confirmed to behave
+           identically to the standalone package (live run, docs/facts/
+           acp-sdk.md §19): same "Welcome to Claude Code", same OAuth
+           URL, same "Paste code here" prompt. This can't be decided HERE
+           though — finding it means a filesystem search plus actually
+           running `--version` on each candidate to confirm it isn't a
+           half-downloaded or wrong-architecture leftover
+           (`node.find_cached_npx_binary`'s own docstring), measured at
+           ~1.7s on this Mac — an eternity on the main thread building
+           this method right now, so it's deferred: this still returns
+           the npx fallback below as a placeholder, and `_start_terminal_
+           login` attaches a resolver that tries this off `TerminalLogin
+           Worker`'s own thread before anything is actually spawned.
+        3. `npx --yes @anthropic-ai/claude-code setup-token` — fetches
+           the whole CLI fresh. Measured on the owner's own machine (a
+           bad link): this package alone is ~282 MB, and at ~21 KB/60s
+           that never finishes, not just "slow" — the only one of the
+           three that can look exactly like a hang.
+        """
         if agent_id != "claude-acp":
             return None
-        # Prefer a `claude` already on PATH: same CLI, but it skips npx's
-        # own fetch entirely — measured to happen BEFORE the CLI prints
-        # anything at all (seven TCP connections first, §14), and the
-        # single slowest, least reliable part of this on a bad connection.
         claude_on_path = shutil.which("claude")
         if claude_on_path:
             command, args = claude_on_path, ["setup-token"]
@@ -3057,12 +3083,28 @@ class AgentPanel(QtWidgets.QWidget):
         self._terminal_login_agent_id = self._agent_id
         self._auth_view.set_pending(message)
 
-        worker = TerminalLoginWorker(self._agent_id, ta, cwd=scene.hip_dir(), parent=self)
+        # `claude-setup-token`'s own npx placeholder (`_builtin_terminal_
+        # auth_method`'s own comment has the full reasoning) gets one more
+        # chance before actually running: `claude-agent-acp` may have
+        # already downloaded the real Claude binary just to run the agent
+        # itself, sitting in npx's own cache — worth a real (if not
+        # instant) look before a ~282 MB fetch that a bad connection may
+        # never finish. Only attached for exactly that placeholder, never
+        # for `claude` already found on PATH or for another agent's own
+        # `terminal_auth` (Kimi's `kimi login` needs no such thing).
+        resolve_command = None
+        if method.id == "claude-setup-token" and ta.command == "npx":
+            resolve_command = self._resolve_claude_terminal_command
+
+        worker = TerminalLoginWorker(
+            self._agent_id, ta, cwd=scene.hip_dir(), parent=self, resolve_command=resolve_command
+        )
         worker.line_received.connect(self._on_terminal_login_line)
         worker.url_found.connect(self._on_terminal_login_url)
         worker.input_requested.connect(self._on_terminal_login_input_requested)
         worker.exited.connect(self._on_terminal_login_exited)
         worker.failed.connect(self._on_terminal_login_failed)
+        worker.command_resolved.connect(self._on_terminal_login_command_resolved)
         self._terminal_login_worker = worker
         worker.start()
 
@@ -3090,6 +3132,42 @@ class AgentPanel(QtWidgets.QWidget):
         stuck_timer.timeout.connect(lambda aid=self._agent_id: self._on_terminal_login_stuck(aid))
         stuck_timer.start(_TERMINAL_LOGIN_STUCK_MS)
         self._terminal_login_stuck_timer = stuck_timer
+
+    @staticmethod
+    def _resolve_claude_terminal_command() -> tuple[str, list[str]] | None:
+        """Runs on `TerminalLoginWorker`'s own thread, never the main one
+        — see `_builtin_terminal_auth_method`'s own comment for why this
+        can't be decided synchronously (measured: ~1.7s on this Mac to
+        search and verify). `staticmethod` and no `self` touched at all,
+        deliberately: this only reads the filesystem and runs a
+        subprocess, nothing that needs Qt's main-thread affinity, and
+        keeping it that way is what makes it safe to call from here.
+
+        `None` — nothing found, or nothing that actually runs (a
+        half-finished download, a stale wrong-architecture leftover) —
+        means keep the npx placeholder `_builtin_terminal_auth_method`
+        already put in `terminal_auth`; this never invents a THIRD
+        option, only possibly a better second one.
+        """
+        from .. import node as node_module
+
+        bundled = node_module.find_cached_npx_binary(
+            "@anthropic-ai", "claude-agent-sdk-", "claude"
+        )
+        if bundled is None:
+            return None
+        return str(bundled), ["setup-token"]
+
+    def _on_terminal_login_command_resolved(self, command: str, args: list) -> None:
+        """The worker found something better than the npx placeholder it
+        started with (`_resolve_claude_terminal_command`, run off the main
+        thread) — update the "run it yourself" fallback text
+        (`_on_terminal_login_stuck`) so it names what's actually running,
+        not the guess `_start_terminal_login` began with.
+        """
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
+        self._terminal_login_command = " ".join([command, *args])
 
     def _on_terminal_login_line(self, line: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:
@@ -3130,18 +3208,33 @@ class AgentPanel(QtWidgets.QWidget):
         on something this panel never recognised. Says so explicitly and
         names the manual fallback — the Cancel button was already there,
         it just had no reason pointing at it before now.
+
+        Reported for real, a second time (docs/facts/acp-sdk.md §19): this
+        fired — confirmed, not assumed, by actually watching a shortened
+        timer run — but was never SEEN, because it used to only write into
+        `AuthView`'s own label, gated on the artist still being on
+        PAGE_AUTH at the exact moment it fires. A download that looks
+        stuck for over a minute is exactly the kind of wait someone
+        navigates away from; the message was then computed and silently
+        discarded, leaving no record anywhere that it ever happened. Now
+        always reaches the feed too (`_note`, persists regardless of which
+        page is showing when this fires) — the auth screen's own label
+        stays as an extra, immediate copy for whoever IS still looking at
+        it, not the only copy.
         """
         self._terminal_login_stuck_timer = None
         if agent_id != self._agent_id or self._terminal_login_worker is None:
             return
         if self._terminal_login_input_requested_seen:
             return  # already actionable — the artist has a field to use
+        message = (
+            "This is taking much longer than usual, and nothing recognisable "
+            "has come back since. Press Cancel below and run it yourself in "
+            f"a terminal instead:\n    {self._terminal_login_command}"
+        )
         if self._pages.currentIndex() == self.PAGE_AUTH:
-            self._auth_view.set_pending_detail(
-                "This is taking much longer than usual, and nothing recognisable "
-                "has come back since. Press Cancel below and run it yourself in "
-                f"a terminal instead:\n    {self._terminal_login_command}"
-            )
+            self._auth_view.set_pending_detail(message)
+        self._note(message)
 
     def _on_terminal_login_input_requested(self) -> None:
         """The child printed its own input prompt (Claude's `setup-token`,
@@ -3323,6 +3416,7 @@ class AgentPanel(QtWidgets.QWidget):
             (worker.input_requested, self._on_terminal_login_input_requested),
             (worker.exited, self._on_terminal_login_exited),
             (worker.failed, self._on_terminal_login_failed),
+            (worker.command_resolved, self._on_terminal_login_command_resolved),
         ):
             with contextlib.suppress(RuntimeError, TypeError):
                 signal.disconnect(slot)

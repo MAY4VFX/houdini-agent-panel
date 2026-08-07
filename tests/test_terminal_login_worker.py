@@ -419,3 +419,102 @@ def test_build_env_adds_nothing_when_no_proxy_is_configured(monkeypatch):
     env = TerminalLoginWorker.build_env(ta)
 
     assert "HTTPS_PROXY" not in env
+
+
+# --- resolve_command ---------------------------------------------------
+#
+# `_builtin_terminal_auth_method` can't decide synchronously whether a
+# better command than its npx placeholder exists — confirming a candidate
+# actually runs took ~1.7s measured on a real Mac, far too slow for the
+# main thread. `resolve_command` is the escape hatch: called once, at the
+# START of `work()` — already off the main thread — to get the REAL
+# `(command, args)` before anything is spawned.
+
+
+def test_resolve_command_overrides_the_placeholder(qapp, tmp_path):
+    placeholder = TerminalAuth(command="npx", args=["--yes", "unused-placeholder"], env={})
+    resolved_script = "import sys\nprint('resolved and running')\nsys.exit(0)\n"
+
+    worker = TerminalLoginWorker(
+        "claude-acp",
+        placeholder,
+        cwd=str(tmp_path),
+        resolve_command=lambda: (sys.executable, ["-c", resolved_script]),
+    )
+    lines: list[str] = []
+    resolved: list[tuple[str, list]] = []
+    worker.line_received.connect(lines.append)
+    worker.command_resolved.connect(lambda cmd, args: resolved.append((cmd, args)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(lines))
+
+    assert any("resolved and running" in line for line in lines)
+    assert resolved == [(sys.executable, ["-c", resolved_script])]
+    worker.wait(3000)
+
+
+def test_resolve_command_returning_none_keeps_the_placeholder(qapp, tmp_path):
+    """`None` means nothing better was found (or nothing that actually
+    ran) — the npx placeholder still has to run, not silently do
+    nothing."""
+    script = "import sys\nprint('placeholder ran')\nsys.exit(0)\n"
+    placeholder = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+
+    worker = TerminalLoginWorker(
+        "claude-acp", placeholder, cwd=str(tmp_path), resolve_command=lambda: None
+    )
+    lines: list[str] = []
+    resolved: list[tuple[str, list]] = []
+    worker.line_received.connect(lines.append)
+    worker.command_resolved.connect(lambda cmd, args: resolved.append((cmd, args)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(lines))
+
+    assert any("placeholder ran" in line for line in lines)
+    assert resolved == []  # never fires when nothing actually changed
+    worker.wait(3000)
+
+
+def test_resolve_command_returning_the_same_command_does_not_re_signal(qapp, tmp_path):
+    """`command_resolved` exists so the panel can correct a stale "run it
+    yourself" fallback string — firing it for a resolver that agreed with
+    the placeholder would be a no-op announcement, not new information."""
+    script = "import sys\nprint('same command')\nsys.exit(0)\n"
+    ta = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+
+    worker = TerminalLoginWorker(
+        "claude-acp",
+        ta,
+        cwd=str(tmp_path),
+        resolve_command=lambda: (sys.executable, ["-c", script]),
+    )
+    lines: list[str] = []
+    resolved: list[tuple[str, list]] = []
+    worker.line_received.connect(lines.append)
+    worker.command_resolved.connect(lambda cmd, args: resolved.append((cmd, args)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(lines))
+
+    assert resolved == []
+    worker.wait(3000)
+
+
+def test_no_resolve_command_uses_terminal_auth_unchanged(qapp, tmp_path):
+    """The ordinary case (Kimi, or Claude with `claude` already on PATH):
+    no resolver given, `work()` never touches anything besides what
+    `terminal_auth` already said."""
+    script = "import sys\nprint('plain run')\nsys.exit(0)\n"
+    ta = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+
+    worker = TerminalLoginWorker("kimi", ta, cwd=str(tmp_path))
+    lines: list[str] = []
+    worker.line_received.connect(lines.append)
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(lines))
+
+    assert any("plain run" in line for line in lines)
+    worker.wait(3000)

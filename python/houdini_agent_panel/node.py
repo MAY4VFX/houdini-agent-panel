@@ -259,6 +259,96 @@ def _npx_cli_path(node_bin: Path) -> Path:
     )
 
 
+def npm_cache_dir() -> Path:
+    """Where npm/npx keep their own cache — npx's downloaded packages live
+    under `<this>/_npx/<hash>/node_modules/...`.
+
+    `NPM_CONFIG_CACHE` (npm's own env var — npm itself accepts both the
+    upper-case form and `npm_config_cache`, so both are checked here)
+    overrides the default when set; cheap to read from this process's own
+    environment, no need to spawn `npm config get cache` for it. The
+    default itself is npm's own documented one (POSIX `~/.npm`, Windows
+    `%LocalAppData%\\npm-cache`) — measured directly on this Mac and on a
+    real Linux machine (`npm config get cache` answered `~/.npm` on both);
+    the Windows branch is npm's documented default, not independently
+    verified — no Windows machine in this project (`self_update.py`'s own
+    docstring already notes the same gap for a different reason).
+    """
+    for name in ("NPM_CONFIG_CACHE", "npm_config_cache"):
+        override = os.environ.get(name)
+        if override:
+            return Path(override)
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "npm-cache"
+    return Path.home() / ".npm"
+
+
+def find_cached_npx_binary(scope: str, name_prefix: str, binary_name: str) -> Path | None:
+    """The newest, actually-runnable `binary_name` inside any npx cache
+    entry whose package name (within `scope`) starts with `name_prefix` —
+    e.g. `scope="@anthropic-ai"`, `name_prefix="claude-agent-sdk-"` finds
+    Claude's own platform-specific package (`claude-agent-sdk-darwin-
+    arm64`, `-linux-x64`, ...) without needing to know which platform
+    suffix this machine uses.
+
+    npx keys its cache by content hash, not by package name — measured on
+    two real machines (this Mac, a Linux box): the SAME package showed up
+    under three and two different, unpredictable hash directories
+    respectively (stale entries left by earlier resolutions — a fresh
+    `claude-agent-acp` launch, a panel update, anything that re-resolves
+    the dependency tree). So this is a glob across every hash directory,
+    never a single guessed path. And — same discipline as `mcp_runtime.
+    find()` for the fx server's own interpreter search — a path existing
+    proves nothing; only actually running `--version` does, so every
+    candidate is verified before being trusted, not just the first match.
+    Ties (more than one candidate actually runs) broken by mtime, newest
+    first: nothing else distinguishes them.
+    """
+    cache_root = npm_cache_dir() / "_npx"
+    if not cache_root.is_dir():
+        return None
+    candidates: list[Path] = []
+    try:
+        hash_dirs = list(cache_root.iterdir())
+    except OSError:
+        return None
+    for hash_dir in hash_dirs:
+        scope_dir = hash_dir / "node_modules" / scope
+        if not scope_dir.is_dir():
+            continue
+        try:
+            entries = list(scope_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.startswith(name_prefix):
+                continue
+            candidate = entry / binary_name
+            if candidate.is_file():
+                candidates.append(candidate)
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for candidate in candidates:
+        if _runs(candidate):
+            return candidate
+    return None
+
+
+def _runs(binary: Path) -> bool:
+    """Does `binary --version` actually work? The only question that
+    counts — an npx cache entry can be a half-written download, a build
+    for the wrong architecture that happened to land in the right-looking
+    directory, or simply stale enough that the OS no longer trusts it."""
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"], capture_output=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def path_with_node(node_bin: Path, base: str | None = None) -> str:
     """A PATH with our `node`'s directory prepended.
 

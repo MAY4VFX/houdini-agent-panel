@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -274,3 +275,155 @@ def test_npx_argv_resolves_symlinked_system_node(tmp_path):
 
     argv = node.npx_argv(symlink_bin, "pkg", [])
     assert argv[1] == str(npx_cli)
+
+
+# --- npm_cache_dir -------------------------------------------------------
+
+
+def test_npm_cache_dir_defaults_to_home_dot_npm(monkeypatch, tmp_path):
+    monkeypatch.setattr(node.platform, "system", lambda: "Darwin")
+    monkeypatch.delenv("NPM_CONFIG_CACHE", raising=False)
+    monkeypatch.delenv("npm_config_cache", raising=False)
+    monkeypatch.setattr(node.Path, "home", lambda: tmp_path)
+    assert node.npm_cache_dir() == tmp_path / ".npm"
+
+
+def test_npm_cache_dir_honours_upper_case_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path / "custom-cache"))
+    assert node.npm_cache_dir() == tmp_path / "custom-cache"
+
+
+def test_npm_cache_dir_honours_lower_case_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("NPM_CONFIG_CACHE", raising=False)
+    monkeypatch.setenv("npm_config_cache", str(tmp_path / "custom-cache"))
+    assert node.npm_cache_dir() == tmp_path / "custom-cache"
+
+
+def test_npm_cache_dir_windows_default_uses_localappdata(monkeypatch, tmp_path):
+    monkeypatch.setattr(node.platform, "system", lambda: "Windows")
+    monkeypatch.delenv("NPM_CONFIG_CACHE", raising=False)
+    monkeypatch.delenv("npm_config_cache", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert node.npm_cache_dir() == tmp_path / "npm-cache"
+
+
+# --- find_cached_npx_binary ------------------------------------------------
+
+
+def _fake_runnable_binary(path: Path, version: str = "1.0.0") -> None:
+    """A real, tiny, runnable script — same idea as
+    `test_self_update_worker.py`'s own fake `uvx`: `sys.executable` can't
+    be the file itself here (there's no `-c` script text to hand it), so
+    this writes an actual file with a shebang, matching what a real
+    executable on disk looks like."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'#!{sys.executable}\nimport sys\nprint("{version}")\nsys.exit(0)\n')
+    path.chmod(0o755)
+
+
+def _fake_broken_binary(path: Path) -> None:
+    """Looks like a binary (exists, executable bit set) but fails to run —
+    the "half-downloaded or wrong-architecture leftover" case."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(1)\n")
+    path.chmod(0o755)
+
+
+def test_find_cached_npx_binary_finds_it_inside_a_hash_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path))
+    binary = tmp_path / "_npx" / "abc123" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-darwin-arm64"
+    ) / "claude"
+    _fake_runnable_binary(binary)
+
+    found = node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude")
+    assert found == binary
+
+
+def test_find_cached_npx_binary_none_when_cache_root_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path / "does-not-exist"))
+    assert node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude") is None
+
+
+def test_find_cached_npx_binary_none_when_nothing_matches(tmp_path, monkeypatch):
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path))
+    other = tmp_path / "_npx" / "abc123" / "node_modules" / "@other-scope" / "some-pkg" / "claude"
+    _fake_runnable_binary(other)
+    assert node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude") is None
+
+
+def test_find_cached_npx_binary_skips_a_binary_that_does_not_run(tmp_path, monkeypatch):
+    """The exact "half-downloaded or wrong-architecture leftover" case —
+    a path existing proves nothing (same discipline as `mcp_runtime.
+    find()`'s own search)."""
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path))
+    broken = tmp_path / "_npx" / "broken-hash" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-linux-x64"
+    ) / "claude"
+    _fake_broken_binary(broken)
+    working = tmp_path / "_npx" / "working-hash" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-linux-x64"
+    ) / "claude"
+    _fake_runnable_binary(working)
+
+    found = node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude")
+    assert found == working
+
+
+def test_find_cached_npx_binary_picks_the_newest_when_several_work(tmp_path, monkeypatch):
+    """npx keys its cache by content hash, not package name — measured on
+    two real machines (this Mac, a Linux box): the SAME package can end
+    up under several different hash directories at once, all left over
+    from earlier resolutions. Nothing else distinguishes them, so the
+    newest wins."""
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path))
+    older = tmp_path / "_npx" / "older-hash" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-darwin-arm64"
+    ) / "claude"
+    newer = tmp_path / "_npx" / "newer-hash" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-darwin-arm64"
+    ) / "claude"
+    _fake_runnable_binary(older, version="1.0.0")
+    _fake_runnable_binary(newer, version="2.0.0")
+    # Both now exist; force a real mtime difference rather than trusting
+    # write order alone (some filesystems have coarse mtime resolution).
+    import os
+    import time
+
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(newer, (now, now))
+
+    found = node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude")
+    assert found == newer
+
+
+def test_find_cached_npx_binary_matches_by_prefix_not_exact_platform_suffix(tmp_path, monkeypatch):
+    """No second mapping table needed to compute the exact platform
+    suffix — any package starting with `name_prefix` is tried, and a
+    wrong-architecture one simply fails to run and gets skipped on its
+    own (`test_find_cached_npx_binary_skips_a_binary_that_does_not_run`
+    already covers that half; this confirms the prefix match itself
+    doesn't require an exact suffix)."""
+    monkeypatch.setenv("NPM_CONFIG_CACHE", str(tmp_path))
+    binary = tmp_path / "_npx" / "abc" / "node_modules" / "@anthropic-ai" / (
+        "claude-agent-sdk-linux-arm64"
+    ) / "claude"
+    _fake_runnable_binary(binary)
+    assert node.find_cached_npx_binary("@anthropic-ai", "claude-agent-sdk-", "claude") == binary
+
+
+def test_runs_true_for_a_real_working_binary(tmp_path):
+    binary = tmp_path / "claude"
+    _fake_runnable_binary(binary)
+    assert node._runs(binary) is True
+
+
+def test_runs_false_for_a_binary_that_exits_nonzero(tmp_path):
+    binary = tmp_path / "claude"
+    _fake_broken_binary(binary)
+    assert node._runs(binary) is False
+
+
+def test_runs_false_for_a_missing_file(tmp_path):
+    assert node._runs(tmp_path / "does-not-exist") is False
