@@ -50,6 +50,18 @@ _MIN_RAIL_WIDTH = 180
 #: surface's own right edge even right at the threshold.
 _LINK_MIN_SURFACE_WIDTH = 260
 
+#: Nothing capped this before pasted images existed — a file attached
+#: through the "+" dialog or drag-and-drop went straight from disk to a
+#: base64 blob on the wire, whatever its size. 10 MiB (raw bytes, before
+#: base64 inflates it by ~1/3) is a judgment call, not a measured provider
+#: limit — picked as comfortably under what the agent SDKs this panel talks
+#: to are documented to accept for a single image, with room to spare. Only
+#: applied to `image` blocks (the pasted-image feature this exists for, and
+#: the existing file-based image attachment it shares a code path with) —
+#: `resource` blocks (arbitrary files, `supports_embedded_context`) are a
+#: separate, pre-existing gap this task didn't ask to close.
+_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
 
 class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
     """The input field: Enter sends, Shift+Enter breaks the line.
@@ -64,6 +76,19 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
     navigate_requested = Signal(int)  # -1 / +1
     escape_requested = Signal()
     accept_requested = Signal()
+    #: A screenshot or copied image with no file behind it — raw pixels,
+    #: straight off the clipboard (`QMimeData.hasImage()`). Measured on
+    #: this Mac with a real `screencapture -c`: `hasImage=True`,
+    #: `hasUrls=False`, `hasText=False` — nothing else on the clipboard to
+    #: fall back to, so there is no "also insert some text" case to worry
+    #: about for this one.
+    image_pasted = Signal(QtGui.QImage)
+    #: A copied FILE that happens to be an image — `QMimeData.hasUrls()`,
+    #: not `hasImage()`. This is the "Finder file-copy gives a path, not
+    #: pixels" case: reused via `Composer.add_attachment`, the same path a
+    #: drag-and-drop or the "+" dialog already takes, since the block this
+    #: builds is identical either way.
+    image_file_pasted = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -93,6 +118,44 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source: QtCore.QMimeData) -> None:  # noqa: N802 - Qt override
+        """Paste — Ctrl+V, or the input field's own right-click Paste.
+
+        A file copied in Finder and a screenshot copied from the screenshot
+        tool are NOT the same shape on the clipboard (measured on this Mac:
+        `screencapture -c` gives `hasImage=True` with no URL at all; a
+        `QMimeData` built from a file URL, the documented shape for a
+        Finder-style file copy, gives `hasUrls=True` — and ALSO
+        `hasText=True`, Qt's own derived text form of the URL list, which
+        is why URLs are checked before falling through to plain text: left
+        unchecked, pasting a copied image FILE would insert its raw path
+        as text instead of attaching it). Neither is exclusive with a
+        clipboard that also holds real text (an app that puts both an
+        image and a caption on the clipboard) — an image present and
+        usable always wins over inserting its text form, since there is
+        essentially never a meaningful text alternative to a picture.
+
+        Ordinary text paste (the overwhelming common case) never reaches
+        either branch below and falls straight through to Qt's own
+        default, untouched.
+        """
+        if source.hasUrls():
+            image_paths = [
+                url.toLocalFile()
+                for url in source.urls()
+                if url.isLocalFile() and _looks_like_image(url.toLocalFile())
+            ]
+            if image_paths:
+                for path in image_paths:
+                    self.image_file_pasted.emit(path)
+                return
+        if source.hasImage():
+            image = QtGui.QImage(source.imageData())
+            if not image.isNull():
+                self.image_pasted.emit(image)
+                return
+        super().insertFromMimeData(source)
 
 
 class _CommandPopup(QtWidgets.QListWidget):
@@ -261,6 +324,12 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
     """
     mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     if info.supports_image and mime_type.startswith("image/"):
+        # Checked via `stat()`, before reading: rejecting a file this size
+        # is exactly the case a `read_bytes()` first would be wasteful and
+        # slow for — no reason to hold the whole thing in memory just to
+        # throw it away.
+        if path.stat().st_size > _MAX_ATTACHMENT_BYTES:
+            return None
         data = path.read_bytes()
         return {
             "type": "image",
@@ -283,6 +352,50 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
             }
         return {"type": "resource", "resource": {"uri": uri, "text": text, "mimeType": mime_type}}
     return None
+
+
+def _looks_like_image(path: str) -> bool:
+    return (mimetypes.guess_type(path)[0] or "").startswith("image/")
+
+
+def attachment_rejection_reason(path: Path, info: "AgentInfo") -> str | None:
+    """Why `build_attachment_block` would refuse `path` — `None` means it
+    wouldn't. A file can be refused for two different reasons now that
+    there's a size cap (`_MAX_ATTACHMENT_BYTES`) as well as a capability
+    check, and "can't take" read as wrong/confusing for a file the agent
+    would gladly take if it were smaller.
+    """
+    mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    if info.supports_image and mime_type.startswith("image/"):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return "unreadable"
+        if size > _MAX_ATTACHMENT_BYTES:
+            return "too large"
+        return None
+    if info.supports_embedded_context:
+        return None
+    return "unsupported"
+
+
+def _image_block_from_qimage(image: "QtGui.QImage") -> dict | None:
+    """A pasted screenshot has no file behind it — re-encode straight from
+    the pixel data Qt already decoded off the clipboard. PNG: lossless,
+    universally accepted wherever `image` blocks are, and what every agent
+    measured for this project already treats as an ordinary image mime
+    type. `None` past `_MAX_ATTACHMENT_BYTES` — the same cap
+    `build_attachment_block` applies to a file on disk, checked here before
+    the bytes are base64'd and queued for the wire, not after.
+    """
+    buffer = QtCore.QBuffer()
+    buffer.open(QtCore.QIODevice.WriteOnly)
+    if not image.save(buffer, "PNG"):
+        return None
+    data = bytes(buffer.data())
+    if not data or len(data) > _MAX_ATTACHMENT_BYTES:
+        return None
+    return {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": "image/png"}
 
 
 #: Attachment chips sit inside the input card — they must never drive its height.
@@ -591,6 +704,8 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.navigate_requested.connect(self._on_popup_navigate)
         self._text_edit.escape_requested.connect(self._hide_popup)
         self._text_edit.accept_requested.connect(self._on_popup_accept)
+        self._text_edit.image_pasted.connect(self._on_image_pasted)
+        self._text_edit.image_file_pasted.connect(self._on_image_file_pasted)
 
         self._popup = _CommandPopup(self)
         #: Which command's argument the popup is currently hinting at, while
@@ -1169,8 +1284,11 @@ class Composer(QtWidgets.QWidget):
         """Add a file as an attachment for the next send.
 
         `False` — the current agent's capabilities don't allow this
-        particular file (not an image, and no `embeddedContext`), or the
-        agent isn't connected yet.
+        particular file (not an image, and no `embeddedContext`), it's an
+        image over `_MAX_ATTACHMENT_BYTES`, or the agent isn't connected
+        yet. Callers that want to say WHY use `attachment_rejection_reason`
+        rather than guess from this bare bool (`_reject_attachments`
+        already does).
         """
         if self._info is None:
             return False
@@ -1185,6 +1303,32 @@ class Composer(QtWidgets.QWidget):
         self._attachments.append(block)
         self._refresh_attachments_bar()
         return True
+
+    def _emit_attachment_rejections(self, failed: list[Path]) -> None:
+        """Say why each of `failed` was refused — grouped by reason, shared
+        by every way a file can be attached ("+" dialog, drag-and-drop, a
+        pasted image file). "This agent can't take X" is the wrong thing to
+        say about a file the agent would gladly take if it were smaller;
+        conflating the two (as this used to, before there was a second
+        reason to refuse one) reads as a made-up capability limit for
+        what's actually a size problem.
+        """
+        if not failed:
+            return
+        too_large: list[str] = []
+        unsupported: list[str] = []
+        for path in failed:
+            reason = attachment_rejection_reason(path, self._info) if self._info else "unsupported"
+            (too_large if reason == "too large" else unsupported).append(path.name)
+        messages = []
+        if too_large:
+            limit_mb = _MAX_ATTACHMENT_BYTES // (1024 * 1024)
+            messages.append(f"Too large (over {limit_mb} MB): " + ", ".join(too_large))
+        if unsupported:
+            messages.append("This agent can't take: " + ", ".join(unsupported))
+        # Never drop a file without a word — silence here reads as
+        # "attaching doesn't work", whichever route was used to try it.
+        self.attachment_rejected.emit(" ".join(messages))
 
     def _attachment_filter(self) -> str:
         """A file filter that matches what this agent actually accepts.
@@ -1211,16 +1355,12 @@ class Composer(QtWidgets.QWidget):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "Attach files", "", self._attachment_filter()
         )
-        rejected: list[str] = []
+        failed = []
         for raw_path in paths:
-            if not self.add_attachment(Path(raw_path)):
-                rejected.append(Path(raw_path).name)
-        if rejected:
-            # Never drop a file without a word. The agent's capabilities are
-            # the reason, and the artist has no way to guess them.
-            self.attachment_rejected.emit(
-                "This agent can't take: " + ", ".join(rejected)
-            )
+            path = Path(raw_path)
+            if not self.add_attachment(path):
+                failed.append(path)
+        self._emit_attachment_rejections(failed)
 
     def _remove_attachment(self, index: int) -> None:
         if 0 <= index < len(self._attachments):
@@ -1288,7 +1428,7 @@ class Composer(QtWidgets.QWidget):
 
     def dropEvent(self, event: QtGui.QDropEvent) -> None:  # noqa: N802
         added_any = False
-        rejected: list[str] = []
+        failed: list[Path] = []
         for url in event.mimeData().urls():
             if not url.isLocalFile():
                 continue
@@ -1296,15 +1436,52 @@ class Composer(QtWidgets.QWidget):
             if self.add_attachment(path):
                 added_any = True
             else:
-                rejected.append(path.name)
-        if rejected:
-            # Same rule as the "+" button: a file is never dropped without a
-            # word. Silence here read as "drag and drop doesn't work".
-            self.attachment_rejected.emit("This agent can't take: " + ", ".join(rejected))
+                failed.append(path)
+        # Same rule as the "+" button: a file is never dropped without a
+        # word. Silence here read as "drag and drop doesn't work".
+        self._emit_attachment_rejections(failed)
         if added_any:
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    # --- pasted images -------------------------------------------------------
+
+    def _on_image_file_pasted(self, path: str) -> None:
+        """A copied FILE that happens to be an image (`_GrowingTextEdit.
+        image_file_pasted`) — the "Finder file-copy gives a path, not
+        pixels" case. Reuses `add_attachment`, the exact same path
+        drag-and-drop and the "+" dialog already take for an image file;
+        the block built is identical either way, so there is no reason for
+        this to be a separate code path past routing the signal here.
+        """
+        if self._info is None:
+            self.attachment_rejected.emit("Connect an agent before attaching files.")
+            return
+        candidate = Path(path)
+        if not self.add_attachment(candidate):
+            self._emit_attachment_rejections([candidate])
+
+    def _on_image_pasted(self, image: QtGui.QImage) -> None:
+        """A screenshot or a copied image with no file behind it
+        (`_GrowingTextEdit.image_pasted`) — raw pixels straight off the
+        clipboard. `supports_image` gates this the same as every other
+        attachment route (`build_attachment_block`'s own rule): the "agent
+        doesn't support it, the control doesn't get drawn" project rule,
+        applied to a paste instead of a button.
+        """
+        if self._info is None or not self._info.supports_image:
+            self.attachment_rejected.emit(
+                "Connect an agent that accepts images before pasting one."
+            )
+            return
+        block = _image_block_from_qimage(image)
+        if block is None:
+            limit_mb = _MAX_ATTACHMENT_BYTES // (1024 * 1024)
+            self.attachment_rejected.emit(f"That image is too large to attach (over {limit_mb} MB).")
+            return
+        self._attachments.append(block)
+        self._refresh_attachments_bar()
 
     # --- voice -------------------------------------------------------------
 

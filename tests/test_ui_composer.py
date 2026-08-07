@@ -11,10 +11,14 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 from houdini_agent_panel.client import AgentInfo
 from houdini_agent_panel.sessions import AvailableCommand, SessionMode, Usage
 from houdini_agent_panel.ui import theme
+from houdini_agent_panel.ui import composer as composer_mod
 from houdini_agent_panel.ui.composer import (
     Composer,
+    _image_block_from_qimage,
     _is_marketplace_command,
+    _looks_like_image,
     _parse_enum_hint,
+    attachment_rejection_reason,
     build_attachment_block,
 )
 
@@ -345,6 +349,225 @@ def test_build_attachment_block_none_without_capability(tmp_path):
     path = tmp_path / "a.png"
     path.write_bytes(b"data")
     assert build_attachment_block(path, _info()) is None
+
+
+def test_build_attachment_block_image_over_the_cap_is_refused(tmp_path, monkeypatch):
+    """Nothing capped this before pasted images existed — a file attached
+    through the dialog or drag-and-drop went straight from disk to a
+    base64 blob, whatever its size."""
+    monkeypatch.setattr(composer_mod, "_MAX_ATTACHMENT_BYTES", 4)
+    path = tmp_path / "a.png"
+    path.write_bytes(b"more than four bytes")
+    assert build_attachment_block(path, _info(supports_image=True)) is None
+
+
+# --- pasting images --------------------------------------------------------
+
+
+def _mime_with_image(color: str = "red", size: int = 8) -> QtCore.QMimeData:
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtGui.QColor(color))
+    mime = QtCore.QMimeData()
+    mime.setImageData(pixmap.toImage())
+    return mime
+
+
+def _mime_with_file_url(path: Path) -> QtCore.QMimeData:
+    mime = QtCore.QMimeData()
+    mime.setUrls([QtCore.QUrl.fromLocalFile(str(path))])
+    return mime
+
+
+def test_looks_like_image_by_extension():
+    assert _looks_like_image("/tmp/shot.png") is True
+    assert _looks_like_image("/tmp/shot.JPG") is True
+    assert _looks_like_image("/tmp/scene.hip") is False
+    assert _looks_like_image("/tmp/no_extension") is False
+
+
+def test_pasting_plain_text_is_unaffected(qapp):
+    """The overwhelming common case — a paste with no image on the
+    clipboard at all must reach Qt's own default handling untouched."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    mime = QtCore.QMimeData()
+    mime.setText("make the rotor emit dust")
+    composer._text_edit.insertFromMimeData(mime)
+
+    assert composer._text_edit.toPlainText() == "make the rotor emit dust"
+    assert composer._attachments == []
+
+
+def test_pasting_a_raw_image_adds_an_attachment_when_supported(qapp):
+    """A screenshot copied to the clipboard — `hasImage`, no file behind
+    it (measured for real on this Mac with `screencapture -c`:
+    `hasImage=True`, `hasUrls=False`, `hasText=False`)."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    composer._text_edit.insertFromMimeData(_mime_with_image())
+
+    assert len(composer._attachments) == 1
+    assert composer._attachments[0]["type"] == "image"
+    assert composer._attachments[0]["mimeType"] == "image/png"
+    # Nothing was typed into the field — a raw image paste has no text
+    # form worth inserting.
+    assert composer._text_edit.toPlainText() == ""
+
+
+def test_pasting_a_raw_image_is_rejected_without_supports_image(qapp):
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(), "")
+    rejected = []
+    composer.attachment_rejected.connect(rejected.append)
+
+    composer._text_edit.insertFromMimeData(_mime_with_image())
+
+    assert composer._attachments == []
+    assert rejected and "before pasting" in rejected[0]
+
+
+def test_pasting_a_copied_image_file_reuses_the_attach_path(qapp, tmp_path):
+    """The "Finder file-copy gives a path, not pixels" case — a `QMimeData`
+    built from a file URL, the documented shape for a file copied in
+    Finder (this project's own `screencapture -c` test confirmed the
+    RAW-PIXEL case directly; driving Finder itself to confirm this exact
+    shape was not possible in this sandbox — see the write-up). Routed
+    through `add_attachment`, the same path drag-and-drop already uses."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    image_path = tmp_path / "pic.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngdata")
+
+    composer._text_edit.insertFromMimeData(_mime_with_file_url(image_path))
+
+    assert len(composer._attachments) == 1
+    assert base64.b64decode(composer._attachments[0]["data"]) == image_path.read_bytes()
+    assert composer._text_edit.toPlainText() == ""
+
+
+def test_a_file_url_does_not_fall_through_to_its_own_path_as_text(qapp, tmp_path):
+    """Qt derives a text form of a URL list too (`hasText` is also True for
+    a `hasUrls`-only `QMimeData`, measured directly) — checked here so a
+    copied image file can never silently paste as its raw path instead of
+    being recognised."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    image_path = tmp_path / "pic.png"
+    image_path.write_bytes(b"data")
+
+    composer._text_edit.insertFromMimeData(_mime_with_file_url(image_path))
+
+    assert str(image_path) not in composer._text_edit.toPlainText()
+    assert composer._text_edit.toPlainText() == ""
+
+
+def test_pasting_a_non_image_file_url_falls_through_to_text(qapp, tmp_path):
+    """Only images are this feature's concern — a non-image file reference
+    on the clipboard is left to Qt's own default (usually its path, or
+    nothing), not silently swallowed as an unrecognised attachment."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    other = tmp_path / "notes.txt"
+    other.write_text("hi", "utf-8")
+
+    composer._text_edit.insertFromMimeData(_mime_with_file_url(other))
+
+    assert composer._attachments == []
+
+
+def test_image_and_text_together_the_image_wins(qapp):
+    """A clipboard that holds both (some apps put a caption alongside a
+    copied image) — measured directly: `hasImage` and `hasText` can both
+    be true at once. There is essentially never a meaningful text
+    alternative to a picture, so the image is what gets attached, not a
+    garbled text insertion."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    mime = _mime_with_image()
+    mime.setText("a caption, incidentally")
+
+    composer._text_edit.insertFromMimeData(mime)
+
+    assert len(composer._attachments) == 1
+    assert composer._text_edit.toPlainText() == ""
+
+
+def test_pasted_image_over_the_cap_is_rejected_with_a_clear_reason(qapp, monkeypatch):
+    monkeypatch.setattr(composer_mod, "_MAX_ATTACHMENT_BYTES", 4)
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    rejected = []
+    composer.attachment_rejected.connect(rejected.append)
+
+    composer._text_edit.insertFromMimeData(_mime_with_image())
+
+    assert composer._attachments == []
+    assert rejected and "too large" in rejected[0].lower()
+
+
+def test_attachment_rejection_reason_distinguishes_too_large_from_unsupported(tmp_path, monkeypatch):
+    small = tmp_path / "small.png"
+    small.write_bytes(b"tiny")
+    big = tmp_path / "big.png"
+    big.write_bytes(b"not actually huge, just over the lowered cap")
+
+    assert attachment_rejection_reason(small, _info(supports_image=True)) is None
+    assert attachment_rejection_reason(small, _info()) == "unsupported"
+
+    monkeypatch.setattr(composer_mod, "_MAX_ATTACHMENT_BYTES", 4)
+    assert attachment_rejection_reason(big, _info(supports_image=True)) == "too large"
+
+
+def test_attach_dialog_rejection_message_groups_by_reason(qapp, tmp_path, monkeypatch):
+    """"This agent can't take X" is the wrong thing to say about a file
+    the agent would gladly take if it were smaller — the two reasons get
+    two clauses, not one blanket message."""
+    monkeypatch.setattr(composer_mod, "_MAX_ATTACHMENT_BYTES", 4)
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+    rejected = []
+    composer.attachment_rejected.connect(rejected.append)
+
+    big = tmp_path / "big.png"
+    big.write_bytes(b"more than four bytes of image data")
+    other = tmp_path / "scene.hip"
+    other.write_bytes(b"not an image at all")
+
+    composer._emit_attachment_rejections([big, other])
+
+    assert len(rejected) == 1
+    assert "big.png" in rejected[0] and "too large" in rejected[0].lower()
+    assert "scene.hip" in rejected[0] and "can't take" in rejected[0]
+
+
+def test_image_block_from_qimage_round_trips_real_pixels():
+    pixmap = QtGui.QPixmap(4, 4)
+    pixmap.fill(QtGui.QColor("blue"))
+    block = _image_block_from_qimage(pixmap.toImage())
+
+    assert block["type"] == "image"
+    assert block["mimeType"] == "image/png"
+    decoded = QtGui.QImage()
+    decoded.loadFromData(base64.b64decode(block["data"]), "PNG")
+    assert decoded.size() == pixmap.toImage().size()
+
+
+def test_image_block_from_qimage_none_over_the_cap(monkeypatch):
+    monkeypatch.setattr(composer_mod, "_MAX_ATTACHMENT_BYTES", 4)
+    pixmap = QtGui.QPixmap(64, 64)
+    pixmap.fill(QtGui.QColor("blue"))
+    assert _image_block_from_qimage(pixmap.toImage()) is None
 
 
 # --- busy / cancel --------------------------------------------------------------

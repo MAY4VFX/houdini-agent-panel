@@ -46,6 +46,18 @@ class QueuedMessage:
     (`ui/panel.py::_drain_queue`); `id` matches the `queued`-kind
     `transcript_model.Entry` shown for it, so promoting or removing one
     finds the other.
+
+    Only alive for as long as this process is: `blocks` (attachments
+    included — a pasted image or a drag-and-dropped file queued behind a
+    busy turn) is never written to `conversations_store` at all, only
+    referenced by `ui/panel.py::_drain_queue` while the process is up.
+    `transcript_model.Entry` — the thing that DOES get persisted — has no
+    field for a block list, only `text`; a restart restores a queued
+    message's TEXT (if it had any) as a plain `queued`-kind entry with
+    nothing attached, and an attachment-only queued message (no text)
+    leaves no record at all. Confirmed by reading, not assumed: `.blocks`
+    has exactly one reader in the whole codebase
+    (`ui/panel.py::_drain_queue`), never a writer into the store.
     """
 
     id: str
