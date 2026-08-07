@@ -1503,3 +1503,59 @@ completion and content genuinely raced.
 - What any real agent (as opposed to the SDK's reference fake one) does
   with a concurrent `session/prompt` — not measured, and, per the above,
   not needed for the queueing design that follows from this.
+
+## 16. Where each agent's own credentials actually live on disk — measured, not assumed
+
+The question, ahead of offering sign-in at connect time instead of after a
+failed prompt (the owner's report: Claude Agent, "hi", a 1m41s wait, then
+told to sign in while already signed in through the desktop app): is there
+anything CONCRETE and CHECKABLE that says "this agent already has
+credentials configured," so the offer never fires for an artist who is
+already signed in? `settings.signed_in_agents` only knows about agents
+this ONE install has watched complete a turn — worthless on a fresh
+install where the artist has used the CLI directly for months. Checked
+directly on mayfx02, a machine with all six agents in real, long-term use
+(`registry.FEATURED_AGENT_IDS`, the six agent ids the panel lists by name):
+
+| agent id | on disk | env var(s) | measured shape |
+|---|---|---|---|
+| `claude-acp` | `~/.claude/.credentials.json` | `ANTHROPIC_API_KEY` (already documented, `_NO_METHODS_ADVICE["claude-acp"]`) | **Absent on this machine** despite Claude being in daily use — see the Keychain entry below, which is where this machine's credentials actually are |
+| `claude-acp` (macOS only) | Keychain service `"Claude Code-credentials"` | — | Found with `security dump-keychain`: one `"svce"="Claude Code-credentials"` entry, `"acct"="Claude Key"`. `security find-generic-password -s "Claude Code-credentials"` (no `-w`) returns exit 0 in 17ms without any Keychain-access prompt — it looks up the entry, never reads the secret |
+| `codex-acp` | `~/.codex/auth.json` | `CODEX_API_KEY`, `OPENAI_API_KEY` (already documented — a signed-out `codex-acp` fails a prompt with exactly "CODEX_API_KEY or OPENAI_API_KEY is not set", §11) | Present, non-empty: top-level keys `auth_mode`, `OPENAI_API_KEY`, `tokens`, `last_refresh` |
+| `opencode` | `~/.local/share/opencode/auth.json` | none identified | Present, non-empty: opencode's OWN multi-provider store, keyed by provider name — `{"anthropic": {"type": "oauth", "refresh": ..., "access": ..., "expires": ...}, "kimi-for-coding": {"type": "api", "key": ...}, "openrouter": {...}, "lmstudio": {...}}` on this machine. Any provider present is evidence; there is no single "opencode is signed in" flag, only "opencode has signed into at least one provider" |
+| `grok-build` | `~/.grok/auth.json` | `XAI_API_KEY` (x.ai's own documented name, not independently confirmed read by this adapter) | Present, non-empty: keyed by OAuth issuer URL — `{"https://auth.x.ai::<uuid>": {...token data...}}` |
+| `gemini` | `~/.gemini/oauth_creds.json` (conventional gemini-cli path) | `GEMINI_API_KEY` (the exact case `shellenv.py`'s own module docstring documents — a real report, the panel couldn't see it, the artist's terminal could), `GOOGLE_CLOUD_PROJECT` (that same report's other half, Vertex/ADC auth) | **Not populated on this machine to confirm the shape** — `~/.gemini/google_accounts.json` shows `"active": null` (an old account remembered, nothing currently active at the OAuth layer). Path checked for existence only, on "a false positive costs nothing" grounds, not confirmed against a real populated file |
+| `kimi` | — | `MOONSHOT_API_KEY` (Moonshot AI's own documented name, unconfirmed against this adapter) | `~/.kimi-code/config.toml` DOES have real, non-empty credential-shaped data — `providers.<name>.api_key` — but on this machine that's `providers.openrouter.api_key`: an upstream LLM backend Kimi CLI can route requests through, not confirmed to mean the kimi-acp ADAPTER itself is signed in. §14 documents `kimi login` as a separate device-code OAuth flow; where THAT persists its own token was not identified in this pass. Deliberately not read as a signal — a provider routing key is a different fact from "this agent is authenticated" |
+
+### Consequences for the UI (sign-in offer)
+
+1. **File/Keychain existence and non-emptiness is the bar everywhere here
+   — never validity.** A stale or revoked token still counts. That's
+   correct for this specific use (deciding whether to show a QUIET,
+   dismissible one-line offer, never a refusal to do anything) — the
+   agent's own first prompt is still what actually proves a credential
+   works, same as `AgentPanel._is_signed_in`'s own reasoning for why a
+   session existing is not proof either.
+2. **`claude-acp` needs the Keychain check specifically, not just the
+   file.** The file-only check would have produced a false "not signed
+   in" on the exact machine this was measured on, for an agent in active
+   daily use — precisely the wrong-direction mistake the whole feature
+   exists to avoid.
+3. **`kimi` has nothing reliably checkable.** Its one on-disk value that
+   looks like a credential is real but answers a different question
+   (which LLM backend, not which account). Falls back entirely to
+   `settings.signed_in_agents`, same as any agent with nothing checkable
+   at all — this is not a gap the code works around, it's the honest
+   result of measuring and finding the available signal ambiguous.
+
+### Not established
+
+- Whether `~/.gemini/oauth_creds.json`, when it exists, actually contains
+  what its name implies — only checked for existence, never seen
+  populated on a real machine in this pass.
+- Where kimi's own device-code OAuth login (§14) actually persists its
+  token, if anywhere on disk rather than only in the running process —
+  not identified.
+- Whether `XAI_API_KEY`/`MOONSHOT_API_KEY` are the exact variable names
+  `grok-build`/`kimi` read — real, vendor-documented names, not confirmed
+  against these specific ACP adapters the way Codex's pair was.

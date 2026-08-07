@@ -24,6 +24,7 @@ never touches `hou`.
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import time
 import weakref
@@ -32,7 +33,8 @@ from typing import Any
 
 from .. import client as acp_client
 from .. import refresh, scene, sessions, settings as settings_mod
-from ..announcements import Announcement
+from .. import shellenv, signin_evidence
+from ..announcements import Announcement, Button
 from ..logbook import logger as _logbook_logger
 from ..transcript_model import PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
@@ -58,6 +60,12 @@ _shared_clients: dict[str, acp_client.AcpClient] = {}
 
 #: Coalescing window for `_persist_conversations_soon` — see its docstring.
 _PERSIST_COOLDOWN_MS = 500
+
+#: Namespaces the sign-in-offer notice's id apart from a real `Announcement.id`
+#: (the feed's ids are opaque strings from `feed/announcements.json`, so
+#: nothing stops one from colliding with an agent id in theory) — see
+#: `_maybe_offer_sign_in`/`_on_notice_action`/`_on_notice_dismissed`.
+_SIGNIN_OFFER_PREFIX = "sign-in-offer:"
 
 #: Live panels, per agent id — weak references, since Qt deletes the widgets
 #: itself and holding a strong reference here would just stop them from ever
@@ -387,6 +395,12 @@ class AgentPanel(QtWidgets.QWidget):
         #: runs on every rejoin now, and repeating the same notice each time an
         #: agent changes turns a useful sentence into noise.
         self._said_about_older_conversations = False
+        #: Agent ids whose sign-in offer (`_maybe_offer_sign_in`) the artist
+        #: dismissed in THIS tab's lifetime — never written to `settings`,
+        #: per the owner's own ask: dismissing it means "not now," not
+        #: "never tell me again." A fresh tab, or a Houdini restart, offers
+        #: it again if it's still warranted by then.
+        self._dismissed_signin_offers: set[str] = set()
         self._models: dict[str, TranscriptModel] = {}
         self._pending_permissions: dict[str, str] = {}
         self._permission_views: dict[str, PermissionView] = {}
@@ -1143,6 +1157,7 @@ class AgentPanel(QtWidgets.QWidget):
         label = self._pending_agent_label or info.name
         version = f" {info.version}" if info.version else ""
         self._note(f"{label}{version} · {scene.hip_dir()}")
+        self._maybe_offer_sign_in(info)
         self._show_page(self.PAGE_TRANSCRIPT)
         current = self._current_session()
         if current is None:
@@ -1163,6 +1178,49 @@ class AgentPanel(QtWidgets.QWidget):
             # switching here was in aid of signing in (`_on_agent_row_sign_
             # in`/`_sign_out`), THIS is the last point that can honor it.
             self._complete_pending_auth_switch()
+
+    def _maybe_offer_sign_in(self, info: Any) -> None:
+        """Offer sign-in the moment the agent connects — before a turn is
+        wasted finding out the hard way.
+
+        The report this answers: Claude Agent chosen, "hi" typed, a 1m41s
+        wait, then five lines explaining it needs to sign in — while
+        already signed in to the desktop app. `claude-acp` advertises no
+        auth methods and opens a session happily either way (docs/facts/
+        acp-sdk.md §11); it only fails at the first prompt. So "connected"
+        alone tells us nothing, and neither does a session existing.
+
+        Two things this must never do: nag an artist who genuinely is
+        signed in (`signin_evidence.has_credential_evidence` — checked
+        BEFORE our own incomplete record, `_is_signed_in`, ever gets a
+        vote either way), and repeat itself once dismissed, for the rest
+        of THIS tab's life (`_dismissed_signin_offers` — never persisted;
+        "not now" is not "never").
+        """
+        if self._is_signed_in():
+            return
+        if self._agent_id in self._dismissed_signin_offers:
+            return
+        # The SAME composed environment the agent process itself gets
+        # (`client.py::do_start`, `ui/terminal_login.py::TerminalLoginWorker
+        # .build_env`) — `os.environ` alone is what Houdini saw, missing
+        # whatever only the artist's shell profile sets (shellenv.py's own
+        # module docstring). `shellenv.capture()`'s one-time subprocess
+        # cost is already paid by now: `do_start` calls the same cached
+        # function, synchronously, before the process it just connected TO
+        # was even spawned — this can only ever be a cache hit here.
+        env = shellenv.merged(dict(os.environ))
+        if signin_evidence.has_credential_evidence(self._agent_id, env=env):
+            return
+        label = self._pending_agent_label or getattr(info, "name", "") or "This agent"
+        self._notice.show_notice(
+            Announcement(
+                id=_SIGNIN_OFFER_PREFIX + self._agent_id,
+                severity="info",
+                title=f"{label} may not be signed in yet.",
+                buttons=(Button("Sign in", ""),),
+            )
+        )
 
     def _on_disconnected(self, reason: str) -> None:
         self._pending_permissions.clear()
@@ -2232,6 +2290,17 @@ class AgentPanel(QtWidgets.QWidget):
             return
 
     def _on_notice_action(self, identifier: str, url: str) -> None:
+        # `_maybe_offer_sign_in`'s own notice, on the same strip and the
+        # same signal — its id is namespaced (`_SIGNIN_OFFER_PREFIX`) so it
+        # can never collide with a real `Announcement.id` or an update
+        # target, and it goes through `_offer_sign_in` (the existing,
+        # already-working entry point Settings itself uses), never
+        # `_open_url`/`_remember_seen` — there is no URL, and this isn't a
+        # feed announcement to remember having seen.
+        if identifier.startswith(_SIGNIN_OFFER_PREFIX):
+            self._notice.hide_notice()
+            self._offer_sign_in()
+            return
         # The strip's "Update" button fires this SAME signal (see
         # `NoticeStrip`'s own docstring) — `identifier` is `Update.target`
         # then, not an announcement id, and there's no `url` to open.
@@ -2243,6 +2312,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._remember_seen(identifier)
 
     def _on_notice_dismissed(self, identifier: str) -> None:
+        if identifier.startswith(_SIGNIN_OFFER_PREFIX):
+            # "Not now," not "never" — kept in-memory, per tab, per the
+            # owner's own ask (`_dismissed_signin_offers`'s own docstring).
+            # Never `_remember_seen`: that persists to `settings.seen_
+            # announcements`, forever, which is exactly the wrong shape here.
+            self._dismissed_signin_offers.add(identifier[len(_SIGNIN_OFFER_PREFIX):])
+            return
         if self._active_update is not None and self._active_update.target == identifier:
             self._active_update = None
             return  # an update dismissal isn't an announcement id — nothing to remember
