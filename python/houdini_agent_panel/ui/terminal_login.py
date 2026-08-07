@@ -326,21 +326,40 @@ _LOOKS_LIKE_A_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\.]{24,}")
 _SHAPE_RUN_RE = re.compile(r"[A-Za-z0-9_\-\.]{8,}")
 
 
+#: How many characters of each masked run to show. A CSI's parameters and
+#: final byte are token-shaped, so they get swallowed into the run that
+#: follows them — and those are exactly the bytes that decide whether a
+#: sequence was `\x1b[10G` (complete, final byte `G`) or `\x1b[10`
+#: (incomplete, terminating on whatever came next). Four characters names
+#: that, while a 100-character secret stays a length.
+#:
+#: What leaks is the head of the run: for the token itself that is the
+#: published, constant `sk-a`/`oat0` prefix, not entropy. Masking it
+#: instead cost a whole round of guessing — a shape of `<9>` fitted two
+#: different layouts that a single visible character would have told
+#: apart at a glance.
+_SHAPE_HEAD = 4
+
+
 def _shape_for_log(raw: str) -> str:
     """The escape structure of a line, with every long run masked.
 
-    Twice now a token has been silently corrupted between the pty and
-    `settings.json` — once truncated by line wrapping (§25), once a
-    single character short — and both times the log could not say where,
-    because it only ever recorded text AFTER `_strip_ansi` had already
-    run. A stripped line cannot show which escape did the stripping.
+    Three times now a token has been silently corrupted between the pty
+    and `settings.json` (§21, §25, §26), and every time the log could not
+    say where, because it only ever recorded text AFTER `_strip_ansi` had
+    already run. A stripped line cannot show which escape stripped it.
 
-    This records the raw bytes instead, with every run of 8+ token-shaped
-    characters replaced by its length. Escape sequences survive intact
-    and visible; a secret does not survive at all. Emitted only during
-    the token flow, so it costs nothing on a normal run.
+    This records the raw bytes instead: escape sequences survive intact,
+    each long run becomes `<N:head…>` — its length plus its first few
+    characters. Emitted only during the token flow, so it costs nothing
+    on a normal run.
     """
-    return repr(_SHAPE_RUN_RE.sub(lambda m: f"<{len(m.group(0))}>", raw))
+
+    def _mask(match: "re.Match[str]") -> str:
+        run = match.group(0)
+        return f"<{len(run)}:{run[:_SHAPE_HEAD]}…>"
+
+    return repr(_SHAPE_RUN_RE.sub(_mask, raw))
 
 
 def _redact_for_log(line: str) -> str:
@@ -777,10 +796,15 @@ class TerminalLoginWorker(Worker):
                     # long (§25) or one character short is obvious here
                     # and invisible everywhere else until the agent's
                     # first prompt fails.
+                    # The prefix is a published constant, not entropy, and
+                    # it is the fastest possible read on whether capture
+                    # went wrong: `sk-ant-oat01` is whole, `sk-ant-at01-`
+                    # is the §26 corruption, and anything else is new.
                     _log.info(
-                        "terminal login: OAuth token captured (%s), %d characters",
+                        "terminal login: OAuth token captured (%s), %d characters, starts %r",
                         _OAUTH_TOKEN_ENV_VAR,
                         len(token),
+                        token[:12],
                     )
                 self._emit_line(line)
                 if any(_marker_in(marker, line) for marker in _INPUT_PROMPT_MARKERS):

@@ -882,7 +882,7 @@ def test_shape_for_log_shows_escapes_and_hides_the_secret():
 
     assert "\\x1b[" in shape, shape
     assert "sk-ant-" in shape, "the non-secret prefix must stay readable"
-    assert "<96>" in shape, "the long run must be replaced by its length"
+    assert "<96:" in shape, "the long run must be replaced by its length"
     assert "A" * 24 not in shape, "no long run of the secret may survive"
 
     # This shape was what identified the defect. Now that `_ANSI_RE` no
@@ -933,8 +933,11 @@ def test_an_incomplete_csi_does_not_eat_the_next_character():
 
     raw = "\x1b[1C" + "\x1b[2G" + "sk-ant-" + "\x1b[10" + true_token[7:]
 
-    # The shape this reconstruction produces is the one that was logged.
-    assert tl._shape_for_log(raw) == repr("\x1b[1C\x1b[<9>\x1b[<103>")
+    # The masked form this reconstruction produces is the one that was
+    # logged — with the run heads that `_SHAPE_HEAD` now reveals, which
+    # is what tells this layout apart from the `\x1b[10G` one that
+    # produces an identical shape without them.
+    assert tl._shape_for_log(raw) == repr("\x1b[1C\x1b[<9:2Gsk…>\x1b[<103:10oa…>")
 
     assert tl._strip_ansi(raw) == true_token, "the token must survive intact"
 
