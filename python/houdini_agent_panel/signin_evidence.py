@@ -40,13 +40,27 @@ from pathlib import Path
 from typing import Callable
 
 #: The macOS Keychain service Claude Code's own CLI writes to — found with
-#: `security dump-keychain` on a machine signed in through the desktop app
-#: (not `claude setup-token`, which writes `~/.claude/.credentials.json`
-#: instead): one `"svce"="Claude Code-credentials"` entry, account "Claude
-#: Key". This is the case `~/.claude/.credentials.json` alone misses — the
-#: exact machine this module was written on has no such file and IS signed
-#: in, entirely through this keychain entry.
+#: `security dump-keychain` on a machine signed in through the desktop app:
+#: one `"svce"="Claude Code-credentials"` entry, account "Claude Key". This
+#: is the case `~/.claude/.credentials.json` alone misses — the exact
+#: machine this module was written on has no such file and IS signed in,
+#: entirely through this keychain entry.
+#:
+#: NOT what `claude setup-token` writes — corrected by docs/facts/acp-
+#: sdk.md §21, which found `setup-token` writes NEITHER this file NOR a
+#: keychain entry: it mints a subscription-scoped OAuth token, prints it
+#: once, and exits. `_CLAUDE_OAUTH_TOKEN_ENV_VAR` below is that flow's own
+#: evidence instead.
 _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+#: What `claude setup-token` tells the artist to set (docs/facts/acp-
+#: sdk.md §21, confirmed from the real bundled binary's own string table,
+#: not guessed). This module stays free of any `ui/` import (Qt-free,
+#: checkable without a `QApplication`, same as its own module docstring
+#: already promises) — kept as its own literal rather than imported from
+#: `ui/terminal_login.py::_OAUTH_TOKEN_ENV_VAR`, which captures the SAME
+#: value under the same name; a test on either side would catch the two
+#: drifting apart.
+_CLAUDE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def _read_json_object(path: Path) -> dict | None:
@@ -84,14 +98,24 @@ def _claude_keychain_entry_exists() -> bool | None:
     return result.returncode == 0
 
 
-def _claude(home: Path, env: dict[str, str]) -> bool:
-    # `~/.claude/.credentials.json`: what `claude setup-token` writes
-    # (`_NO_METHODS_ADVICE["claude-acp"]`, already documented). `ANTHROPIC_
-    # API_KEY`: the same advice's other route, and the actual env var name
-    # the adapter reads (docs/facts/acp-sdk.md §11).
+def _claude(home: Path, env: dict[str, str], agent_oauth_tokens: dict[str, dict[str, str]]) -> bool:
+    # `~/.claude/.credentials.json`: what a desktop-app / interactive
+    # `claude login` writes — NOT what `setup-token` writes (docs/facts/
+    # acp-sdk.md §21 corrects an earlier wrong assumption here: `setup-
+    # token` writes no credentials file at all, it prints a token once and
+    # exits). `ANTHROPIC_API_KEY`: a different wallet entirely — API
+    # billing, not the subscription this module is otherwise checking for
+    # (§21; see `_no_methods_advice`'s own rewrite). `CLAUDE_CODE_OAUTH_
+    # TOKEN` covers it two ways: the artist's own shell profile (same
+    # category as the `ANTHROPIC_API_KEY` check right above it) via `env`,
+    # or a token THIS panel already captured and stored (`settings.py::
+    # Settings.agent_oauth_tokens`) but the artist's shell was never told
+    # about — `env` alone would miss that one entirely.
     if (home / ".claude" / ".credentials.json").exists():
         return True
-    if env.get("ANTHROPIC_API_KEY"):
+    if env.get("ANTHROPIC_API_KEY") or env.get(_CLAUDE_OAUTH_TOKEN_ENV_VAR):
+        return True
+    if agent_oauth_tokens.get("claude-acp", {}).get(_CLAUDE_OAUTH_TOKEN_ENV_VAR):
         return True
     return bool(_claude_keychain_entry_exists())
 
@@ -173,7 +197,6 @@ def _kimi(env: dict[str, str]) -> bool:
 #: answers `False` for it, same as a check that ran and found nothing —
 #: the caller's fallback to `settings.signed_in_agents` covers both alike.
 _CHECKS: dict[str, Callable[[Path, dict[str, str]], bool]] = {
-    "claude-acp": _claude,
     "codex-acp": _codex,
     "opencode": _opencode,
     "grok-build": _grok,
@@ -182,7 +205,11 @@ _CHECKS: dict[str, Callable[[Path, dict[str, str]], bool]] = {
 
 
 def has_credential_evidence(
-    agent_id: str, *, env: dict[str, str], home: Path | None = None
+    agent_id: str,
+    *,
+    env: dict[str, str],
+    home: Path | None = None,
+    agent_oauth_tokens: dict[str, dict[str, str]] | None = None,
 ) -> bool:
     """Is there a real, checkable reason to believe `agent_id` is already
     signed in — a credential file it would read, or its own env var,
@@ -192,11 +219,18 @@ def has_credential_evidence(
     only the artist's shell profile sets).
 
     `home` defaults to `Path.home()`; overridable so tests never touch a
-    real `~`.
+    real `~`. `agent_oauth_tokens` defaults to nothing checkable — pass
+    `settings.load().agent_oauth_tokens` (`claude-acp`'s own special case,
+    `_claude`'s own docstring, docs/facts/acp-sdk.md §21) to catch a token
+    this panel already captured but never told the artist's shell about;
+    an explicit parameter rather than this module reaching for `settings`
+    itself keeps it free of that import, same as the rest of the module.
     """
     resolved_home = home if home is not None else Path.home()
     if agent_id == "kimi":
         return _kimi(env)
+    if agent_id == "claude-acp":
+        return _claude(resolved_home, env, agent_oauth_tokens or {})
     check = _CHECKS.get(agent_id)
     if check is None:
         return False

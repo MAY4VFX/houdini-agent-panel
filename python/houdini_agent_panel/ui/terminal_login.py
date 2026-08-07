@@ -53,6 +53,16 @@ what should be a clean link), and animated spinner frames arriving as a
 rapid burst of single-glyph "lines". All three are handled below,
 each with the real captured bytes that justified the fix — see
 `_strip_ansi`, `_marker_in`, `_BARE_URL_RE`, `_is_spinner_noise`.
+
+A completed run (docs/facts/acp-sdk.md §21) overturned the model this
+whole module was built on: `setup-token` does not sign anything in. It
+MINTS a subscription-scoped OAuth token, prints it exactly ONCE ("Store
+this token securely. You won't be able to see it again."), and exits —
+no credentials file is ever written, so `signin_evidence`'s file check
+can never fire for this flow, and a real owner's token going uncaptured
+the first time this shipped is the report that added `token_captured`
+below. See `_OAUTH_TOKEN_RE`'s own comment for the exact wording and why
+it's matched on the confirmed variable name, not a generic parser.
 """
 
 from __future__ import annotations
@@ -146,6 +156,33 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?>]*[ -/]*[@-~]|\x1b[78]")
 #: `_ANSI_RE` strip it. 2000 leaves several times the measured length as
 #: headroom.
 _FORCE_FLUSH_CHARS = 2000
+#: `claude setup-token` does not sign anything in — it MINTS a subscription-
+#: scoped OAuth token and prints it ONCE (docs/facts/acp-sdk.md §21,
+#: overturning what §14/§20 assumed): no credentials file is ever written,
+#: so waiting for one (`signin_evidence`) can never succeed for this
+#: command. The exact wording, confirmed from the real bundled binary's own
+#: string table, not guessed: "Your OAuth token (valid for 1 year): ...
+#: Store this token securely. You won't be able to see it again. Use this
+#: token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>" — the variable
+#: name is the anchor `_OAUTH_TOKEN_RE` below matches on, not a generic
+#: "any KEY=VALUE line" parser: a real pty capture squeezes ALL whitespace
+#: out (§20's own finding, same mechanism as `_marker_in`), so "export" and
+#: the variable name arrive glued together as one run with no space
+#: between them — a generic parser would capture "exportCLAUDE_CODE_OAUTH_
+#: TOKEN" as the "variable name", which is not a real environment variable
+#: anything reads. Anchoring on the known, confirmed constant sidesteps
+#: that entirely.
+_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+_OAUTH_TOKEN_RE = re.compile(re.escape(_OAUTH_TOKEN_ENV_VAR) + r"=(\S+)")
+#: The label line that starts this build's token dump — matched the same
+#: whitespace-insensitive way as `_INPUT_PROMPT_MARKERS`, for the same
+#: reason (§20). Once seen, every line emitted for the rest of this run is
+#: redacted the same way the log already is: a real, usable secret must
+#: never reach the transcript either, unlike a device code (which the
+#: artist is meant to read and type) or the OAuth URL (not a secret at
+#: all) — see `_emit_line`.
+_OAUTH_TOKEN_LABEL = "your oauth token"
+
 #: A pty run's own animated "thinking" spinner (§20: a real capture showed
 #: this build cycling `✢ * ✶ ✻ ✽ ✻ ✶ * ✢ ·`, one glyph per redraw frame,
 #: each arriving as its own "line" once `\r`-flushed) — pure animation
@@ -263,6 +300,11 @@ class TerminalLoginWorker(Worker):
     #: (Claude's `setup-token`, §14) — `AgentPanel` shows the one-line input
     #: field only now, from this, never from a timer.
     input_requested = Signal()
+    #: `(env_var, token)` — `claude setup-token` mints a subscription-scoped
+    #: OAuth token and prints it exactly once (docs/facts/acp-sdk.md §21);
+    #: this is the one and only chance to capture it. Never logged, never
+    #: on `line_received` — see `_OAUTH_TOKEN_RE`/`_emit_line`.
+    token_captured = Signal(str, str)
     #: The process's own exit code. Not evidence of success OR failure by
     #: itself — docs/facts/acp-sdk.md §14 explicitly could not measure what
     #: kimi prints when the login actually succeeds (the probe killed it
@@ -326,6 +368,10 @@ class TerminalLoginWorker(Worker):
         #: running — `send_line()` writes here instead of `process.stdin`
         #: (which doesn't exist for a pty-backed Popen; see `work()`).
         self._pty_master_fd: int | None = None
+        #: Set once `_OAUTH_TOKEN_LABEL` is seen — see its own comment.
+        #: Every line emitted from then on is redacted before reaching
+        #: `line_received`, not only the log.
+        self._token_flow_active = False
 
     @staticmethod
     def build_env(terminal_auth) -> dict[str, str]:
@@ -500,6 +546,15 @@ class TerminalLoginWorker(Worker):
                 buffer = ""
                 if not line.strip() or _is_spinner_noise(line):
                     continue
+                if not self._token_flow_active and _marker_in(_OAUTH_TOKEN_LABEL, line):
+                    # From here on, `_emit_line` redacts too — checked
+                    # BEFORE emitting THIS line, in case a future build
+                    # ever puts the label and the token on the same line.
+                    self._token_flow_active = True
+                token_match = _OAUTH_TOKEN_RE.search(line)
+                if token_match:
+                    self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token_match.group(1))
+                    _log.info("terminal login: OAuth token captured (%s)", _OAUTH_TOKEN_ENV_VAR)
                 self._emit_line(line)
                 if any(_marker_in(marker, line) for marker in _INPUT_PROMPT_MARKERS):
                     self.input_requested.emit()
@@ -528,7 +583,14 @@ class TerminalLoginWorker(Worker):
             self.exited.emit(exit_code)
 
     def _emit_line(self, line: str) -> None:
-        self.line_received.emit(line)
+        # A device code or an OAuth URL is safe to show — the artist is
+        # meant to read or type it. Once `_token_flow_active` is set, this
+        # run is minting a real, usable secret instead: redacted on the
+        # LIVE signal too, not only the log (docs/facts/acp-sdk.md §21) —
+        # the one case in this module where those two are not the same
+        # decision.
+        shown = _redact_for_log(line) if self._token_flow_active else line
+        self.line_received.emit(shown)
         _log.info("terminal login line: %s", _redact_for_log(line))
 
     def send_line(self, text: str) -> None:

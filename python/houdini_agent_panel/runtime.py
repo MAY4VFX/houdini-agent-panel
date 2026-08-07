@@ -429,6 +429,27 @@ def _with_proxy(env: dict[str, str], settings_obj) -> dict[str, str]:
     return merged
 
 
+def _with_oauth_tokens(env: dict[str, str], agent_id: str, settings_obj) -> dict[str, str]:
+    """A token minted by a terminal-auth command that prints it once and
+    writes it nowhere else — `settings.py::Settings.agent_oauth_tokens`'s
+    own docstring has the report (Claude's `setup-token`, docs/facts/
+    acp-sdk.md §21: no credentials file, so the token is gone unless the
+    panel captures and re-supplies it itself, every launch). Injected the
+    same way `_with_proxy` injects the studio proxy — underneath the
+    agent's own env, which wins if it already set the same variable a
+    different way (e.g. an artist who also exported it in their shell
+    profile, or picked `ANTHROPIC_API_KEY` instead — see `_no_methods_
+    advice`'s own rewrite for why the two are not interchangeable).
+    """
+    from . import settings as settings_module
+
+    resolved = settings_module.load() if settings_obj is None else settings_obj
+    tokens = getattr(resolved, "agent_oauth_tokens", {}).get(agent_id, {})
+    merged = dict(tokens)
+    merged.update(env)
+    return merged
+
+
 def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
     """The launch command for an already-installed agent.
 
@@ -458,7 +479,8 @@ def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
         version_dir = paths.agent_dir(entry.id) / entry.version
         spec = _binary_launch_spec(version_dir, dist)
 
-    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+    env = _with_oauth_tokens(_with_proxy(spec.env, settings), entry.id, settings)
+    return LaunchSpec(command=spec.command, args=spec.args, env=env)
 
 
 def custom_launch_spec(agent: CustomAgent, *, settings=None) -> LaunchSpec:

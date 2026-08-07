@@ -37,6 +37,7 @@ def _fake_terminal_worker(stopped: list) -> SimpleNamespace:
         exited=SimpleNamespace(disconnect=lambda *_a: None),
         failed=SimpleNamespace(disconnect=lambda *_a: None),
         command_resolved=SimpleNamespace(disconnect=lambda *_a: None),
+        token_captured=SimpleNamespace(disconnect=lambda *_a: None),
     )
 
 
@@ -1134,6 +1135,63 @@ def test_command_resolved_ignores_a_stale_agent_id(qapp, monkeypatch):
     widget._on_terminal_login_command_resolved("/found/claude", ["setup-token"])
 
     assert widget._terminal_login_command == before
+    widget.shutdown()
+
+
+def test_token_captured_is_stored_and_saved(qapp, monkeypatch):
+    """`claude setup-token` mints a token and prints it exactly once
+    (docs/facts/acp-sdk.md §21) — this is the only chance to catch it, and
+    a real owner completing a real login and getting nothing for it is the
+    report this closes."""
+    from houdini_agent_panel import settings as settings_mod
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
+
+    widget._on_terminal_login_token_captured("CLAUDE_CODE_OAUTH_TOKEN", "fake-not-a-real-token")
+
+    assert widget._settings.agent_oauth_tokens == {
+        "claude-acp": {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    }
+    reloaded = settings_mod.load()
+    assert reloaded.agent_oauth_tokens["claude-acp"]["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-not-a-real-token"
+    # The token itself is never in the note — only the fact it was captured.
+    assert any("Captured and saved" in n for n in notes)
+    assert not any("fake-not-a-real-token" in n for n in notes)
+    widget.shutdown()
+
+
+def test_token_captured_ignores_a_stale_agent_id(qapp, monkeypatch):
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    widget._terminal_login_agent_id = "some-other-agent"
+
+    widget._on_terminal_login_token_captured("CLAUDE_CODE_OAUTH_TOKEN", "fake-not-a-real-token")
+
+    assert widget._settings.agent_oauth_tokens == {}
     widget.shutdown()
 
 

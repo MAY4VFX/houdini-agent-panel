@@ -404,6 +404,43 @@ def test_launch_spec_binary_carries_the_proxy(monkeypatch, tmp_path, fetcher):
     assert "localhost" in spec.env["NO_PROXY"]
 
 
+# --- captured OAuth token: launch_spec -----------------------------------
+#
+# `settings.agent_oauth_tokens` is where a token minted by a terminal-auth
+# command that prints it once and writes it nowhere else lands (Claude's
+# `setup-token`, docs/facts/acp-sdk.md §21) — this is the only other place
+# it needs to reach: the agent's own launch environment, injected the same
+# way `_with_proxy` already injects the studio proxy.
+
+
+def test_launch_spec_carries_a_stored_oauth_token(monkeypatch, tmp_path, fetcher):
+    monkeypatch.setattr(os, "environ", {})
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    entry, archive_bytes = _binary_entry(tmp_path, sha256=None)
+    fetcher.add_bytes(entry.binaries["fake-platform"].archive, archive_bytes)
+    runtime.install_agent(entry, fetch=fetcher)
+
+    settings = Settings(agent_oauth_tokens={entry.id: {"CLAUDE_CODE_OAUTH_TOKEN": "fake-token"}})
+    spec = runtime.launch_spec(entry, settings=settings)
+
+    assert spec.env["CLAUDE_CODE_OAUTH_TOKEN"] == "fake-token"
+
+
+def test_launch_spec_never_leaks_another_agents_stored_token(monkeypatch, tmp_path, fetcher):
+    """A token is stored per agent id — this must never reach a DIFFERENT
+    agent's own launch just because something is on file somewhere."""
+    monkeypatch.setattr(os, "environ", {})
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    entry, archive_bytes = _binary_entry(tmp_path, sha256=None)
+    fetcher.add_bytes(entry.binaries["fake-platform"].archive, archive_bytes)
+    runtime.install_agent(entry, fetch=fetcher)
+
+    settings = Settings(agent_oauth_tokens={"some-other-agent": {"CLAUDE_CODE_OAUTH_TOKEN": "fake-token"}})
+    spec = runtime.launch_spec(entry, settings=settings)
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in spec.env
+
+
 def test_install_agent_npx_fresh_install_carries_the_proxy(monkeypatch):
     # This is the actual bug: the very first launch of a freshly-installed
     # npx agent is the one that runs `npx`'s own registry fetch, and it goes

@@ -1352,7 +1352,9 @@ class AgentPanel(QtWidgets.QWidget):
         # function, synchronously, before the process it just connected TO
         # was even spawned — this can only ever be a cache hit here.
         env = shellenv.merged(dict(os.environ))
-        if signin_evidence.has_credential_evidence(self._agent_id, env=env):
+        if signin_evidence.has_credential_evidence(
+            self._agent_id, env=env, agent_oauth_tokens=self._settings.agent_oauth_tokens
+        ):
             return
         label = self._pending_agent_label or getattr(info, "name", "") or "This agent"
         self._notice.show_notice(
@@ -1469,13 +1471,16 @@ class AgentPanel(QtWidgets.QWidget):
     _NO_METHODS_ADVICE = {
         "claude-acp": (
             "No auth method, no /login command (measured: claude-acp "
-            "reports an empty command list) — it reads credentials the "
-            "machine already has. In a terminal:\n    claude setup-token\n"
-            "which writes ~/.claude/.credentials.json (the macOS Keychain "
-            "on a Mac) — the adapter picks that up. An ANTHROPIC_API_KEY "
-            "exported in your shell profile works too; the panel passes "
-            "your login shell's environment to the agent. Then restart it "
-            "from Settings."
+            "reports an empty command list). Two separate routes in, not "
+            "one with a simpler alternative (docs/facts/acp-sdk.md §21): "
+            "in a terminal, `claude setup-token` — Login method: "
+            "Subscription Plan (Claude Pro/Max) — mints a token tied to "
+            "that subscription; export it as CLAUDE_CODE_OAUTH_TOKEN in "
+            "your shell profile. Or ANTHROPIC_API_KEY in your shell "
+            "profile — Login method: API usage billing (Anthropic "
+            "Console), a different account, billed per token. The panel "
+            "passes your login shell's environment to the agent either "
+            "way. Then restart it from Settings."
         ),
     }
     _GENERIC_NO_METHODS_ADVICE = (
@@ -2931,11 +2936,16 @@ class AgentPanel(QtWidgets.QWidget):
             id="claude-setup-token",
             name="Sign in with browser",
             description=(
-                "Opens `claude setup-token` — it signs in through your "
-                "browser and writes ~/.claude/.credentials.json. Prefer "
-                "ANTHROPIC_API_KEY in your shell profile instead if you "
-                "already have one: no flow needed, just restart the "
-                "agent from Settings."
+                "Opens `claude setup-token` — Login method: Subscription "
+                "Plan (Claude Pro/Max). It signs in through your browser "
+                "and mints a token tied to that subscription (docs/facts/"
+                "acp-sdk.md §21: no credentials file is written), which "
+                "the panel captures and saves for you automatically. "
+                "ANTHROPIC_API_KEY in your shell profile is a separate "
+                "route — Login method: API usage billing (Anthropic "
+                "Console), a different account, billed per token, not "
+                "this subscription. Use whichever one you actually want "
+                "this agent billed against."
             ),
             terminal_auth=acp_client.TerminalAuth(command=command, args=args, env={}),
         )
@@ -3056,9 +3066,11 @@ class AgentPanel(QtWidgets.QWidget):
             # anyway would just hang forever for no reason (measured: it
             # never returns).
             #
-            # The built-in recipe's OWN description (ANTHROPIC_API_KEY as
-            # the simpler alternative) is written FOR this spawned flow and
-            # should replace the generic pending text; a wire method's own
+            # The built-in recipe's OWN description (subscription token vs
+            # API key — two different accounts, not one with a simpler
+            # alternative, docs/facts/acp-sdk.md §21) is written FOR this
+            # spawned flow and should replace the generic pending text; a
+            # wire method's own
             # description (Kimi's "run this yourself…") is written for the
             # opposite case and must not (`_start_terminal_login`'s own
             # docstring says why).
@@ -3181,6 +3193,7 @@ class AgentPanel(QtWidgets.QWidget):
         worker.exited.connect(self._on_terminal_login_exited)
         worker.failed.connect(self._on_terminal_login_failed)
         worker.command_resolved.connect(self._on_terminal_login_command_resolved)
+        worker.token_captured.connect(self._on_terminal_login_token_captured)
         self._terminal_login_worker = worker
         worker.start()
 
@@ -3244,6 +3257,36 @@ class AgentPanel(QtWidgets.QWidget):
         if self._terminal_login_agent_id != self._agent_id:
             return  # stale — see `_start_terminal_login`'s own comment
         self._terminal_login_command = " ".join([command, *args])
+
+    def _on_terminal_login_token_captured(self, env_var: str, token: str) -> None:
+        """`claude setup-token` doesn't sign anything in — it mints a
+        subscription-scoped OAuth token, prints it exactly ONCE, and
+        exits (docs/facts/acp-sdk.md §21). This is the only chance to
+        catch it: no credentials file is ever written, so a token that
+        isn't captured HERE is simply gone — the report this method
+        exists to fix (a real owner completed a real login and got
+        nothing for it).
+
+        Stored in `settings.agent_oauth_tokens` — the same trust level
+        `proxy_url`/`ca_bundle` already carry, per-machine, unsynced,
+        plain JSON (`Settings.agent_oauth_tokens`'s own docstring) — and
+        injected into the agent's own launch env by `runtime.py::
+        launch_spec` on its NEXT start, the same way the studio proxy
+        already is. Not retroactive: a `claude-acp` process already
+        running when this fires keeps whatever env it already has: the
+        panel does not restart a live agent out from under the artist.
+
+        Never logged, never shown in the feed — `token` itself is not
+        even accepted by `_note`; only the fact that something was
+        captured is.
+        """
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
+        current = settings_mod.load()
+        current.agent_oauth_tokens.setdefault(self._agent_id, {})[env_var] = token
+        settings_mod.save(current)
+        self._settings = current
+        self._note(f"Captured and saved a {self._display_label(self._agent_id)} sign-in token.")
 
     def _on_terminal_login_line(self, line: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:
@@ -3434,7 +3477,9 @@ class AgentPanel(QtWidgets.QWidget):
         # an uninformative exit message with a genuinely checkable one.
         if exit_code == 0:
             env = shellenv.merged(dict(os.environ))
-            if signin_evidence.has_credential_evidence(self._agent_id, env=env):
+            if signin_evidence.has_credential_evidence(
+                self._agent_id, env=env, agent_oauth_tokens=self._settings.agent_oauth_tokens
+            ):
                 message = "Signed in."
                 self._note(message)
                 self._auth_view.set_pending(message)
@@ -3516,6 +3561,7 @@ class AgentPanel(QtWidgets.QWidget):
             (worker.exited, self._on_terminal_login_exited),
             (worker.failed, self._on_terminal_login_failed),
             (worker.command_resolved, self._on_terminal_login_command_resolved),
+            (worker.token_captured, self._on_terminal_login_token_captured),
         ):
             with contextlib.suppress(RuntimeError, TypeError):
                 signal.disconnect(slot)

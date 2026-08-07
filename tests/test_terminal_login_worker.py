@@ -655,3 +655,85 @@ def test_use_pty_true_parses_a_real_pty_shaped_run_end_to_end(qapp, tmp_path):
     worker.send_line("PTY-INTEGRATION-TEST-CODE")
     _wait_until(qapp, lambda: any("got:PTY-INTEGRATION-TEST-CODE" in line for line in lines), timeout_ms=8000)
     worker.wait(3000)
+
+
+# --- §21: setup-token mints a token, it doesn't sign anything in -----------
+#
+# `claude setup-token` writes no credentials file at all (docs/facts/acp-
+# sdk.md §21) — it prints a subscription-scoped OAuth token exactly once
+# and exits. A real, completed run on mayfx02 is what surfaced this: the
+# owner's own token was never captured anywhere, gone the moment that
+# process's stdout closed. These tests never use a real token — a fake,
+# obviously-not-real value stands in throughout.
+
+_FAKE_TOKEN = "FAKE-TOKEN-VALUE-NOT-REAL-1234567890"
+
+#: Shaped after the real wording, confirmed from the bundled binary's own
+#: string table (§21): the label, the bare token on its own line, the
+#: "won't be able to see it again" warning, then the `export VAR=token`
+#: line — the SAME four-part shape the owner's own real run produced.
+_CLAUDE_TOKEN_SCRIPT = (
+    "import sys\n"
+    "print('Your OAuth token (valid for 1 year):')\n"
+    f"print('{_FAKE_TOKEN}')\n"
+    "print(\"Store this token securely. You won't be able to see it again.\")\n"
+    f"print('Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN={_FAKE_TOKEN}')\n"
+    "sys.stdout.flush()\n"
+)
+
+
+def test_setup_token_output_fires_token_captured_with_the_real_variable_name(qapp, tmp_path):
+    ta = TerminalAuth(command=sys.executable, args=["-c", _CLAUDE_TOKEN_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+
+    captured: list[tuple[str, str]] = []
+    worker.token_captured.connect(lambda env_var, token: captured.append((env_var, token)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(captured))
+    assert captured == [("CLAUDE_CODE_OAUTH_TOKEN", _FAKE_TOKEN)]
+    worker.wait(3000)
+
+
+def test_the_token_never_reaches_line_received_once_the_label_is_seen(qapp, tmp_path):
+    """Unlike a device code or a URL, this is a real, usable secret with
+    nothing for the artist to read it FOR — redacted on the LIVE signal
+    too, not only the log (§21's own departure from `test_a_token_looking_
+    line_is_redacted_in_the_log_but_not_in_the_signal`'s general rule,
+    deliberate, not an oversight)."""
+    ta = TerminalAuth(command=sys.executable, args=["-c", _CLAUDE_TOKEN_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+
+    lines: list[str] = []
+    exited: list[int] = []
+    worker.line_received.connect(lines.append)
+    worker.exited.connect(exited.append)
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(exited))
+    worker.wait(3000)
+
+    assert lines, "the run produced no output at all — nothing to check"
+    assert not any(_FAKE_TOKEN in line for line in lines), (
+        "the raw token reached the transcript-facing signal"
+    )
+    # The label line itself carries no secret and is untouched.
+    assert any("Your OAuth token" in line for line in lines)
+
+
+def test_the_token_never_reaches_the_log_either(qapp, tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.terminal_login")
+    ta = TerminalAuth(command=sys.executable, args=["-c", _CLAUDE_TOKEN_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+    exited: list[int] = []
+    worker.exited.connect(exited.append)
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(exited))
+    worker.wait(3000)
+
+    messages = [r.message for r in caplog.records]
+    assert not any(_FAKE_TOKEN in m for m in messages)
+    assert any("OAuth token captured" in m for m in messages)

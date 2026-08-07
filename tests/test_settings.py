@@ -71,6 +71,37 @@ def test_agent_auth_info_ignores_malformed_entries(tmp_path):
     assert [m.id for m in info.methods] == ["m"]
 
 
+def test_agent_oauth_tokens_defaults_to_empty():
+    assert Settings().agent_oauth_tokens == {}
+
+
+def test_agent_oauth_tokens_round_trips(tmp_path):
+    """A token minted by a terminal-auth command that prints it once and
+    writes it nowhere else (Claude's `setup-token`, docs/facts/acp-sdk.md
+    §21) — the only chance to catch it is `TerminalLoginWorker.token_
+    captured`; it has to survive a Houdini restart the same as everything
+    else here, or the artist has to re-mint one every launch."""
+    path = tmp_path / "settings.json"
+    current = Settings()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    settings_module.save(current, path)
+
+    reloaded = settings_module.load(path)
+    assert reloaded.agent_oauth_tokens == {"claude-acp": {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}}
+
+
+def test_agent_oauth_tokens_ignores_malformed_entries(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"agent_oauth_tokens": {"claude-acp": "not-a-dict", '
+        '"codex-acp": {"SOME_TOKEN": 5}}}',
+        "utf-8",
+    )
+    reloaded = settings_module.load(path)
+    assert "claude-acp" not in reloaded.agent_oauth_tokens
+    assert reloaded.agent_oauth_tokens == {"codex-acp": {"SOME_TOKEN": "5"}}
+
+
 def test_auth_attempts_round_trip(tmp_path):
     """The last sign-in/out attempt per agent — shown beside the Settings
     row that started it (issue #33)."""

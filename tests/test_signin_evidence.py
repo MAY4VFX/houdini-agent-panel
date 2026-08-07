@@ -59,6 +59,36 @@ def test_claude_nothing_present_is_not_evidence(tmp_path):
     assert not sie.has_credential_evidence("claude-acp", env={}, home=tmp_path)
 
 
+def test_claude_oauth_token_env_is_evidence(tmp_path):
+    """`setup-token` writes no credentials file at all (docs/facts/acp-
+    sdk.md §21, correcting the earlier assumption above it) — the artist's
+    own shell profile is one of the two places its token can turn up."""
+    assert sie.has_credential_evidence(
+        "claude-acp", env={"CLAUDE_CODE_OAUTH_TOKEN": "fake-token"}, home=tmp_path
+    )
+
+
+def test_claude_captured_oauth_token_is_evidence_even_with_no_env_var_set(tmp_path):
+    """The other place: a token this panel already captured and stored
+    (`settings.agent_oauth_tokens`) but the artist's shell was never told
+    about — `env` alone would miss this entirely."""
+    assert sie.has_credential_evidence(
+        "claude-acp",
+        env={},
+        home=tmp_path,
+        agent_oauth_tokens={"claude-acp": {"CLAUDE_CODE_OAUTH_TOKEN": "fake-token"}},
+    )
+
+
+def test_claude_a_different_agents_stored_token_is_not_evidence(tmp_path):
+    assert not sie.has_credential_evidence(
+        "claude-acp",
+        env={},
+        home=tmp_path,
+        agent_oauth_tokens={"some-other-agent": {"CLAUDE_CODE_OAUTH_TOKEN": "fake-token"}},
+    )
+
+
 def test_keychain_check_never_reads_the_secret_itself(monkeypatch):
     """`-w` would print the password; this must never pass it."""
     if sie.sys.platform != "darwin":

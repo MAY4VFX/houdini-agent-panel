@@ -155,6 +155,21 @@ class Settings:
     #: feature exists to answer). Missing keys default to included; see
     #: `ui/bugreport_view.py`.
     bugreport_attachments: dict[str, bool] = field(default_factory=dict)
+    #: `{agent_id: {env_var: token}}` — a token minted by a terminal-auth
+    #: command that prints it once and never writes it anywhere else
+    #: (Claude's `setup-token`, docs/facts/acp-sdk.md §21: it exits with no
+    #: credentials file at all — `ui/terminal_login.py::TerminalLoginWorker.
+    #: token_captured` is the only chance to catch it). Stored here on the
+    #: same trust level `proxy_url`/`ca_bundle` already carry — this file
+    #: is per-machine, unsynced, plain JSON, same as any local credentials
+    #: file the CLI itself would have written if run in a real terminal —
+    #: and injected into that agent's own launch env by `runtime.py::
+    #: _with_oauth_tokens`, the same way `proxy.child_env` already injects
+    #: the studio proxy. Keyed by agent id so a future agent found to have
+    #: the same "print once, store it yourself" shape (team asked to check
+    #: Codex/Gemini/Grok/Kimi — not yet established either way) has
+    #: somewhere to go without a second field.
+    agent_oauth_tokens: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # --- serialization
 
@@ -258,6 +273,15 @@ class Settings:
                         at=str(item.get("at", "")),
                     )
                 settings.auth_attempts = attempts
+            elif name == "agent_oauth_tokens":
+                oauth_tokens: dict[str, dict[str, str]] = {}
+                for agent_id, mapping in (value or {}).items():
+                    if not isinstance(mapping, dict):
+                        continue
+                    oauth_tokens[str(agent_id)] = {
+                        str(env_var): str(v) for env_var, v in mapping.items()
+                    }
+                settings.agent_oauth_tokens = oauth_tokens
             elif name == "default_agent":
                 settings.default_agent = str(value) if value else None
             elif spec.type == "bool" or isinstance(getattr(settings, name), bool):

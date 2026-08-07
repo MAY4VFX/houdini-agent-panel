@@ -2145,3 +2145,130 @@ exit so a cancelled attempt on a machine that happens to already have
 older, unrelated credentials doesn't get a false "Signed in." A non-zero
 exit, or a zero exit with nothing found, keeps the original neutral
 message unchanged.
+
+## 21. `claude setup-token` does not sign anything in — it mints a token
+
+Decisive evidence, from a real, completed run on mayfx02 (the owner's own
+sign-in, exit code 0) — overturning the model §14 and §20 were both built
+on. The panel's own log, redaction intact:
+
+```
+terminal login line:  Your OAuth token (valid for 1 year):
+terminal login line:  <79 chars redacted>
+terminal login line:  <29 chars redacted>
+terminal login line: <29 chars redacted>'tbeabletoseeitagain.
+terminal login line: Usethistokenbysetting:<29 chars redacted>=<token>
+terminal login: exited, code=0
+```
+
+**Confirmed from the real bundled binary's own string table** (`strings`
+on the exact binary `_resolve_claude_terminal_command` finds — no process
+run, no login attempted), not guessed:
+
+```
+Your OAuth token (valid for 1 year):
+Store this token securely. You won't be able to see it again.
+Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>
+```
+
+This exactly reconciles the redacted log above, including the two
+different redaction lengths, which is worth spelling out because it
+confirms the pty-squeezed-whitespace mechanism (§20) is STILL exactly
+what's happening here, not a new one: `"Storethistokensecurely.Youwon"`
+(no apostrophe — `'` isn't in `_LOOKS_LIKE_A_TOKEN_RE`'s character class,
+so the match stops right there) is exactly 29 characters, leaving the
+literal tail `'tbeabletoseeitagain.` unredacted — and `"export"` (6) +
+`"CLAUDE_CODE_OAUTH_TOKEN"` (23), glued together with no space between
+them the same way "Paste code here" lost its own spacing, is exactly 29
+characters too.
+
+**So three things this project believed were wrong:**
+
+1. `claude setup-token` does not write `~/.claude/.credentials.json` —
+   that file is what an interactive, desktop-app-style `claude login`
+   writes (the earlier, wrong assumption baked into `signin_evidence.py`'s
+   own comment, now corrected). `setup-token` writes NOTHING to disk. It
+   prints the token once, says plainly it cannot be shown again, and
+   exits. Waiting for a credentials file to appear (`_on_terminal_login_
+   exited`'s own "Signed in." check, §20) could never succeed for this
+   command specifically — confirmed directly: `~/.claude/` on the machine
+   that just completed a real run contains only `.last-cleanup` and
+   `backups/`, no credentials file, after a successful exit.
+2. The "browser just says close this window, no code" shape (the report
+   that opened §20's own investigation) is real, and now fully explained:
+   the browser side completes the OAUTH EXCHANGE, not a login — the token
+   itself only ever appears in the CLI's own terminal output, never in the
+   browser.
+3. **The redaction that hides the token from the log is correct and was
+   never the bug** — the bug is that nothing ELSE ever captured it. An
+   owner completed a real sign-in and the panel gave him nothing: the
+   token existed for exactly as long as that one process's stdout did,
+   then was gone.
+
+### The variable is `CLAUDE_CODE_OAUTH_TOKEN` — and it is NOT `ANTHROPIC_API_KEY`
+
+Owner correction: this token is tied to his Claude subscription (Pro/Max)
+— a completely different wallet from `ANTHROPIC_API_KEY`, which bills per
+token against a separate Anthropic Console/API account. The binary's own
+strings confirm the panel had been quietly capable of steering someone
+the wrong way: the interactive login flow's own React state machine
+(same binary, same `strings` pass) labels the two paths itself —
+
+```
+"Login method pre-selected: Subscription Plan (Claude Pro/Max)"
+"Login method pre-selected: API usage billing (Anthropic Console)"
+```
+
+`n==="setup-token"` sets the SAME internal flag (`P`) that `m==="claudeai"`
+does in that state machine — i.e. `setup-token` IS the Subscription Plan
+path, definitively, not a shorthand for either. `_no_methods_advice`,
+`_builtin_terminal_auth_method`'s own description and `_AUTH_ADVICE` all
+used to frame `ANTHROPIC_API_KEY` as simply "the simpler alternative" —
+true only for someone who wants API billing; actively wrong advice for a
+subscriber, who would find out at the end of the month. Rewritten to name
+both mechanisms, using the CLI's own two labels above, without ranking
+either as "easier."
+
+### The fix: capture the token where it's printed, use it where the agent starts
+
+`TerminalLoginWorker` gained a `token_captured` signal, firing when a line
+matches `CLAUDE_CODE_OAUTH_TOKEN=` (anchored on the confirmed, literal
+variable name — NOT a generic `KEY=VALUE` line parser: under a real pty
+the "export" prefix and the variable name arrive glued together with no
+space, and a generic parser would capture `"exportCLAUDE_CODE_OAUTH_
+TOKEN"` as the "variable name", which is not anything real). Once this
+build's own token-dump label is seen, every subsequent line is ALSO
+redacted before reaching `line_received`, not only the log — the one
+place in this module where the live signal and the log are no longer the
+same decision, because unlike a device code or a URL, this really is a
+usable secret with nothing for the artist to read it FOR.
+
+Stored in `settings.agent_oauth_tokens` (`{agent_id: {env_var: token}}`)
+— the same trust level `proxy_url`/`ca_bundle` already carry in the same
+file — and injected into that agent's own launch environment by
+`runtime.py::launch_spec` (`_with_oauth_tokens`, mirroring `_with_proxy`'s
+own pattern exactly) the NEXT time it starts. Not retroactive: an already-
+running `claude-acp` process keeps whatever env it already had — the
+panel does not restart a live agent out from under the artist to apply
+this. `signin_evidence._claude` now also recognises a captured, stored
+token as evidence of being signed in, closing the loop with §20's own
+"Signed in." exit check — without this, that check could never fire true
+for a `setup-token` completion, since no credentials file and no shell
+env var exists until the panel supplies one itself.
+
+### The other five agents: not established, said plainly rather than guessed
+
+Asked to check whether Codex, Gemini, Grok and Kimi have the same "print
+a token, store it yourself" shape, or the same subscription-vs-API-key
+split. What IS already measured (§11, §12): `codex-acp` advertises TWO
+methods, `api-key` (reads `CODEX_API_KEY`/`OPENAI_API_KEY` — the same
+per-token-billing shape as `ANTHROPIC_API_KEY`) and `chat-gpt` (browser
+OAuth, `authenticate()` simply never returns until the browser step
+finishes — §12's own finding). That is at least the SAME two-wallet
+shape in outline. What is NOT established, for any of the four: whether
+their own OAuth flow writes a credentials file, prints a token once, or
+something else entirely — none of them were run under a pty for this
+specific question, and guessing would repeat the exact mistake this
+section exists to correct. Left for a follow-up pass with the same
+discipline used here: read the real binary, or capture a real (non-
+destructive) run, before writing anything about what they do.
