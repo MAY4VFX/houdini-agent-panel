@@ -1,5 +1,5 @@
 """Chat panel for an ACP agent inside SideFX Houdini, on top of fxhoudinimcp."""
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 __all__ = ["__version__"]
