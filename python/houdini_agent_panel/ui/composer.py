@@ -687,15 +687,18 @@ class Composer(QtWidgets.QWidget):
         self._entrance = BuddyEntrance(self)
         self._entrance.finished.connect(self._on_entrance_finished)
 
-        # "somewhere in the right corner, small text, a little button"
-        # (owner, his original placement request) — a small, quiet text
-        # control, not a toolbar button competing with Send/voice/mode for
-        # attention; findable when wanted, invisible otherwise. Same
-        # free-floating-child, positioned-in-`resizeEvent`
-        # technique as `_buddy`/`_boot_status` just above, for the same
-        # reason stated on both of those: living outside `main_layout`
-        # means its own size is never what determines where the input box
-        # sits, so it cannot be the thing that nudges the box around.
+        # First placed "somewhere in the right corner, small text, a little
+        # button" (owner, his original request), then moved to centred
+        # under the input box on a later one — a small, quiet text control
+        # either way, not a toolbar button competing with Send/voice/mode
+        # for attention; findable when wanted, invisible otherwise (barely
+        # visible even when looked at directly, on the SECOND request —
+        # see `theme.quiet_link_color`). Same free-floating-child,
+        # positioned-in-`resizeEvent` technique as `_buddy`/`_boot_status`
+        # just above, for the same reason stated on both of those: living
+        # outside `main_layout` means its own size is never what determines
+        # where the input box sits, so it cannot be the thing that nudges
+        # the box around.
         self._bug_report_link = QtWidgets.QPushButton("Report a bug…", self)
         self._bug_report_link.setObjectName("bugReportLink")
         self._bug_report_link.setCursor(QtCore.Qt.PointingHandCursor)
@@ -705,6 +708,7 @@ class Composer(QtWidgets.QWidget):
 
         surface_background = theme.to_hex(theme.composer_background())
         surface_border = theme.to_hex(theme.composer_border())
+        quiet_link = theme.to_hex(theme.quiet_link_color())
         self.setStyleSheet(
             "QFrame#composerSurface {"
             f" background: {surface_background};"
@@ -737,12 +741,15 @@ class Composer(QtWidgets.QWidget):
             " border-radius: 6px;"
             "}"
             # A footer link, not a toolbar button: no border, no fill, no
-            # radius pill — just muted text that reads as "text" until
-            # hovered, matching the owner's own description of it.
+            # radius pill. Barely visible against the background until
+            # hovered — the owner's own second request, after placement:
+            # "еле заметная по цвету от фона" (theme.quiet_link_color(),
+            # blended from the background toward disabled text rather than
+            # a fixed grey, so it stays quiet-not-invisible on every theme).
             "QPushButton#bugReportLink {"
             " border: none; background: transparent; padding: 0;"
-            " color: palette(disabled, text); font-size: 11px;"
-            " text-align: left;"
+            f" color: {quiet_link}; font-size: 11px;"
+            " text-align: center;"
             "}"
             "QPushButton#bugReportLink:hover {"
             " color: palette(text); text-decoration: underline;"
@@ -919,7 +926,7 @@ class Composer(QtWidgets.QWidget):
         self._entrance.raise_()
 
     def _position_bug_report_link(self, surface_x: int, surface_y: int) -> None:
-        """The footer strip, below the input box.
+        """The footer strip, below the input box, centred on it.
 
         Free-floating (never added to `main_layout`), same as `_buddy`/the
         boot widgets above — its own size can never be the thing that
@@ -929,10 +936,15 @@ class Composer(QtWidgets.QWidget):
         that the link's presence can't be the cause. `surface_x`/`surface_
         y` are the SAME numbers the input box and the buddy sprite are
         already positioned from, so this can never drift out of alignment
-        with either of them, whether or not the conversation drawer is
-        open — the drawer draws inside `TranscriptView`'s own gutter
-        (`AgentPanel._body_layout`'s own note) and never touches the
-        composer's geometry at all.
+        with the box, whether or not the conversation drawer is open — the
+        drawer draws inside `TranscriptView`'s own gutter (`AgentPanel.
+        _body_layout`'s own note) and never touches the composer's
+        geometry at all. Centred on `_surface`, not on `self` (the
+        composer's own width): the surface is width-clamped and centred
+        with its own margins (`resizeEvent`, `_RAIL_WIDTH`/`_MIN_RAIL_
+        WIDTH`), so a link centred on `self` instead would visibly drift
+        off from the box the moment the two widths differ, which they do
+        at almost every panel width.
 
         Below `_LINK_MIN_SURFACE_WIDTH`, hidden rather than clipped or
         wrapped — a deliberate choice, not a fallthrough: at the panel's
@@ -951,7 +963,7 @@ class Composer(QtWidgets.QWidget):
         self._bug_report_link.adjustSize()
         link = self._bug_report_link
         link.move(
-            surface_x + width - link.width(),
+            surface_x + (width - link.width()) // 2,
             surface_y + self._surface.height() + 6,
         )
         link.raise_()

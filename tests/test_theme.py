@@ -103,6 +103,43 @@ def test_coherent_qt6_surface_roles_are_kept(qapp):
     assert theme.composer_border() == QtGui.QColor("#313131")
 
 
+def test_quiet_link_color_blends_toward_disabled_text_from_window(qapp):
+    """The "Report a bug…" link's own colour (owner's own ask: barely
+    visible against the background) — a genuine blend, not a passthrough
+    of either role, and never past either endpoint."""
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#2d2d2d"))
+    palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, QtGui.QColor("#808080"))
+    qapp.setPalette(palette)
+
+    color = theme.quiet_link_color()
+
+    assert color != QtGui.QColor("#2d2d2d")
+    assert color != QtGui.QColor("#808080")
+    for value in (color.red(), color.green(), color.blue()):
+        assert 0x2D <= value <= 0x80
+
+
+def test_quiet_link_color_follows_the_theme_not_a_fixed_value(qapp):
+    """Must differ between two palettes — pinning it to one hardcoded
+    value would be wrong on whichever theme it wasn't written against, the
+    exact failure mode the owner asked to be checked against on both a
+    light and a dark palette."""
+    dark = QtGui.QPalette()
+    dark.setColor(QtGui.QPalette.Window, QtGui.QColor("#202020"))
+    dark.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, QtGui.QColor("#909090"))
+    qapp.setPalette(dark)
+    dark_color = theme.quiet_link_color()
+
+    light = QtGui.QPalette()
+    light.setColor(QtGui.QPalette.Window, QtGui.QColor("#f0f0f0"))
+    light.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, QtGui.QColor("#909090"))
+    qapp.setPalette(light)
+    light_color = theme.quiet_link_color()
+
+    assert dark_color != light_color
+
+
 def test_no_hardcoded_hex_literals_remain_in_ui_sources():
     """The regression test the whole task is really about: `ui/**` builds
     every colour from `theme.py`, never from a `#rrggbb` written by hand."""

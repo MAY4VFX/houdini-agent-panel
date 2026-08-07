@@ -349,6 +349,28 @@ def composer_border() -> QtGui.QColor:
     )
 
 
+def quiet_link_color() -> QtGui.QColor:
+    """Close enough to the background to not catch the eye — the "Report a
+    bug…" footer link's own colour (`Composer._position_bug_report_link`),
+    per the owner's own ask: "еле заметная по цвету от фона" (barely
+    visible against the background).
+
+    `Window`, nudged toward `Disabled/Text` rather than used at full
+    disabled-text strength: plain disabled text already reads as muted,
+    but the owner wants closer to invisible than that — findable by
+    someone looking for it, unnoticed by someone who isn't. Blending from
+    a palette role rather than a fixed grey is what keeps this legible
+    (never literally the same colour as the background) on every theme,
+    light or dark, instead of picking one value that happens to work on
+    whichever theme it was written against.
+    """
+    return _blend(
+        palette().color(QtGui.QPalette.Window),
+        palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text),
+        0.22,
+    )
+
+
 def contrasting_text_color(background: QtGui.QColor) -> QtGui.QColor:
     """Black or white — whichever reads better on `background`.
 

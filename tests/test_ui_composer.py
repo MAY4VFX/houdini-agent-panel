@@ -241,10 +241,12 @@ def test_bug_report_link_sits_under_the_input_box_not_beside_it(qapp):
     link = composer._bug_report_link
     surface = composer._surface
     assert link.y() >= surface.y() + surface.height()
-    # Right-aligned under the surface's own right edge, not centred or
-    # left-aligned — reads as a quiet footer note, not a second call to
-    # action next to Send.
-    assert abs((link.x() + link.width()) - (surface.x() + surface.width())) <= 1
+    # Centred under the input box itself (a later owner request), not on
+    # the composer's own width — the two differ at almost every panel
+    # width, since the surface is clamped/centred with its own margins.
+    link_center = link.x() + link.width() / 2
+    surface_center = surface.x() + surface.width() / 2
+    assert abs(link_center - surface_center) <= 1
 
 
 def test_bug_report_link_tracks_the_surface_so_a_drawer_cannot_shift_it(qapp):
@@ -264,7 +266,7 @@ def test_bug_report_link_tracks_the_surface_so_a_drawer_cannot_shift_it(qapp):
         qapp.processEvents()
         surface = composer._surface
         link = composer._bug_report_link
-        expected_x = surface.x() + surface.width() - link.width()
+        expected_x = surface.x() + (surface.width() - link.width()) // 2
         assert abs(link.x() - expected_x) <= 1
 
 
