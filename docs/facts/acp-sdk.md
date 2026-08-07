@@ -1559,3 +1559,152 @@ directly on mayfx02, a machine with all six agents in real, long-term use
 - Whether `XAI_API_KEY`/`MOONSHOT_API_KEY` are the exact variable names
   `grok-build`/`kimi` read — real, vendor-documented names, not confirmed
   against these specific ACP adapters the way Codex's pair was.
+
+## 17. Is the agent inside the panel the full Claude Code experience, or a reduced one?
+
+The owner's own question, verbatim: "клод код агент, который у нас
+работает, он имеет встроенные все системы обычного кли агента — ресерч,
+воркфлоус и прочее?" (does the Claude Agent running in the panel have all
+the systems a normal CLI agent has — research, workflows, etc.?). Answered
+by actually running `claude-agent-acp` 0.64.2 — the same version, the
+same launch command (`npx @agentclientprotocol/claude-agent-acp@0.64.2`),
+the same real, already-signed-in account this panel uses — not by reading
+the adapter's source and reasoning about what the Claude Agent SDK
+probably does.
+
+**Method and safety, stated up front:** a throwaway script using the
+panel's own `AcpClient` (`client.py`) — the exact class the panel itself
+uses, not a hand-rolled JSON-RPC client — spawned the real adapter with
+`cwd` set to a throwaway scratch directory (`/tmp/…/claude-capability-
+probe`, outside this repo, not committed) — never the owner's home, never
+a real project, never `~/.claude*`.
+`mcp_servers=[]` was passed deliberately (nothing the panel would normally
+inject), specifically to see what shows up on its own. Every probe prompt
+was either read-only or wrote only inside that scratch directory (a test
+file, an echoed string) — nothing destructive, nothing outside it. Three
+turns, real wall-clock time and real account usage, then the session was
+closed.
+
+### Tools — from real `tool_call` events, not self-report
+
+| tool (ACP `kind`) | fired for real in this probe | how |
+|---|---|---|
+| Read (`read`) | yes | asked to read `test.txt`, returned its exact contents |
+| Write (`edit`) | yes | created `write-test.txt` with exactly the requested text |
+| Bash/Terminal (`execute`) | yes | ran `echo probe-bash-ok`, returned the exact raw output |
+| Fetch (`fetch`, built-in `WebFetch`) | yes | fetched `https://example.com`, correctly reported the page title |
+| ToolSearch (`other`) | yes | fired on its own, mid-turn, to pull in `WebFetch`/`WebSearch` — the SAME deferred-tool mechanism this very document's own tooling uses |
+
+Self-reported (asked directly, not independently provoked in this probe,
+listed here because the ANSWER came with the loaded/deferred tool list
+verbatim rather than a vague description): the immediately-loaded set is
+`Agent, Bash, Edit, Read, ReportFindings, ScheduleWakeup, Skill,
+ToolSearch, Workflow, Write`; deferred (loaded on demand via `ToolSearch`)
+includes `CronCreate/Delete/List, DesignSync, EnterPlanMode/Worktree,
+ExitPlanMode/Worktree, ListMcpResourcesTool, Monitor, NotebookEdit,
+PushNotification, Read/ListMcpResourceTool, RemoteTrigger, SendMessage,
+TaskCreate/Get/List/Output/Stop/Update, WebFetch, WebSearch` plus every
+tool from every connected MCP server (below).
+
+### MCP — fxhoudini works (already established); it is NOT the only one
+
+The question that mattered: does the session ALSO load the artist's own
+MCP servers — the difference between "the panel's agent" and "my agent,
+in the panel." `~/.claude.json` (read-only, existence/keys only) has a
+real, populated `mcpServers` block on this machine: `puppeteer, houdini,
+cognee, mcpbrowser, playwright, browsermcp, browser-use, comfy-pilot,
+Parallel-Task-MCP, Parallel-Search-MCP, pointer, iggy-bus, context7,
+fxhoudini`. The panel passed `mcp_servers=[]` to this probe session —
+deliberately nothing — and the self-report still named, as currently
+connected/available, `Parallel-Search-MCP`, `Parallel-Task-MCP`,
+`iggy-bus`, and the browser-automation MCPs (`playwright`, `browsermcp`,
+`browser-use`), plus named several claude.ai-hosted connectors (`Exa`,
+`Gmail`, `Google Calendar`, `Google Drive`, `Mermaid Chart`, `jsoncanvas`)
+as configured-but-needing-OAuth-in-an-interactive-session. **None of
+these came from the panel.** They come from the artist's own account/
+local Claude configuration, loaded by the SDK independently of whatever
+`session/new`'s own `mcpServers` argument says.
+
+**This is the answer to the owner's underlying question**, more directly
+than the tools list: the panel is not handing the artist a walled-off
+agent with only `fxhoudini` wired in. It is their own Claude account,
+their own configured MCP servers, plus `fxhoudini` added on top for the
+scene. Working in the panel is not "a reduced agent" in this respect —
+if anything it is "my agent, in the panel, with one more capability."
+
+### Skills, subagents, hooks, CLAUDE.md
+
+| capability | verified how | result |
+|---|---|---|
+| **CLAUDE.md** | **run**: a project `CLAUDE.md` in the scratch cwd instructed the agent to prefix its first reply with a specific marker string | the marker appeared, verbatim, as the first thing in the very first reply — loaded and honoured |
+| **Hooks** | **run**: a project-level `.claude/settings.json` (scratch cwd only, never `~/.claude/settings.json`) configured a `PreToolUse` hook on `Bash` that appends a marker to a log file | the log file had the marker after the probed `Bash` call — the hook fired for real |
+| **Subagents** | self-report only (not independently invoked — no reason to spend a nested agent call on a measurement probe) | reports `Agent` as loaded immediately (not deferred), naming the same subagent roster this very session has (`claude`, `Explore`, `general-purpose`, `Plan`, `statusline-setup`) plus `Workflow` for multi-agent orchestration and the `TaskCreate/Get/List/Output/Stop/Update`/`SendMessage` family for background coordination |
+| **Skills** | self-report only (not independently invoked — a project-level probe skill was placed at `.claude/skills/probe-skill/SKILL.md` but no prompt was crafted to force its use, so its loading specifically was not confirmed by a run) | reports `Skill` as loaded immediately, with roughly 90 skills in its own system context, by name, across the same categories this document's own tool listing shows (a marketing pack, `superpowers:*`, `may-hub:*`, and more) |
+
+The self-reported items are not weaker evidence by accident — they are
+answers about the agent's own system prompt/context, which is exactly
+the kind of thing a model can report accurately (it is reading, not
+guessing), but they are still self-report and are labelled as such
+rather than folded in with what was independently run and checked.
+
+### Slash commands — the empty list is a build fact, not an auth gate
+
+§11 already measured `claude-acp` returning an empty `availableCommands`
+on a NEVER-CONFIGURED machine and left open whether that was "this build
+exposes none" or "none until signed in." This probe ran against a fully
+authenticated, working account — the same one that opens sessions and
+answers prompts normally every day — and `available_commands` was still
+`[]` on `session/new`. Every other agent measured in §11/§13 returns its
+command list regardless of auth state too (Codex refuses `session/new`
+outright when signed out, opencode returns its real list either way), so
+"only after auth" was never that agent's actual behavior either — but
+this closes it definitively for Claude specifically: **the empty list is
+this build/adapter simply never populating `availableCommands`, not a
+symptom of being signed out.**
+
+One more real fact from the same `session/new` response, unrelated to the
+question asked but worth recording since it was sitting right there:
+`available_modes` is NOT empty — six real modes came back: `auto`,
+`default` ("Manual"), `acceptEdits`, `plan`, `dontAsk`,
+`bypassPermissions`. `AgentInfo.auth_methods` was still `()`, consistent
+with §11.
+
+### Consequences for someone deciding panel vs. terminal
+
+1. **Not a reduced agent.** Every capability probed — file tools,
+   terminal, web fetch, the artist's own MCP servers, subagents, skills,
+   hooks, CLAUDE.md — is present and, where actually run, worked exactly
+   as it would from a terminal `claude` session on this same machine.
+2. **The one real difference measured is the empty slash-command list**
+   (§11, reconfirmed here) — nothing about "research, workflows and the
+   rest" is missing, only the panel's own affordance for typing `/command`
+   has nothing to autocomplete against for THIS agent specifically (the
+   underlying capability — `Workflow`, `Agent`/subagents — is there
+   either way, just not reachable through a slash command in this build).
+3. **MCP servers configured for the artist's terminal sessions carry into
+   the panel automatically**, `fxhoudini` on top. An artist who has spent
+   months wiring up their own MCP servers is not starting over inside the
+   panel.
+
+### Not established
+
+- Whether GLOBAL-level hooks/skills (`~/.claude/settings.json`,
+  `~/.claude/skills/`) also load — deliberately only tested at the
+  project level, in the scratch cwd, to honor "do not modify `~/.claude*`."
+  Reasonable to expect they would too (nothing in the probe suggests the
+  adapter distinguishes scope sources), but not run.
+- Whether a subagent (`Agent`/`Task`) or a skill can actually be
+  INVOKED end-to-end through this adapter, as opposed to merely being
+  present in the loaded tool list and self-reported as available — not
+  independently run, to keep this probe to three turns/one session
+  rather than an open-ended one.
+- The complete MCP tool surface (every tool name from every connected
+  server) — the self-report was long and this document only captures
+  what was printed within a length cap during the probe run, not a full
+  transcript dump.
+- Whether the account-level MCP/connector loading measured here is a
+  deliberate Claude Agent SDK feature or an artifact of running under the
+  same macOS user account and Keychain an interactive `claude` session on
+  this machine also uses — not distinguished, and not needed for the
+  question actually asked (whether the artist's OWN setup reaches the
+  panel — it does, by whatever mechanism).
