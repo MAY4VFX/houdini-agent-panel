@@ -885,8 +885,11 @@ def test_shape_for_log_shows_escapes_and_hides_the_secret():
     assert "<96>" in shape, "the long run must be replaced by its length"
     assert "A" * 24 not in shape, "no long run of the secret may survive"
 
-    # And the damage it causes, so the test states the actual defect.
-    assert tl._strip_ansi(raw).startswith("sk-ant-at01-")
+    # This shape was what identified the defect. Now that `_ANSI_RE` no
+    # longer lets an incomplete CSI terminate on the next character, the
+    # same input survives intact — see
+    # `test_an_incomplete_csi_does_not_eat_the_next_character`.
+    assert tl._strip_ansi(raw).startswith("sk-ant-oat01-")
 
 
 def test_shape_for_log_keeps_the_secret_out_of_a_styled_line_too():
@@ -906,3 +909,47 @@ def test_shape_for_log_keeps_the_secret_out_of_a_styled_line_too():
     shape = tl._shape_for_log(raw)
     assert "B" * 24 not in shape, "the secret must not survive"
     assert shape.count("\\x1b") == 2, f"both escapes must stay visible: {shape}"
+
+
+def test_an_incomplete_csi_does_not_eat_the_next_character():
+    """The `401 Invalid bearer token` regression, measured not guessed.
+
+    `_shape_for_log` on a real Linux sign-in (mayfx02, 2026-08-08)
+    recorded the token line as `'\\x1b[1C\\x1b[<9>\\x1b[<103>'` with 107
+    characters captured. This build emits `\\x1b[10` — parameters, no
+    final byte — and then keeps printing the token. Syntactically
+    `\\x1b[10o` is a valid CSI, so a final class of `[@-~]` swallowed the
+    token's own "o": sk-ant-oat01- became sk-ant-at01-, and the API said
+    the bearer was invalid. Re-inserting that character made the same
+    request authenticate.
+
+    The numbers pin the shape down: a well-formed `\\x1b[10G` would have
+    logged 104 and produced 108. 103 and 107 is the incomplete form.
+    """
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    true_token = "sk-ant-oat01-" + "X" * 95
+    assert len(true_token) == 108
+
+    raw = "\x1b[1C" + "\x1b[2G" + "sk-ant-" + "\x1b[10" + true_token[7:]
+
+    # The shape this reconstruction produces is the one that was logged.
+    assert tl._shape_for_log(raw) == repr("\x1b[1C\x1b[<9>\x1b[<103>")
+
+    assert tl._strip_ansi(raw) == true_token, "the token must survive intact"
+
+
+def test_a_well_formed_csi_is_still_stripped_whole():
+    """The fix must not cost the stripping that already worked — every
+    one of these appeared in the same real capture."""
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    for raw, expected in (
+        ("\x1b[2mtext\x1b[0m", "text"),                 # colour
+        ("\x1b[2GStore\x1b[8Gthis", "Storethis"),       # column moves (§20)
+        ("\x1b[1Cabc", "abc"),                          # cursor forward
+        ("\x1b[2K\x1b[Gline", "line"),                  # erase + column 1
+        ("\x1b7abc\x1b8", "abc"),                       # save/restore cursor
+        ("\x1b[>0qabc", "abc"),                         # the `>`-prefixed query (§20)
+    ):
+        assert tl._strip_ansi(raw) == expected, raw

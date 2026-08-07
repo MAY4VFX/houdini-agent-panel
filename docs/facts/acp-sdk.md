@@ -2693,3 +2693,52 @@ Still open, and now clearly urgent rather than theoretical: the panel
 checks that a token EXISTS, never that it WORKS. A 401 from the agent is
 the one signal that distinguishes them, and nothing currently listens
 for it.
+
+## 26. The build emits an incomplete CSI, and it ate a character of the token
+
+Measured on mayfx02, 2026-08-08, by the diagnostic added in 0.8.12 —
+after §25's wrapping fix had already made the token arrive on one line.
+
+Sign-in succeeded, a 107-character token was stored, and the agent's
+first prompt returned `401 Invalid bearer token`. Two requests with the
+same token through the machine's own proxy settled what was wrong:
+
+| token | API response |
+| --- | --- |
+| as stored, 107 chars, `sk-ant-at01-` | `authentication_error: Invalid bearer token` |
+| with one `o` re-inserted, 108 chars, `sk-ant-oat01-` | `rate_limit_error` |
+
+A rate-limit error is returned *after* authentication succeeds, so the
+token was correct and the panel was corrupting it.
+
+`_shape_for_log` recorded the raw line as:
+
+```
+'\x1b[1C\x1b[<9>\x1b[<103>'   →   107 characters captured
+```
+
+Reconstruction pins the cause down exactly, by arithmetic rather than by
+argument. A well-formed `\x1b[10G` before the rest of the token would log
+a 104-character run and yield 108 characters. The incomplete `\x1b[10` —
+parameters, no final byte at all — logs 103 and yields 107. Only the
+second matches both numbers.
+
+`_ANSI_RE` allowed the whole standard `[@-~]` range as a CSI final byte,
+which is correct by the letter of ECMA-48: `\x1b[10o` *is* a syntactically
+valid CSI. But `o` is not an **assigned** final, and here it was the
+token's own first character of `oat01-`. The regex terminated the
+incomplete sequence on it and threw it away.
+
+The fix restricts the final-byte class to assigned finals and adds an
+explicit branch for an incomplete CSI, which is stripped on its own and
+takes nothing after it. The unassigned finals now excluded are `j k o v
+w y z` and `N O Q U V W Y`; a sequence ending in one of those will no
+longer be stripped, and its bytes will show up in the line. That is
+deliberate — visible garbage beats a silently corrupted secret, the same
+rule §21 set for the placeholder and §25 for the truncation.
+
+Three different mechanisms have now corrupted this one secret in a day:
+the wrong anchor (§21), line wrapping (§25), and this. All three reported
+the failure as a *successful* sign-in, because the panel checks that a
+token EXISTS and never that it WORKS. That check is the one thing that
+would have caught all three in seconds, and it is still not written.

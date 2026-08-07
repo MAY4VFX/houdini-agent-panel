@@ -176,7 +176,37 @@ _INPUT_PROMPT_MARKERS = ("paste code here", "paste the redirect url here")
 #: build sends on startup) uses a `>` prefix the CSI parameter class
 #: didn't include, and `\x1b7`/`\x1b8` aren't `\x1b[...` sequences at all,
 #: a different (2-byte, no bracket) escape family entirely.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?>]*[ -/]*[@-~]|\x1b[78]")
+#: CSI final bytes that are actually ASSIGNED, not the whole `@-~` range
+#: the standard allows. The difference cost a real sign-in.
+#:
+#: Measured (mayfx02, 2026-08-08, via `_shape_for_log`): this build emits
+#: `\x1b[10` — parameters and no final byte at all — immediately before
+#: continuing to print a token. Syntactically `\x1b[10o` IS a well-formed
+#: CSI, so a final class of `[@-~]` happily consumed the token's own "o"
+#: as the terminator, turning `sk-ant-oat01-…` into `sk-ant-at01-…` and
+#: earning a `401 Invalid bearer token` from the API. Re-inserting that
+#: one character made the identical request authenticate, which is what
+#: proves it rather than suggests it.
+#:
+#: Reconstruction confirms the shape exactly: a well-formed `\x1b[10G`
+#: would have logged a 104-character run and produced 108 characters; the
+#: incomplete form logs 103 and produces 107, which is what was measured.
+#:
+#: `o` is not an assigned CSI final, and neither are `j k v w y z` or
+#: `N O Q U V W Y`. Excluding them means an unassigned sequence is no
+#: longer stripped and its bytes stay visible in the line. That is the
+#: deliberate trade: visible garbage beats a silently corrupted secret,
+#: the same rule §21 already set for the placeholder.
+_CSI_FINAL = r"[@A-MPRSTXZ`a-ilmnp-ux]"
+_ANSI_RE = re.compile(
+    # A complete sequence first — ordered alternation, so this always wins
+    # where it applies.
+    rf"\x1b\[[0-9;?>]*[ -/]*{_CSI_FINAL}"
+    # …then an INCOMPLETE one: parameters that no assigned final byte ever
+    # terminates. Stripped on its own, taking nothing after it with it.
+    r"|\x1b\[[0-9;?>]*[ -/]*"
+    r"|\x1b[78]"
+)
 #: A run this long with no line break, no carriage return and no
 #: recognised marker is almost certainly not a human-paced prompt —
 #: flushed as a line anyway so raw output is never invisible for good
