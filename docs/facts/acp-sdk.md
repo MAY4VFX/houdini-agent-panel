@@ -2206,6 +2206,110 @@ characters too.
    token existed for exactly as long as that one process's stdout did,
    then was gone.
 
+### The variable is `CLAUDE_CODE_OAUTH_TOKEN` — and it is NOT `ANTHROPIC_API_KEY`
+
+Owner correction: this token is tied to his Claude subscription (Pro/Max)
+— a completely different wallet from `ANTHROPIC_API_KEY`, which bills per
+token against a separate Anthropic Console/API account. The binary's own
+strings confirm the panel had been quietly capable of steering someone
+the wrong way: the interactive login flow's own React state machine
+(same binary, same `strings` pass) labels the two paths itself —
+
+```
+"Login method pre-selected: Subscription Plan (Claude Pro/Max)"
+"Login method pre-selected: API usage billing (Anthropic Console)"
+```
+
+`n==="setup-token"` sets the SAME internal flag (`P`) that `m==="claudeai"`
+does in that state machine — i.e. `setup-token` IS the Subscription Plan
+path, definitively, not a shorthand for either. `_no_methods_advice`,
+`_builtin_terminal_auth_method`'s own description and `_AUTH_ADVICE` all
+used to frame `ANTHROPIC_API_KEY` as simply "the simpler alternative" —
+true only for someone who wants API billing; actively wrong advice for a
+subscriber, who would find out at the end of the month. Rewritten to name
+both mechanisms, using the CLI's own two labels above, without ranking
+either as "easier."
+
+### The fix: capture the token where it's printed, use it where the agent starts
+
+`TerminalLoginWorker` gained a `token_captured` signal, firing when a line
+matches `CLAUDE_CODE_OAUTH_TOKEN=` (anchored on the confirmed, literal
+variable name — NOT a generic `KEY=VALUE` line parser: under a real pty
+the "export" prefix and the variable name arrive glued together with no
+space, and a generic parser would capture `"exportCLAUDE_CODE_OAUTH_
+TOKEN"` as the "variable name", which is not anything real). Once this
+build's own token-dump label is seen, every subsequent line is ALSO
+redacted before reaching `line_received`, not only the log — the one
+place in this module where the live signal and the log are no longer the
+same decision, because unlike a device code or a URL, this really is a
+usable secret with nothing for the artist to read it FOR.
+
+Stored in `settings.agent_oauth_tokens` (`{agent_id: {env_var: token}}`)
+— the same trust level `proxy_url`/`ca_bundle` already carry in the same
+file — and injected into that agent's own launch environment by
+`runtime.py::launch_spec` (`_with_oauth_tokens`, mirroring `_with_proxy`'s
+own pattern exactly) the NEXT time it starts. Not retroactive: an already-
+running `claude-acp` process keeps whatever env it already had — the
+panel does not restart a live agent out from under the artist to apply
+this. `signin_evidence._claude` now also recognises a captured, stored
+token as evidence of being signed in, closing the loop with §20's own
+"Signed in." exit check — without this, that check could never fire true
+for a `setup-token` completion, since no credentials file and no shell
+env var exists until the panel supplies one itself.
+
+### The other five agents: not established, said plainly rather than guessed
+
+Asked to check whether Codex, Gemini, Grok and Kimi have the same "print
+a token, store it yourself" shape, or the same subscription-vs-API-key
+split. What IS already measured (§11, §12): `codex-acp` advertises TWO
+methods, `api-key` (reads `CODEX_API_KEY`/`OPENAI_API_KEY` — the same
+per-token-billing shape as `ANTHROPIC_API_KEY`) and `chat-gpt` (browser
+OAuth, `authenticate()` simply never returns until the browser step
+finishes — §12's own finding). That is at least the SAME two-wallet
+shape in outline. What is NOT established, for any of the four: whether
+their own OAuth flow writes a credentials file, prints a token once, or
+something else entirely — none of them were run under a pty for this
+specific question, and guessing would repeat the exact mistake this
+section exists to correct. Left for a follow-up pass with the same
+discipline used here: read the real binary, or capture a real (non-
+destructive) run, before writing anything about what they do.
+
+### Independent confirmation: a second, unrelated project agrees
+
+Everything above this subsection came from one source: reading the
+bundled binary's own string table and a real completed run. A second,
+independent source — the owner's own separate project `~/Github/LLMux`
+(repo `MAY4VFX/LLMux`, a proxy in front of provider accounts, unrelated
+codebase to this panel) — reaches the same conclusion from its own,
+different vantage point. Its `docs/authentication.md` states, verbatim:
+
+> "Use the `python cli.py --setup-token` helper to mint a long-lived
+> (365-day) token after authenticating Anthropic once. The proxy saves
+> the token and prints it for reuse on other machines."
+>
+> "Short-lived OAuth tokens include refresh tokens, so the proxy renews
+> them automatically during normal operation."
+
+This lines up exactly with what the binary's string table already showed
+("Your OAuth token (valid for 1 year)"): `setup-token` mints one specific
+kind of token — long-lived, manually reissued by running the command
+again — as opposed to the short-lived, refresh-token-bearing session
+LLMux's own browser-based OAuth exchange produces. Two independent
+readings of the same distinction is why this project's conclusion stands:
+**there is no refresh flow for `CLAUDE_CODE_OAUTH_TOKEN` for the panel to
+implement.** A stale one isn't silently renewed — the artist reissues it
+by running `setup-token` again, same as LLMux's own tip says.
+
+**A boundary worth drawing, stated neutrally, not as an evaluation of
+either approach:** LLMux calls `api.anthropic.com/v1/messages` directly,
+itself, with `Authorization: Bearer <subscription token>` and the beta
+header `oauth-2025-04-20` — it IS the client making the API request. This
+panel does not do that: it launches the official `@agentclientprotocol/
+claude-agent-acp` package from the official ACP registry and hands that
+package the token via an environment variable — the package itself is
+what talks to Anthropic. Two different integration shapes, both real,
+neither this section takes a position on beyond describing them.
+
 ## 22. Where `kimi`'s own OAuth token actually lives on disk — the §16 gap closed
 
 §16 measured that `kimi` had "nothing reliably checkable" beyond the
@@ -2285,71 +2389,3 @@ a specific partner, not a property of the package itself. Whatever
 approval Zed may have does not, by that text, transfer to anyone else who
 installs the same package. This is a risk the owner has chosen to accept,
 not a permission that has been demonstrated to exist for this project.
-
-### The variable is `CLAUDE_CODE_OAUTH_TOKEN` — and it is NOT `ANTHROPIC_API_KEY`
-
-Owner correction: this token is tied to his Claude subscription (Pro/Max)
-— a completely different wallet from `ANTHROPIC_API_KEY`, which bills per
-token against a separate Anthropic Console/API account. The binary's own
-strings confirm the panel had been quietly capable of steering someone
-the wrong way: the interactive login flow's own React state machine
-(same binary, same `strings` pass) labels the two paths itself —
-
-```
-"Login method pre-selected: Subscription Plan (Claude Pro/Max)"
-"Login method pre-selected: API usage billing (Anthropic Console)"
-```
-
-`n==="setup-token"` sets the SAME internal flag (`P`) that `m==="claudeai"`
-does in that state machine — i.e. `setup-token` IS the Subscription Plan
-path, definitively, not a shorthand for either. `_no_methods_advice`,
-`_builtin_terminal_auth_method`'s own description and `_AUTH_ADVICE` all
-used to frame `ANTHROPIC_API_KEY` as simply "the simpler alternative" —
-true only for someone who wants API billing; actively wrong advice for a
-subscriber, who would find out at the end of the month. Rewritten to name
-both mechanisms, using the CLI's own two labels above, without ranking
-either as "easier."
-
-### The fix: capture the token where it's printed, use it where the agent starts
-
-`TerminalLoginWorker` gained a `token_captured` signal, firing when a line
-matches `CLAUDE_CODE_OAUTH_TOKEN=` (anchored on the confirmed, literal
-variable name — NOT a generic `KEY=VALUE` line parser: under a real pty
-the "export" prefix and the variable name arrive glued together with no
-space, and a generic parser would capture `"exportCLAUDE_CODE_OAUTH_
-TOKEN"` as the "variable name", which is not anything real). Once this
-build's own token-dump label is seen, every subsequent line is ALSO
-redacted before reaching `line_received`, not only the log — the one
-place in this module where the live signal and the log are no longer the
-same decision, because unlike a device code or a URL, this really is a
-usable secret with nothing for the artist to read it FOR.
-
-Stored in `settings.agent_oauth_tokens` (`{agent_id: {env_var: token}}`)
-— the same trust level `proxy_url`/`ca_bundle` already carry in the same
-file — and injected into that agent's own launch environment by
-`runtime.py::launch_spec` (`_with_oauth_tokens`, mirroring `_with_proxy`'s
-own pattern exactly) the NEXT time it starts. Not retroactive: an already-
-running `claude-acp` process keeps whatever env it already had — the
-panel does not restart a live agent out from under the artist to apply
-this. `signin_evidence._claude` now also recognises a captured, stored
-token as evidence of being signed in, closing the loop with §20's own
-"Signed in." exit check — without this, that check could never fire true
-for a `setup-token` completion, since no credentials file and no shell
-env var exists until the panel supplies one itself.
-
-### The other five agents: not established, said plainly rather than guessed
-
-Asked to check whether Codex, Gemini, Grok and Kimi have the same "print
-a token, store it yourself" shape, or the same subscription-vs-API-key
-split. What IS already measured (§11, §12): `codex-acp` advertises TWO
-methods, `api-key` (reads `CODEX_API_KEY`/`OPENAI_API_KEY` — the same
-per-token-billing shape as `ANTHROPIC_API_KEY`) and `chat-gpt` (browser
-OAuth, `authenticate()` simply never returns until the browser step
-finishes — §12's own finding). That is at least the SAME two-wallet
-shape in outline. What is NOT established, for any of the four: whether
-their own OAuth flow writes a credentials file, prints a token once, or
-something else entirely — none of them were run under a pty for this
-specific question, and guessing would repeat the exact mistake this
-section exists to correct. Left for a follow-up pass with the same
-discipline used here: read the real binary, or capture a real (non-
-destructive) run, before writing anything about what they do.
