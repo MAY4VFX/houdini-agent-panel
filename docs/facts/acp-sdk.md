@@ -2272,3 +2272,220 @@ specific question, and guessing would repeat the exact mistake this
 section exists to correct. Left for a follow-up pass with the same
 discipline used here: read the real binary, or capture a real (non-
 destructive) run, before writing anything about what they do.
+
+## 22. Windows sign-in via ConPTY — implemented, not yet run on Windows
+
+§20's own Windows note ended with "no Windows machine exists in this
+project... that measurement is future work". This section is that work,
+still without a Windows machine to run it on — the owner chose to ship
+it anyway, on the strength of Microsoft's own documented Win32 sequence,
+because testers with real Windows machines are available going forward
+and the diagnostic logging below is built specifically so a tester's
+`panel.log` is enough to tell a maintainer what happened, without remote
+access to the tester's machine.
+
+### What's implemented
+
+- `ui/_conpty_windows.py` (new module, stdlib-only — no `pywinpty`, same
+  "don't add a runtime dependency for one platform's one auth flow"
+  reasoning `node.py` already applies to not bundling Node): `ctypes` +
+  `kernel32.dll` bindings for the documented ConPTY sequence —
+  `CreatePipe` x2 → `CreatePseudoConsole` → `STARTUPINFOEXW` with
+  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` via `InitializeProcThreadAttribu
+  teList`/`UpdateProcThreadAttribute` → `CreateProcessW` with
+  `EXTENDED_STARTUPINFO_PRESENT`. `ConPtyProcess` wraps the result behind
+  the same `.pid`/`.poll()`/`.wait()`/`.terminate()` shape `subprocess.
+  Popen` already gives the POSIX paths; `ConPtyReader` gives the same
+  `.read(1) -> str` contract `_PtyMasterReader` gives the POSIX pty path,
+  including the same incremental-UTF-8-decode treatment (never
+  independently confirmed necessary on Windows, unlike its POSIX
+  sibling — the cost of keeping it is the same few lines either way).
+- `ui/terminal_login.py`: a new `_CONPTY_AVAILABLE` flag, kept
+  deliberately SEPARATE from `_PTY_AVAILABLE` (one is POSIX-only, one is
+  Windows-only, and conflating their names risks a future reader
+  assuming they're interchangeable — exactly the assumption that let a
+  silent pipe fallback ship once already). `TerminalLoginWorker` gained
+  `self._use_conpty` alongside `self._use_pty`; `work()` gained a third
+  spawn branch selected by it. `send_line()` gained a third write
+  destination (`ConPtyProcess.write`). `panel.py`'s `use_pty = method.id
+  == "claude-setup-token"` line is UNCHANGED — its meaning on Windows is
+  now "use ConPTY" rather than "no terminal at all", exactly as planned,
+  with no code change needed there.
+- **No silent fallback.** This is the one requirement that could not be
+  compromised on: a Windows machine with `use_pty` requested but
+  `_CONPTY_AVAILABLE == False` (pre-1809, or a broken kernel32) raises a
+  `RuntimeError` naming the requirement (Windows 10 1809+) instead of
+  quietly running plain pipes — the exact trap §20 already found and
+  fixed once on the POSIX side (a bundled binary that prints NOTHING at
+  all over plain pipes). `Worker.run()` turns that into a `failed`
+  signal `AgentPanel._on_terminal_login_failed` already knows how to
+  show, appending the "run it yourself" fallback command it always has.
+  Every step inside `_conpty_windows.spawn()` follows the same rule: the
+  first failing Win32 call raises a `ConPtyError` naming that exact step
+  and its `GetLastError()`/`HRESULT` code, with every handle opened so
+  far closed before raising — nothing is left half-built or leaked.
+
+### Diagnostic logging — built for a tester the maintainer cannot reach
+
+Every step logs through the SAME `logbook.py` mechanism the rest of the
+panel uses (`_log = logbook.logger("houdini_agent_panel.ui.conpty_windows")`
+in the new module, alongside the existing `"houdini_agent_panel.ui.
+terminal_login"` logger) — both are child loggers of the package logger
+`logbook.setup()` attaches its rotating file handler to, so nothing
+extra was needed to make these lines land in `panel.log`:
+
+- Windows build (`sys.getwindowsversion()`, e.g. `10.0.22631`) and
+  whether `CreatePseudoConsole` was found in `kernel32` at all
+  (`conpty_available()`).
+- Both `CreatePipe` calls (as one "pipes created" line — the two are
+  never independently interesting to a reader).
+- `CreatePseudoConsole`'s `HRESULT`, and the console size requested.
+- `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`
+  success, or the specific one that failed with its `GetLastError()`.
+- `CreateProcessW`'s pid on success, or `GetLastError()` plus the
+  command that was attempted on failure.
+- The first output chunk ever read (`ConPtyReader`, byte count plus a
+  REDACTED preview) — the single most useful line for telling "ConPTY
+  came up and the child is printing something" from "spawned fine, dead
+  silence", which is exactly the failure mode plain pipes produced on
+  POSIX before §20's fix.
+- Everything downstream of the read loop was ALREADY platform-neutral
+  and needed no changes: input-prompt detection, OAuth token capture,
+  and exit code are logged by the same lines `terminal_login.py` already
+  had for the POSIX paths (`"terminal login: input prompt detected"`,
+  `"terminal login: OAuth token captured (...)"`, `"terminal login:
+  exited, code=..."`).
+
+**Redaction is not new or weakened here.** `_conpty_windows.py` cannot
+import `terminal_login.py`'s `_redact_for_log`/`_LOOKS_LIKE_A_TOKEN_RE`
+(the two modules would import each other — `terminal_login.py` already
+imports `_conpty_windows`), so a small, self-contained copy lives in
+`_conpty_windows.py` too, same shape, same reasoning `bugreport.py`'s
+own docstring gives for porting rather than importing its sibling
+service's redaction list. Every raw-content log line in the new module
+(the first-chunk preview) goes through it before being written.
+
+### Bug report integration — already works, nothing new needed
+
+`ui/panel.py`'s `_open_bug_report` already calls `bugreport.read_log_tail
+(logbook.log_path())`, reading the SAME rotating `panel.log` file both
+`terminal_login.py` and `_conpty_windows.py` log into (confirmed directly:
+`tests/test_logbook.py::test_conpty_diagnostics_land_in_the_same_log_
+bugreport_reads`). A tester pressing the in-panel bug report button
+after a failed Windows sign-in attempt gets the ConPTY diagnostic lines
+in the report body automatically, redacted the same way everything else
+in that flow already is (`bugreport.redact_secrets`, a second,
+independent pass over whatever's in the editable field). The 60-line
+default tail (`bugreport._LOG_TAIL_MAX_LINES`) may not fit the ENTIRE
+ConPTY step sequence plus surrounding context on a long attempt — for a
+maintainer who needs the full picture, the raw `panel.log` file itself
+(path shown in the panel's own diagnostics/pypanel, `logbook.log_path()`)
+can be attached by hand; this was not changed, since the existing
+constant already serves every other flow the same way.
+
+### Tests — what they prove, and what they cannot
+
+- `tests/test_conpty_windows.py` (37 tests): exercises `_conpty_windows.
+  spawn()`/`conpty_available()`/`ConPtyProcess`/`ConPtyReader` against an
+  injected FAKE `kernel32` object (`_FakeKernel32`, plain Python, no
+  `ctypes.WinDLL` involved) — every call site in `spawn()` uses `ctypes.
+  pointer(x)` rather than `ctypes.byref(x)` specifically so a pure-Python
+  fake function can write through it (`byref` is a call-only proxy;
+  `pointer` supports `ptr[0] = value` from ordinary Python). Also
+  discovered and fixed along the way: `ctypes.get_last_error()`/`ctypes.
+  set_last_error()` do not exist at all outside Windows (confirmed:
+  `AttributeError` on macOS) — the module calls `kernel32.GetLastError()`
+  explicitly instead, which is itself dependency-injectable exactly like
+  every other kernel32 function used here, and is a legitimate,
+  independently-correct way to read the Win32 last-error value (used by
+  ctypes-based Windows tooling before `use_last_error=True` existed).
+  These tests prove the WRAPPING logic — call order, argument shapes,
+  error propagation and handle cleanup on every documented failure step.
+  They do NOT prove a real `kernel32.dll` accepts these exact calls.
+- `tests/test_terminal_login_worker_windows.py` (8 tests): one layer up
+  — `TerminalLoginWorker.__init__`'s flag selection (`_use_pty`/`_use_
+  conpty` are mutually exclusive, `_use_conpty` only true when POSIX pty
+  genuinely isn't available), the "ConPTY unavailable raises a clear
+  failure, never falls back to pipes" requirement, and an end-to-end run
+  of `work()`'s ConPTY branch against a scripted fake process
+  (`_ScriptedConPtyProcess`) — URL parsing, input-prompt detection,
+  `send_line` round-tripping, token capture/redaction, `stop()`
+  terminating the process, and `close()` being called on exit. Achieved
+  by monkeypatching `terminal_login_mod._PTY_AVAILABLE = False` and
+  `.platform.system` to return `"Windows"` (this machine's own real
+  `_PTY_AVAILABLE` is `True` — it's POSIX — so this is what stands in
+  for "no POSIX pty here"), plus replacing `terminal_login_mod._conpty_
+  windows` with a fake module whose `.spawn()` returns the scripted
+  process (`.ConPtyReader`/`.ConPtyError` are the REAL classes — no
+  reason to fake them, they only need a `.read(n) -> bytes` object).
+  These tests prove `TerminalLoginWorker`'s OWN logic is correct given a
+  ConPTY-shaped process. They do NOT prove `_conpty_windows.spawn()`
+  itself works against a real Windows `kernel32.dll`.
+- `tests/test_logbook.py::test_conpty_diagnostics_land_in_the_same_log_
+  bugreport_reads`: confirms the bug-report integration claim above for
+  real rather than by inspection alone.
+
+### Not established — no Windows machine in this project
+
+- Whether the documented ConPTY sequence actually succeeds against a
+  real `kernel32.dll` at all — every structure layout, constant, and
+  call order follows Microsoft's own C sample, but none of it has ever
+  executed on Windows.
+- Whether the bundled `claude` binary genuinely needs a controlling
+  terminal on Windows the same way §20 measured for Linux/macOS (the
+  working assumption this whole section is built on — plausible, since
+  the binary is cross-platform, but not measured on this platform).
+- Whether the child's own input masking (§20's own POSIX finding: this
+  build prints one `*` per character rather than echoing the real text)
+  behaves identically through a ConPTY as through a POSIX pty.
+- Whether a Windows console's default code page / narrator / IME
+  interacts with `CREATE_UNICODE_ENVIRONMENT` or the ConPTY's own
+  handling of the command line in any way not covered by `subprocess.
+  list2cmdline`'s own (POSIX-tested-only, here) quoting.
+- The exact wording/order the Windows build of `claude setup-token`
+  prints — assumed identical to Linux/macOS per §19 ("identical shape to
+  every other measurement... no new parsing needed"), never confirmed
+  for Windows specifically.
+
+### What a tester's `panel.log` needs to show for each of the above to move from "not established" to "verified"
+
+1. **ConPTY comes up at all**: `conpty: CreatePseudoConsole ok, size=...`
+   followed by `conpty: proc thread attribute list initialised` and
+   `conpty: CreateProcessW ok, pid=...`, with no `ConPtyError` in
+   between. Absence + a specific failing step (`CreatePipe`/`CreatePseudo
+   Console`/`InitializeProcThreadAttributeList`/`UpdateProcThreadAttribu
+   te`/`CreateProcessW`) plus its `GetLastError()`/HRESULT tells a
+   maintainer exactly where the documented sequence breaks on real
+   Windows, without needing the machine.
+2. **The binary actually needs a terminal (§20's assumption, ported)**:
+   `conpty: first output chunk (N bytes): ...` appearing SOON after
+   `CreateProcessW ok` — if this line never appears at all despite a
+   clean spawn, that's the Windows analogue of §20's original "zero
+   output over plain pipes" finding, just under ConPTY instead, and
+   would mean the assumption this section is built on doesn't hold.
+3. **Input masking parity**: not directly loggable (the panel
+   deliberately never logs the artist's typed code — see `send_line`'s
+   own docstring) — this one can only be confirmed by a tester's own
+   report of what they SAW after pasting a code (garbled text? asterisks?
+   nothing at all?), not by the log alone.
+4. **Command-line/quoting correctness**: `terminal login: spawning ...`
+   (the existing, platform-neutral line) shows what was ASKED for;
+   `conpty: CreateProcessW ok, pid=...` with no error confirms Windows
+   accepted the quoted command line `_build_environment_block`/
+   `list2cmdline` produced. A `ConPtyError` at `CreateProcessW` with
+   `GetLastError=123` (`ERROR_INVALID_NAME`) or `2`
+   (`ERROR_FILE_NOT_FOUND`) would point straight at this.
+5. **Output shape matches §19's assumption**: `terminal login: input
+   prompt detected` firing (from the SAME marker logic §18/§20 already
+   established) is the confirmation — if ConPTY comes up cleanly, output
+   arrives, but this line never fires, that means the Windows build's
+   prompt text differs from what's already recognised, the same class of
+   mismatch §18 found once on Linux.
+
+A single successful run showing all of items 1, 2 and 5 in `panel.log`,
+plus the tester confirming they could read/paste a code normally (item
+3) and that a real sign-in completed (`terminal login: OAuth token
+captured (...)` or `Signed in.` in the feed), would close every "not
+established" item above except the general "never independently run
+against a real kernel32.dll" caveat, which by definition stops applying
+once one has.
