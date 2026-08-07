@@ -1,5 +1,5 @@
-"""`SelfUpdateWorker`: runs `uvx --refresh --from <target> python -m
-houdini_agent_panel install` off the main thread and classifies what
+"""`SelfUpdateWorker`: runs `uvx --refresh --from <target>==<version> python
+-m houdini_agent_panel install` off the main thread and classifies what
 happened — the automated path behind the notice strip's "Update" button
 for the panel/fxhoudinimcp, replacing "type this yourself" (issue: the
 owner asking why the panel can't do this itself).
@@ -49,6 +49,11 @@ _FAKE_UVX = textwrap.dedent(
         sys.exit(0)
     elif behavior == "no_output_failure":
         sys.exit(7)
+    elif behavior == "echo_argv_and_env":
+        print("ARGV:" + " ".join(sys.argv[1:]))
+        for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+            print(f"{name}:" + os.environ.get(name, "<unset>"))
+        sys.exit(0)
     """
 )
 
@@ -89,7 +94,7 @@ def _fake_uvx(tmp_path, monkeypatch, behavior: str):
 
 def test_a_successful_update_streams_progress_and_succeeds(qapp, tmp_path, monkeypatch):
     _fake_uvx(tmp_path, monkeypatch, "success")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     progress: list[str] = []
     succeeded = []
@@ -115,7 +120,7 @@ def test_a_windows_style_sharing_violation_is_named_as_a_write_failure(qapp, tmp
     and run it again", not a generic failure message that reads the same
     as a dead network."""
     _fake_uvx(tmp_path, monkeypatch, "write_failure")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -134,7 +139,7 @@ def test_a_dropped_connection_is_named_as_a_download_failure_not_a_write_failure
     proxy or waiting, not by closing Houdini, and telling them apart
     wrong sends someone chasing the wrong fix."""
     _fake_uvx(tmp_path, monkeypatch, "download_failure")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -152,7 +157,7 @@ def test_an_unrecognised_failure_reports_the_exit_code_and_the_actual_output(qap
     the manual fallback too: enough to act on, not "something went
     wrong"."""
     _fake_uvx(tmp_path, monkeypatch, "generic_failure")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -167,7 +172,7 @@ def test_an_unrecognised_failure_reports_the_exit_code_and_the_actual_output(qap
 
 def test_a_failure_with_no_captured_output_still_names_the_exit_code(qapp, tmp_path, monkeypatch):
     _fake_uvx(tmp_path, monkeypatch, "no_output_failure")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -188,7 +193,7 @@ def test_uvx_not_found_names_the_manual_command_as_the_reason(qapp, monkeypatch)
     from houdini_agent_panel import shellenv as shellenv_module
 
     monkeypatch.setattr(shellenv_module, "capture", lambda **_: {})
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -197,7 +202,7 @@ def test_uvx_not_found_names_the_manual_command_as_the_reason(qapp, monkeypatch)
     _wait_until(qapp, lambda: bool(failed))
     worker.wait(3000)
 
-    assert "uvx --refresh --from houdini-agent-panel python -m houdini_agent_panel install" in failed[0]
+    assert "uvx --refresh --from houdini-agent-panel==0.5.0 python -m houdini_agent_panel install" in failed[0]
 
 
 def test_a_hung_child_is_killed_and_reported_after_the_timeout(qapp, tmp_path, monkeypatch):
@@ -210,7 +215,7 @@ def test_a_hung_child_is_killed_and_reported_after_the_timeout(qapp, tmp_path, m
     minutes."""
     monkeypatch.setattr(self_update_module, "_UPDATE_TIMEOUT", 0.5)
     _fake_uvx(tmp_path, monkeypatch, "hang")
-    worker = SelfUpdateWorker("houdini-agent-panel")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.5.0")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -227,7 +232,7 @@ def test_target_names_fxhoudinimcp_specifically_in_every_message(qapp, tmp_path,
     — the same worker, a different target, and the messages have to say
     which one."""
     _fake_uvx(tmp_path, monkeypatch, "write_failure")
-    worker = SelfUpdateWorker("fxhoudinimcp")
+    worker = SelfUpdateWorker("fxhoudinimcp", "1.2.3")
 
     failed: list[str] = []
     worker.failed.connect(failed.append)
@@ -237,3 +242,58 @@ def test_target_names_fxhoudinimcp_specifically_in_every_message(qapp, tmp_path,
     worker.wait(3000)
 
     assert "fxhoudinimcp" in failed[0]
+
+
+def test_the_version_is_pinned_into_the_from_spec_not_left_for_uvx_to_resolve(
+    qapp, tmp_path, monkeypatch
+):
+    """The bug this exists for: an owner on 0.7.1 pressed Update with 0.7.2
+    available, and the panel reinstalled 0.7.1 over itself — an update that
+    silently undid itself. `--from houdini-agent-panel` (no pin) asks uvx
+    to resolve "latest" itself; `Update.latest` is already known, on the
+    `Update` record the notice is showing, so there is nothing to ask uvx
+    to figure out."""
+    _fake_uvx(tmp_path, monkeypatch, "echo_argv_and_env")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.7.2")
+
+    progress: list[str] = []
+    succeeded = []
+    worker.progressed.connect(progress.append)
+    worker.succeeded.connect(lambda: succeeded.append(True))
+    worker.start()
+
+    _wait_until(qapp, lambda: succeeded)
+    worker.wait(3000)
+
+    argv_line = next(line for line in progress if line.startswith("ARGV:"))
+    assert "--from houdini-agent-panel==0.7.2" in argv_line
+
+
+def test_pythonpath_is_stripped_before_spawning_the_child(qapp, tmp_path, monkeypatch):
+    """Confirmed by direct reproduction (not just reasoning): Houdini's own
+    package json prepends its deps tree to `PYTHONPATH`
+    (`houdini_package.py`), and a child spawned with that inherited wins
+    over whatever `uvx` resolves into its own venv — pinning the version
+    alone (the test above) does NOT fix this by itself, planting a fake
+    package on `PYTHONPATH` and pinning `--from` to a real, different
+    version still imported the fake one. `PYTHONHOME`/`PYTHONSTARTUP` are
+    the same class of leak (`mcp_runtime.SHADOWING_VARS`, shared with the
+    fx server subprocess's own identical fix)."""
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "old-deps-tree"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "somewhere"))
+    monkeypatch.setenv("PYTHONSTARTUP", str(tmp_path / "startup.py"))
+    _fake_uvx(tmp_path, monkeypatch, "echo_argv_and_env")
+    worker = SelfUpdateWorker("houdini-agent-panel", "0.7.2")
+
+    progress: list[str] = []
+    succeeded = []
+    worker.progressed.connect(progress.append)
+    worker.succeeded.connect(lambda: succeeded.append(True))
+    worker.start()
+
+    _wait_until(qapp, lambda: succeeded)
+    worker.wait(3000)
+
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+        line = next(l for l in progress if l.startswith(f"{name}:"))
+        assert line == f"{name}:<unset>", f"{name} leaked into the child: {line}"

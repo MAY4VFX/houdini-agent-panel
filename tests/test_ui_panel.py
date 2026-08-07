@@ -1793,6 +1793,34 @@ def test_panel_or_fx_update_runs_a_real_worker_not_just_instructions(qapp, monke
     widget.shutdown()
 
 
+def test_panel_update_passes_the_known_latest_version_not_a_bare_package_name(qapp, monkeypatch):
+    """The version-pin bug: an owner on 0.7.1 pressed Update with 0.7.2
+    available, and it reinstalled 0.7.1 over itself. `update.latest` is
+    already on the `Update` record the notice is showing — `_start_update`
+    must hand it to `SelfUpdateWorker` explicitly rather than leaving the
+    version for uvx (or worse, a `PYTHONPATH`-shadowed import) to guess."""
+    from houdini_agent_panel.updates import Update
+    from houdini_agent_panel.ui.self_update import SelfUpdateWorker
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        SelfUpdateWorker, "work", lambda self: seen.append((self._target, self._version))
+    )
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel 1.2.0",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._start_update(update)
+    widget._panel_update_worker.wait(3000)
+    qapp.processEvents()
+
+    assert seen == [("houdini-agent-panel", "1.2.0")]
+
+    widget.shutdown()
+
+
 def test_panel_update_progress_updates_the_visible_notice(qapp):
     """The artist watching a strip that keeps changing is the difference
     between "it's working" and "did my click even land" — pip/uv's own
@@ -1810,6 +1838,101 @@ def test_panel_update_progress_updates_the_visible_notice(qapp):
 
     assert "Downloading houdini_agent_panel-1.2.0" in widget._notice._label.text()
     assert widget._notice.isHidden() is False
+
+    widget.shutdown()
+
+
+def test_panel_update_progress_never_shows_the_raw_pip_command(qapp):
+    """`deps.py`'s own `f"Installing dependencies: {printable_argv(argv)}"`
+    reaches this worker's `progressed` signal like any other output line —
+    but a `--target "/Users/.../deps/py3.11" houdini-agent-panel==...` line
+    wrapping across two lines, immediately followed by a long silent
+    stretch while `hython` itself starts (`mcp_runtime.py`'s own 8.9-16.5s
+    measurement), read as a hung update. The notice must never show it —
+    the exact line still reaches the log either way
+    (`SelfUpdateWorker.work`'s own `_log.info`, not tested here)."""
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._on_panel_update_progressed(update, "starting…")
+    widget._on_panel_update_progressed(
+        update,
+        'Installing dependencies: hython -m pip install --upgrade --target '
+        '"/Users/artist/Library/Application Support/HoudiniAgentPanel/deps/py3.11" '
+        "houdini-agent-panel==1.2.0",
+    )
+
+    text = widget._notice._label.text()
+    assert "Installing dependencies" not in text
+    assert "--target" not in text
+    assert "starting…" in text, "the last real line should stay on screen, not go blank"
+
+    widget.shutdown()
+
+
+def test_panel_update_notice_shows_elapsed_seconds_once_started(qapp):
+    """"He thought it had hung, because nothing changed for a long time and
+    the only visible text was a static command." An elapsed-seconds count
+    is the honest thing to show while the child is silent — not a fake
+    progress bar, just proof the panel is still watching."""
+    import time as time_module
+
+    from houdini_agent_panel.updates import Update
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+
+    assert "(" not in widget._notice._label.text() or widget._notice.isHidden()
+
+    widget._panel_update_started_at = time_module.monotonic() - 5.0
+    widget._panel_update_display_line = "Downloading…"
+    widget._render_panel_update_notice(update)
+
+    text = widget._notice._label.text()
+    assert "Downloading…" in text
+    import re
+
+    match = re.search(r"\((\d+)s\)", text)
+    assert match is not None, f"no elapsed-seconds count shown: {text!r}"
+    assert int(match.group(1)) >= 4
+
+    widget.shutdown()
+
+
+def test_panel_update_tick_timer_starts_with_the_worker_and_stops_on_success(qapp, monkeypatch):
+    """The ticker exists to keep the notice visibly alive while the update
+    runs, and only then — it must not outlive the worker, ticking a
+    finished update's own restart notice."""
+    from houdini_agent_panel.updates import Update
+    from houdini_agent_panel.ui.self_update import SelfUpdateWorker
+
+    monkeypatch.setattr(SelfUpdateWorker, "work", lambda self: None)
+
+    widget = _make_panel(qapp)
+    update = Update(
+        kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
+        current="1.1.0", latest="1.2.0",
+    )
+    widget._start_update(update)
+
+    assert widget._panel_update_tick_timer is not None
+    assert widget._panel_update_started_at is not None
+
+    widget._panel_update_worker.wait(3000)
+    qapp.processEvents()
+
+    widget._on_panel_update_succeeded(update)
+
+    assert widget._panel_update_tick_timer is None
+    assert widget._panel_update_started_at is None
+    assert widget._panel_update_display_line == ""
 
     widget.shutdown()
 

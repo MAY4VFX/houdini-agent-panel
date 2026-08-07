@@ -27,25 +27,48 @@ Houdini and run it again" is the only honest thing to say to a platform
 that could not be tested directly, and it must never be confused with a
 download that simply failed.
 
-Runs `uvx --refresh --from <target> python -m houdini_agent_panel install`
-— literally the manual command this notice already told the artist to type
-by hand — rather than re-deriving the Houdini-detection/hython-selection
-logic that command already does correctly in `install.py`. `--refresh`
-matters: without it uvx can serve its own cached resolution of `<target>`
-and report success having changed nothing, which is the exact failure
-mode `_start_update`'s docstring already names for the manual command.
+Runs `uvx --refresh --from <target>==<version> python -m houdini_agent_panel
+install` — literally the manual command this notice already told the artist
+to type by hand — rather than re-deriving the Houdini-detection/hython-
+selection logic that command already does correctly in `install.py`.
+`--refresh` matters: without it uvx can serve its own cached resolution of
+`<target>` and report success having changed nothing, which is the exact
+failure mode `_start_update`'s docstring already names for the manual
+command.
+
+The version is pinned explicitly (`Update.latest`, not a bare package name)
+for a reason stronger than "why ask uvx to re-derive what we already know":
+measured directly (owner report, then reproduced on this Mac with a planted
+fake package on `PYTHONPATH`) that pinning ALONE does not fix it either.
+Houdini's own package json prepends the deps tree to `PYTHONPATH`
+(`houdini_package.py`), and this worker's subprocess inherits that from
+`os.environ` like any other child. `PYTHONPATH` wins over a venv's own
+site-packages regardless of what `uvx` resolved into that venv — so even
+`uvx --from houdini-agent-panel==0.7.3 python -c "import houdini_agent_panel"`
+imported the STALE package straight off `PYTHONPATH`, version pin or not.
+`install.py::_panel_version()` then read `__version__` off that same stale
+import and pinned the INNER `pip install --target` to it — a self-update
+that silently reinstalled the version it was already running. This is the
+exact same shadowing `mcp_runtime.SHADOWING_VARS` already exists to strip
+for the fx server's own subprocess; stripping it here too is what actually
+closes the bug — the explicit version pin only makes a correct resolution
+faster and more deterministic once shadowing is no longer in the way.
 """
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 from shutil import which
 from types import SimpleNamespace
 
+from .. import mcp_runtime
 from .qt import Signal
 from .terminal_login import TerminalLoginWorker
 from .worker import Worker, WorkerStopped
+
+_log = logging.getLogger(__name__)
 
 #: A fresh `uv` resolution of houdini-agent-panel and every dependency, on
 #: a cold cache — comparable to `deps.py`'s own `_INSTALL_TIMEOUT` for the
@@ -57,7 +80,7 @@ _UPDATE_TIMEOUT = 600.0
 _NO_UV_MESSAGE = (
     "uv isn't on this machine's PATH, so the panel can't run the update itself. "
     "Install uv (https://astral.sh/uv), or run this by hand:\n"
-    "    uvx --refresh --from {target} python -m houdini_agent_panel install"
+    "    uvx --refresh --from {spec} python -m houdini_agent_panel install"
 )
 
 #: Substrings from pip's own output that mean "a file could not be
@@ -143,9 +166,12 @@ class SelfUpdateWorker(Worker):
     progressed = Signal(str)
     succeeded = Signal()
 
-    def __init__(self, target: str, *, parent=None) -> None:
+    def __init__(self, target: str, version: str, *, parent=None) -> None:
         super().__init__(parent)
         self._target = target
+        #: `Update.latest` — see this module's own docstring for why this is
+        #: pinned into `--from` rather than left for uvx to resolve.
+        self._version = version
 
     def work(self) -> None:  # noqa: D102 - Worker.work override
         # Same environment composition as a spawned terminal-login process
@@ -156,15 +182,35 @@ class SelfUpdateWorker(Worker):
         # `terminal_auth` that method reads `.env` off of — there is no
         # per-command override here, unlike a real terminal auth method.
         env = TerminalLoginWorker.build_env(SimpleNamespace(env={}))
+        # Houdini's own package json prepends its deps tree to PYTHONPATH
+        # (`houdini_package.py`), and this subprocess inherits that from
+        # `os.environ` like any other child spawned from here. Left in
+        # place, it shadows whatever `uvx` actually resolved: `PYTHONPATH`
+        # wins over a venv's own site-packages regardless of version pins,
+        # so `python -m houdini_agent_panel install` imported the STALE
+        # panel off `PYTHONPATH` and pinned the real install to ITS
+        # version — measured directly, reproduced on this Mac with a
+        # planted fake package on `PYTHONPATH`. Same fix as
+        # `mcp_runtime._clean_env` already applies to the fx server's own
+        # subprocess, for the identical reason.
+        for name in mcp_runtime.SHADOWING_VARS:
+            env.pop(name, None)
 
         uvx = which("uvx", path=env.get("PATH", ""))
+        spec = f"{self._target}=={self._version}"
         if uvx is None:
-            raise SelfUpdateError(_NO_UV_MESSAGE.format(target=self._target))
+            raise SelfUpdateError(_NO_UV_MESSAGE.format(spec=spec))
 
         argv = [
-            uvx, "--refresh", "--from", self._target,
+            uvx, "--refresh", "--from", spec,
             "python", "-m", "houdini_agent_panel", "install",
         ]
+        # The exact command belongs in the log, not in the notice strip —
+        # an artist reading the notice needs to know an update is under
+        # way, not stare at a `--target` path; whoever ends up debugging a
+        # failed one needs the literal argv, which is what `logbook`'s log
+        # file is for.
+        _log.info("self-update: %s", " ".join(argv))
         try:
             process = subprocess.Popen(
                 argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -199,6 +245,7 @@ class SelfUpdateWorker(Worker):
                 if not line:
                     continue
                 lines.append(line)
+                _log.info("self-update (%s): %s", self._target, line)
                 self.progressed.emit(line)
         finally:
             timer.cancel()

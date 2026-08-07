@@ -153,6 +153,18 @@ def _panel_update_notice_id(update: Any) -> str:
     return f"panel-update-restart-pending:{update.target}"
 
 
+#: Lines `install.py`/`deps.py` print that restate their own argv rather
+#: than report real progress — currently just `deps.py`'s own
+#: `f"Installing dependencies: {printable_argv(argv)}"`. The line, argv
+#: and all, already reaches the log (`SelfUpdateWorker.work`'s own
+#: `_log.info`); showing it in the notice too meant a `--target
+#: /Users/.../deps/py3.11` path wrapping across two lines, immediately
+#: followed by a long silent stretch while `hython` itself starts
+#: (measured 8.9-16.5s, `mcp_runtime.py`'s own numbers) — reported for
+#: real as looking like the update had hung.
+_PANEL_UPDATE_ADMIN_PREFIXES = ("Installing dependencies:",)
+
+
 def _update_is_stale(update: Any) -> bool:
     """Is this cached update already installed?
 
@@ -539,6 +551,26 @@ class AgentPanel(QtWidgets.QWidget):
         #: after it finishes (`_on_panel_update_succeeded`/`_failed` clear
         #: it themselves, same shape as every other worker field here).
         self._panel_update_worker: Any = None
+        #: The text `_on_panel_update_progressed` is currently showing —
+        #: not necessarily the LAST line the child printed, see its own
+        #: comment: an administrative line (the raw pip command echo) is
+        #: logged but never shown, so this stays on the last line that
+        #: actually meant something to an artist reading it.
+        self._panel_update_display_line: str = ""
+        #: `time.monotonic()` when the current self-update started, or
+        #: `None` — `_panel_update_tick_timer` uses it to show elapsed
+        #: seconds even while nothing new has printed. Reported for real:
+        #: the artist thought the panel had hung, because the only text on
+        #: screen during `hython`'s own multi-second startup (measured
+        #: 8.9-16.5s, `mcp_runtime.py`'s own numbers) was a static line
+        #: that never changed.
+        self._panel_update_started_at: float | None = None
+        #: Repeats roughly once a second for as long as a self-update is
+        #: running — `None` the rest of the time. Its only job is to
+        #: re-render the SAME notice with a fresh elapsed-time count, so
+        #: something on screen keeps moving even during a stretch where
+        #: the child prints nothing at all.
+        self._panel_update_tick_timer: Any = None
         #: The `Update` a self-update just finished installing, set by
         #: `_on_panel_update_succeeded` and never cleared by anything
         #: except this panel actually closing — a fact true for the rest
@@ -2469,18 +2501,20 @@ class AgentPanel(QtWidgets.QWidget):
 
         So `_start_update` now runs it for real, in a separate process
         (`SelfUpdateWorker`, off this thread) — the exact command that used
-        to be the manual advice, `uvx --refresh --from <target> python -m
-        houdini_agent_panel install`, just run by the panel instead of
-        typed by the artist. The manual command is still what's offered on
-        failure (`_on_panel_update_failed`), now a fallback rather than the
-        only route.
+        to be the manual advice, `uvx --refresh --from <target>==<version>
+        python -m houdini_agent_panel install`, just run by the panel
+        instead of typed by the artist. The manual command is still what's
+        offered on failure (`_on_panel_update_failed`), now a fallback
+        rather than the only route. `update.latest` is what fills in
+        `<version>` — see `self_update.py`'s own docstring for why that
+        pin is load-bearing, not just tidiness.
         """
         if update.kind != "agent":
             if self._panel_update_worker is not None:
                 return  # already running — a second click while it's in flight is a no-op, not a second update
             from .self_update import SelfUpdateWorker
 
-            self._panel_update_worker = SelfUpdateWorker(update.target, parent=self)
+            self._panel_update_worker = SelfUpdateWorker(update.target, update.latest, parent=self)
             self._panel_update_worker.progressed.connect(
                 lambda line, u=update: self._on_panel_update_progressed(u, line)
             )
@@ -2491,7 +2525,17 @@ class AgentPanel(QtWidgets.QWidget):
                 lambda message, u=update: self._on_panel_update_failed(u, message)
             )
             self._active_update = None
-            self._on_panel_update_progressed(update, "starting…")
+            self._panel_update_started_at = time.monotonic()
+            self._panel_update_display_line = "starting…"
+            tick_timer = QtCore.QTimer(self)
+            # Roughly once a second — fast enough that a stalled stretch
+            # (`hython` itself starting, no output of its own for as long
+            # as 16s) never sits still for more than a moment, slow enough
+            # that it never competes with a real line arriving.
+            tick_timer.timeout.connect(lambda u=update: self._render_panel_update_notice(u))
+            tick_timer.start(1000)
+            self._panel_update_tick_timer = tick_timer
+            self._render_panel_update_notice(update)
             self._panel_update_worker.start()
             return
         self._show_page(self.PAGE_SETTINGS)
@@ -2500,20 +2544,39 @@ class AgentPanel(QtWidgets.QWidget):
             self._note(f"Could not find {update.label} to update — try Settings → Agents.")
 
     def _on_panel_update_progressed(self, update: Any, line: str) -> None:
-        # The strip becomes the progress display for as long as this
-        # runs — pip/uv's own lines ("Downloading X", "Collecting Y") ARE
-        # the progress signal, there is no separate percentage to compute,
-        # and the artist watching a strip that keeps changing is the
-        # difference between "it's working" and "did my click even land".
+        # `SelfUpdateWorker` already logs every line it receives, argv
+        # included (see its own docstring) — this only decides what's
+        # worth putting in front of the artist. An administrative line
+        # (`_PANEL_UPDATE_ADMIN_PREFIXES`) is dropped from the DISPLAY,
+        # not the log: it doesn't read as progress, and it used to sit on
+        # screen unchanged for as long as the next real line took to
+        # arrive. `_panel_update_tick_timer` is what keeps the strip
+        # visibly alive through a stretch like that either way.
+        if not line.startswith(_PANEL_UPDATE_ADMIN_PREFIXES):
+            self._panel_update_display_line = line
+        self._render_panel_update_notice(update)
+
+    def _render_panel_update_notice(self, update: Any) -> None:
+        elapsed = ""
+        if self._panel_update_started_at is not None:
+            elapsed = f" ({int(time.monotonic() - self._panel_update_started_at)}s)"
         self._notice.show_notice(
             Announcement(
                 id=f"panel-update-progress:{update.target}",
                 severity="info",
-                title=f"Updating {update.label}… {line}",
+                title=f"Updating {update.label}… {self._panel_update_display_line}{elapsed}",
             )
         )
 
+    def _stop_panel_update_tick(self) -> None:
+        if self._panel_update_tick_timer is not None:
+            self._panel_update_tick_timer.stop()
+            self._panel_update_tick_timer = None
+        self._panel_update_started_at = None
+        self._panel_update_display_line = ""
+
     def _on_panel_update_succeeded(self, update: Any) -> None:
+        self._stop_panel_update_tick()
         self._panel_update_worker = None
         self._panel_update_restart_pending = update
         self._show_panel_update_restart_notice()
@@ -2536,6 +2599,7 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _on_panel_update_failed(self, update: Any, message: str) -> None:
+        self._stop_panel_update_tick()
         self._panel_update_worker = None
         # `message` is already classified (`self_update._classify_failure`)
         # — a download failure, a write failure (the Windows sharing-
@@ -3897,6 +3961,7 @@ class AgentPanel(QtWidgets.QWidget):
                 panel_update.failed.disconnect()
             worker_module.release(panel_update)
             self._panel_update_worker = None
+        self._stop_panel_update_tick()
 
         # Same reasoning as `_switch_agent_process`/`_show_page`: this
         # process polls indefinitely on its own (docs/facts/acp-sdk.md

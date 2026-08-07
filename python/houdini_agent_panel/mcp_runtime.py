@@ -54,7 +54,7 @@ from pathlib import Path
 #: environment look like it had `fxhoudinimcp` installed when it held
 #: nothing but pip. The check below sets `PYTHONPATH` itself, deliberately,
 #: and must not be handed a second one.
-_SHADOWING_VARS = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+SHADOWING_VARS = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
 
 _CHECK_TIMEOUT = 60.0
 
@@ -105,7 +105,7 @@ def plain_python_candidates(hython: Path, pyver: tuple[int, int]) -> list[Path]:
 
 def _clean_env(pythonpath: Path | None) -> dict[str, str]:
     env = dict(os.environ)
-    for name in _SHADOWING_VARS:
+    for name in SHADOWING_VARS:
         env.pop(name, None)
     if pythonpath is not None:
         env["PYTHONPATH"] = str(pythonpath)
@@ -151,4 +151,4 @@ def find(
     return None
 
 
-__all__ = ["find", "is_houdini_python", "plain_python_candidates"]
+__all__ = ["SHADOWING_VARS", "find", "is_houdini_python", "plain_python_candidates"]
