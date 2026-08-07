@@ -41,7 +41,7 @@ from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .boot_status import PHASE_CONNECTING, PHASE_LAUNCHING, PHASE_PREPARING, PHASE_SESSION
 from .composer import Composer
-from .conversations import ConversationDrawer, summarize_title
+from .conversations import ConversationDrawer, empty_scope_text, summarize_title
 from .permissions import PermissionRow
 from .qt import QShortcut, QtCore, QtGui, QtWidgets, Signal
 from .transcript import TranscriptView
@@ -1892,8 +1892,57 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _refresh_sessions(self) -> None:
         current = self._current_session()
+        pool_sessions = self._pool.all()
+        if not pool_sessions:
+            # Only computed for the rare case that matters — see
+            # `_compute_empty_scope_text`'s own docstring for the cost accounting
+            # this gate exists for.
+            self._conversations.set_empty_scope_text(self._compute_empty_scope_text())
         self._conversations.set_sessions(
-            self._pool.all(), current.session_id if current else None
+            pool_sessions, current.session_id if current else None
+        )
+
+    def _compute_empty_scope_text(self) -> str:
+        """What the drawer should say with nothing to show, for THIS tab's
+        current agent and folder — reported for real, twice: the owner
+        opened a scene, saw one empty drawer, and read a CORRECT absence
+        as data loss both times (dumping the store: 41 conversations in
+        that folder belonged to a different agent; the 2 that belonged to
+        THIS one lived in a different folder entirely). Naming both
+        filters is the fix `conversations.empty_scope_text` does; this is
+        only the part that gathers what it needs to do that.
+
+        One combined, unfiltered `conversations_store.load()` — not two
+        scoped ones — measured ~25-30ms at the store's own worst case (50
+        conversations x 400 entries): cheap for the one call `_refresh_
+        sessions` makes it from (only when the list is ALREADY empty, not
+        on every refresh), wasteful to pay twice for filters that can both
+        be checked in memory off the one read.
+        """
+        agent_label = self._display_label(self._agent_id) if self._agent_id else ""
+        if not agent_label:
+            return empty_scope_text("")
+        here = scene.hip_dir()
+        try:
+            from .. import conversations_store as store
+
+            all_conversations = store.load()
+        except Exception:  # noqa: BLE001 - a missing hint is not worth breaking the drawer
+            return empty_scope_text(agent_label)
+        other_agents_here = sum(
+            1
+            for c in all_conversations
+            if c.cwd == here and c.agent_id and c.agent_id != self._agent_id
+        )
+        this_agent_elsewhere = sum(
+            1
+            for c in all_conversations
+            if c.agent_id == self._agent_id and c.cwd and c.cwd != here
+        )
+        return empty_scope_text(
+            agent_label,
+            other_agents_here=other_agents_here,
+            this_agent_elsewhere=this_agent_elsewhere,
         )
 
     def _show_session(self, session_id: str) -> None:

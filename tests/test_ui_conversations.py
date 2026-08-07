@@ -7,6 +7,7 @@ from houdini_agent_panel.ui import conversations as conversations_mod
 from houdini_agent_panel.ui import theme
 from houdini_agent_panel.ui.conversations import (
     ConversationDrawer,
+    empty_scope_text,
     scope_label_text,
     summarize_title,
 )
@@ -409,9 +410,97 @@ def test_scope_label_text_for_zero_one_and_many():
     assert scope_label_text(11) == "11 conversations here"
 
 
+# --- empty_scope_text -------------------------------------------------
+#
+# The measured incident this exists for: the owner opened a scene, saw
+# one empty drawer, and reported his conversations missing — twice, both
+# times against a CORRECT drawer. Dumping the store: 41 conversations
+# scoped to that folder all belonged to a different agent; the 2 that
+# belonged to this one lived in a different folder entirely. "No
+# conversations here yet" was true and said nothing about why.
+
+
+def test_empty_scope_text_names_both_filters_with_no_hints():
+    assert (
+        empty_scope_text("Claude Agent")
+        == "No conversations for Claude Agent in this scene folder"
+    )
+
+
+def test_empty_scope_text_falls_back_without_an_agent():
+    """Before an agent is chosen there's nothing to name — same wording
+    `scope_label_text(0)` already uses, not a second phrase to keep in
+    sync."""
+    assert empty_scope_text("") == scope_label_text(0)
+
+
+def test_empty_scope_text_adds_the_other_agents_hint():
+    assert empty_scope_text("Claude Agent", other_agents_here=41) == (
+        "No conversations for Claude Agent in this scene folder — "
+        "41 here for other agents"
+    )
+
+
+def test_empty_scope_text_singular_other_agent():
+    assert empty_scope_text("Claude Agent", other_agents_here=1) == (
+        "No conversations for Claude Agent in this scene folder — "
+        "1 here for another agent"
+    )
+
+
+def test_empty_scope_text_adds_the_elsewhere_hint():
+    assert empty_scope_text("Claude Agent", this_agent_elsewhere=2) == (
+        "No conversations for Claude Agent in this scene folder — "
+        "2 for Claude Agent in other folders"
+    )
+
+
+def test_empty_scope_text_singular_elsewhere():
+    assert empty_scope_text("Claude Agent", this_agent_elsewhere=1) == (
+        "No conversations for Claude Agent in this scene folder — "
+        "1 for Claude Agent in another folder"
+    )
+
+
+def test_empty_scope_text_both_hints_together():
+    """The owner's own measured numbers, verbatim."""
+    assert empty_scope_text(
+        "Claude Agent", other_agents_here=41, this_agent_elsewhere=2
+    ) == (
+        "No conversations for Claude Agent in this scene folder — "
+        "41 here for other agents, 2 for Claude Agent in other folders"
+    )
+
+
+def test_empty_scope_text_zero_hints_are_silent():
+    """A genuinely first-ever conversation must not show a suspicious
+    "0 elsewhere" — that invites exactly the doubt this whole feature
+    exists to prevent."""
+    text = empty_scope_text("Claude Agent", other_agents_here=0, this_agent_elsewhere=0)
+    assert text == "No conversations for Claude Agent in this scene folder"
+    assert "0" not in text
+
+
 def test_drawer_shows_nothing_here_yet_before_any_sessions(qapp):
     host = ConversationDrawer()
     assert host._scope_label.text() == "No conversations here yet"
+
+
+def test_drawer_uses_the_supplied_empty_scope_text(qapp):
+    host = ConversationDrawer()
+    host.set_empty_scope_text("No conversations for Claude Agent in this scene folder")
+    host.set_sessions([], None)
+    assert host._scope_label.text() == "No conversations for Claude Agent in this scene folder"
+
+
+def test_drawer_empty_scope_text_does_not_leak_into_a_populated_list(qapp):
+    """The rich empty-state text must never bleed into the ordinary,
+    populated case — that stays exactly `scope_label_text(len(states))`,
+    computed from the drawer's own truth."""
+    host = ConversationDrawer()
+    host.set_empty_scope_text("No conversations for Claude Agent in this scene folder")
+    host.set_sessions([_state("s1", "Chat", 1.0)], "s1")
+    assert host._scope_label.text() == "1 conversation here"
 
 
 def test_drawer_scope_label_tracks_the_shown_session_count(qapp):

@@ -323,3 +323,101 @@ def test_a_conversation_is_never_saved_without_a_scene(qapp):
     assert saved["conv-gone"].cwd, "saved with no scene — invisible from now on"
     assert saved["conv-gone"].cwd == panel_mod.scene.hip_dir()
     widget.shutdown()
+
+
+# --- empty-scope hint, drawn from the real store ----------------------
+#
+# The measured incident: the owner dumped his own store and found 41
+# conversations scoped to `/Users/may` — all grok-build, none claude-acp
+# — with claude-acp's own 2 living under `/Users/may/BS/ship`. The drawer
+# was correct both times he read it as data loss. `_compute_empty_scope_
+# text` is what turns that correct absence into an explanation.
+
+
+def test_empty_scope_text_reproduces_the_owners_own_numbers(qapp):
+    """The exact reported shape, not a simplified stand-in: 41
+    conversations in THIS folder belonging to a different agent, 2
+    belonging to THIS agent in a different folder."""
+    grok_ones = [
+        store.StoredConversation.new(title=f"grok chat {i}", agent_id="grok-build", cwd="/tmp")
+        for i in range(41)
+    ]
+    claude_ones = [
+        store.StoredConversation.new(title="ship work", agent_id="claude-acp", cwd="/elsewhere"),
+        store.StoredConversation.new(title="more ship work", agent_id="claude-acp", cwd="/elsewhere"),
+    ]
+    store.save(grok_ones + claude_ones)
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+
+    text = widget._compute_empty_scope_text()
+
+    assert text == (
+        "No conversations for Claude Agent in this scene folder — "
+        "41 here for other agents, 2 for Claude Agent in other folders"
+    )
+    widget.shutdown()
+
+
+def test_empty_scope_text_says_nothing_extra_with_no_cross_scope_history(qapp):
+    """A genuinely fresh store (nothing anywhere) gets the plain sentence
+    — no "0 elsewhere" inviting the same doubt this exists to close."""
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+
+    text = widget._compute_empty_scope_text()
+
+    assert text == "No conversations for Claude Agent in this scene folder"
+    widget.shutdown()
+
+
+def test_empty_scope_text_before_an_agent_is_chosen(qapp):
+    widget = panel_mod.AgentPanel()
+    assert widget._agent_id == ""
+
+    text = widget._compute_empty_scope_text()
+
+    assert text == "No conversations here yet"
+    widget.shutdown()
+
+
+def test_empty_scope_text_ignores_unscoped_history(qapp):
+    """Conversations saved before scoping existed (empty cwd/agent_id)
+    must not count as "elsewhere" — `conversations_store.unscoped_count`
+    already has its own, separate note for those; double-counting them
+    here would be a second, confusing way to say the same thing."""
+    store.save(
+        [
+            store.StoredConversation.new(title="ancient", agent_id="", cwd=""),
+            store.StoredConversation.new(title="half-scoped", agent_id="claude-acp", cwd=""),
+        ]
+    )
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+
+    text = widget._compute_empty_scope_text()
+
+    assert text == "No conversations for Claude Agent in this scene folder"
+    widget.shutdown()
+
+
+def test_refresh_sessions_only_computes_the_hint_when_the_pool_is_empty(qapp, monkeypatch):
+    """The cost this whole design is careful about — a full store read —
+    must never run on an ordinary, populated refresh, only the rare one
+    where the list just went empty. `_pool.add`/`.remove` already call
+    `_refresh_sessions` themselves (the pool's own `added`/`removed`
+    wiring — `_wire_pool`) — no separate explicit call needed here."""
+    calls: list[int] = []
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    monkeypatch.setattr(
+        widget, "_compute_empty_scope_text", lambda: (calls.append(1), "unused")[1]
+    )
+
+    widget._pool.add(sessions.SessionState("s1", "Chat", "/tmp", 1.0))
+    assert calls == []  # a populated pool — no reason to read the store
+
+    widget._pool.remove("s1")
+    assert calls == [1]  # went empty — exactly once
+    widget.shutdown()

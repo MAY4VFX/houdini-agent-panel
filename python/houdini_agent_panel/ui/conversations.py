@@ -187,13 +187,61 @@ def scope_label_text(count: int) -> str:
     Says "here" rather than naming the scene folder again: the header
     already shows the full `$HIP` path (`HeaderBar.set_cwd`) right above the
     drawer's toggle, so repeating it would be the same fact twice in two
-    places at once, not two different facts.
+    places at once, not two different facts. `count == 0` is the fallback
+    for when there's no agent to name yet (before one is chosen) — see
+    `empty_scope_text` for the case that matters more, once there is one.
     """
     if count == 0:
         return "No conversations here yet"
     if count == 1:
         return "1 conversation here"
     return f"{count} conversations here"
+
+
+def empty_scope_text(
+    agent_label: str, *, other_agents_here: int = 0, this_agent_elsewhere: int = 0
+) -> str:
+    """What the drawer says with NOTHING to show, once the caller (`Agent
+    Panel`, the only thing that knows both the current agent and folder)
+    has a label to give it.
+
+    Names BOTH filters — the scene folder AND the agent — rather than
+    reading as an unexplained absence. Measured for real, twice: an
+    artist opened a scene, saw one empty drawer, and reported his
+    conversations missing — the drawer was correct both times (dumping
+    the store: 41 conversations in that folder, all belonging to a
+    DIFFERENT agent; the 2 that did belong to this one lived in a
+    different folder entirely). "No conversations here yet" was true but
+    said nothing about WHY, and a correct answer that reads as data loss
+    is worse than useless.
+
+    `other_agents_here`/`this_agent_elsewhere` are cheap counts the
+    caller already had cause to compute (`AgentPanel._compute_empty_scope_text`'s
+    own docstring has the cost accounting) — shown only when nonzero, so
+    a genuinely first-ever conversation still gets the plain sentence,
+    not a suspicious "0 elsewhere" that invites the exact suspicion this
+    exists to prevent.
+
+    `agent_label` empty (no agent chosen yet) falls back to the older,
+    agent-agnostic wording — there's nothing to name.
+    """
+    if not agent_label:
+        return scope_label_text(0)
+    base = f"No conversations for {agent_label} in this scene folder"
+    hints = []
+    if other_agents_here:
+        hints.append(
+            "1 here for another agent" if other_agents_here == 1
+            else f"{other_agents_here} here for other agents"
+        )
+    if this_agent_elsewhere:
+        hints.append(
+            f"1 for {agent_label} in another folder" if this_agent_elsewhere == 1
+            else f"{this_agent_elsewhere} for {agent_label} in other folders"
+        )
+    if not hints:
+        return base
+    return base + " — " + ", ".join(hints)
 
 
 def _row_menu_stylesheet() -> str:
@@ -284,16 +332,34 @@ class ConversationDrawer(QtWidgets.QFrame):
         # `_restore_conversations`/`scene.watch_hip_dir_changes` fixed). Set
         # from `set_sessions`, not computed here: the count is exactly
         # `len(states)`, already the drawer's own truth, so there is no
-        # second source to go stale against it. Deliberately NOT a "N more
-        # elsewhere" count — measured (`conversations_store.py`'s own
-        # `load()`, worst case 50 conversations x 400 entries): a full,
-        # unfiltered load costs ~25-30ms, cheap for a one-off but not
-        # something to re-pay on every `set_sessions()` call, which fires on
-        # far more than just opening the drawer.
+        # second source to go stale against it.
+        #
+        # The EMPTY case is different — `scope_label_text(0)` alone reads
+        # as an absence, not an explanation, and an artist who opened a
+        # scene with real history elsewhere (a different agent, a
+        # different folder) read a CORRECT empty drawer as data loss,
+        # twice. `_empty_scope_text` is what `AgentPanel._refresh_sessions`
+        # supplies instead, ahead of an empty `set_sessions` call — it
+        # names both filters (agent and folder), because the drawer itself
+        # knows neither on its own. Cross-scope counts are the panel's
+        # call too, deliberately: a full, unfiltered `conversations_store.
+        # load()` measured ~25-30ms at the store's worst case (50
+        # conversations x 400 entries) — cheap for the rare "the list just
+        # went empty" case this is reserved for, not something to re-pay
+        # on every `set_sessions()` call, which fires on far more than
+        # just that.
+        self._empty_scope_text = scope_label_text(0)
         self._scope_label = QtWidgets.QLabel(self)
         self._scope_label.setObjectName("drawerScopeLabel")
         self._scope_label.setContentsMargins(9, 0, 9, 0)
-        self._scope_label.setText(scope_label_text(0))
+        # The short, populated-case text ("4 conversations here") never
+        # needed this — the empty-case text naming both an agent and a
+        # cross-scope count routinely runs past the drawer's own width,
+        # and clipped silently (measured: rendered and looked, the exact
+        # rule this project holds itself to for anything visual) until
+        # this was added.
+        self._scope_label.setWordWrap(True)
+        self._scope_label.setText(self._empty_scope_text)
         layout.addWidget(self._scope_label)
 
         scroll = QtWidgets.QScrollArea(self)
@@ -381,10 +447,19 @@ class ConversationDrawer(QtWidgets.QFrame):
         super().showEvent(event)
         self._apply_theme()
 
+    def set_empty_scope_text(self, text: str) -> None:
+        """What the scope label shows the NEXT time `set_sessions` is
+        called with an empty list — see `_empty_scope_text`'s own comment
+        in `__init__` for why this comes from the caller rather than being
+        computed here. Setting this alone doesn't repaint anything; it
+        only takes effect once `set_sessions` runs.
+        """
+        self._empty_scope_text = text
+
     def set_sessions(self, states: list[SessionState], current_id: str | None) -> None:
         self._current_id = current_id
         self._states = {state.session_id: state for state in states}
-        self._scope_label.setText(scope_label_text(len(states)))
+        self._scope_label.setText(scope_label_text(len(states)) if states else self._empty_scope_text)
         # A pinned session that no longer exists (deleted elsewhere) has
         # nothing left to point at — drop it so the set doesn't grow forever.
         self._pinned &= self._states.keys()
