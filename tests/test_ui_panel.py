@@ -1044,7 +1044,7 @@ def test_sign_out_on_a_not_running_agent_reports_failure_not_silence(qapp, monke
     called: list = []
     monkeypatch.setattr(client, "logout", lambda: called.append(True))
     notes: list[str] = []
-    widget._note = notes.append
+    widget._note = lambda text, **_: notes.append(text)
 
     widget._on_logout_requested()
     qapp.processEvents()
@@ -2096,7 +2096,7 @@ def test_panel_update_failure_names_the_reason_and_restores_the_offer(qapp, monk
 
     widget = _make_panel(qapp)
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
     update = Update(
         kind="panel", target="houdini-agent-panel", label="houdini-agent-panel",
         current="1.1.0", latest="1.2.0",
@@ -2314,7 +2314,7 @@ def test_an_empty_agent_list_says_why(qapp, monkeypatch):
 
     widget = panel_mod.AgentPanel()
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
 
     widget._on_refresh_done(None, [])
 
@@ -2424,7 +2424,7 @@ def test_a_half_downloaded_npx_package_is_named_as_the_cause(qapp, monkeypatch):
 
     widget = panel_mod.AgentPanel()
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
 
     widget._on_log_line("sh: line 1: codex-acp: command not found")
 
@@ -2475,7 +2475,7 @@ def test_a_failed_start_leaves_no_progress_bar_behind(qapp, monkeypatch):
 
     widget = panel_mod.AgentPanel()
     widget._rejoin_agent("codex-acp")
-    monkeypatch.setattr(widget, "_note", lambda *_: None)
+    monkeypatch.setattr(widget, "_note", lambda *_, **__: None)
     monkeypatch.setattr(widget, "_open_agent_management", lambda: None)
     widget._composer.begin_boot("Codex")
 

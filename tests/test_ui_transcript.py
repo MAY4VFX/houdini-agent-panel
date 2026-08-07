@@ -58,7 +58,7 @@ def test_system_note_does_not_inherit_a_black_text_browser_surface(qapp):
     host.setStyleSheet("QTextBrowser { background: #000000; }")
     layout = QtWidgets.QVBoxLayout(host)
     model = TranscriptModel()
-    note = model.append_error("Codex 1.1.9 · /Users/may")
+    note = model.append_note("Codex 1.1.9 · /Users/may")
     view = TranscriptView(host)
     view.set_model(model)
     layout.addWidget(view)
@@ -227,6 +227,24 @@ def test_thought_differs_from_agent_message(qapp):
 
     assert thought_row._segments[0].font().italic() is True
     assert agent_row._segments[0].font().italic() is False
+
+
+def test_a_note_is_not_rendered_bold_like_an_error(qapp):
+    """Reported for real: 408 of 570 entries in an owner's own persisted
+    store were `kind="error"` and rendered identically to genuine failures
+    sitting right next to them — bold either way, no visual distinction.
+    A "note" is deliberately muted like a thought, not bold."""
+    view, model = _view_and_model()
+    note_entry = model.append_note("Agent stopped.")
+    view.refresh(note_entry.id)
+    error_entry = model.append_error("Agent failed to start: boom")
+    view.refresh(error_entry.id)
+
+    note_row = view._rows[note_entry.id]
+    error_row = view._rows[error_entry.id]
+
+    assert error_row._segments[0].font().bold() is True
+    assert note_row._segments[0].font().bold() is False
 
 
 # --- tool calls --------------------------------------------------------------

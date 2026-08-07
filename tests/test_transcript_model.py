@@ -196,3 +196,36 @@ def test_append_error_creates_entry():
     entry = model.append_error("something went wrong")
     assert entry.kind == "error"
     assert entry.text == "something went wrong"
+
+
+# --- notes -------------------------------------------------------------------
+#
+# Reported for real: 408 of 570 entries in an owner's own persisted store
+# were `kind="error"`, and the ones sampled ("Preparing Claude Agent…",
+# "Agent stopped.") were routine commentary, not failures — every one of
+# `ui/panel.py::_note`'s call sites used to route through `append_error`
+# unconditionally, with nothing else to route the informational ones to.
+
+
+def test_append_note_creates_entry():
+    model = TranscriptModel()
+    entry = model.append_note("Agent stopped.")
+    assert entry.kind == "note"
+    assert entry.text == "Agent stopped."
+
+
+def test_note_and_error_both_survive_a_round_trip_through_records():
+    """`to_records`/`load_records` is what a restored conversation actually
+    goes through — a kind that isn't in `to_records`'s own allow-list
+    silently vanishes on restart, which is exactly how the two used to be
+    indistinguishable there in the first place (both WERE "error")."""
+    model = TranscriptModel()
+    note = model.append_note("Agent stopped.")
+    error = model.append_error("Agent failed to start: boom")
+
+    restored = TranscriptModel()
+    restored.load_records(model.to_records())
+
+    kinds = {entry.id: entry.kind for entry in restored.entries()}
+    assert kinds[note.id] == "note"
+    assert kinds[error.id] == "error"

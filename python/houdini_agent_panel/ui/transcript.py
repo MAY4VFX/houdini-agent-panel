@@ -530,9 +530,13 @@ class _MessageRow(QtWidgets.QWidget):
     def _apply_kind_style(self, widget: "_ProseBlock", kind: str) -> None:
         font = widget.font()
         palette = widget.palette()
-        if kind == "thought":
-            # A thought is secondary; the user bubble, by contrast, keeps
-            # normal contrast as in the Claude/Codex references.
+        if kind in ("thought", "note"):
+            # A thought is secondary; so is the panel's own commentary
+            # ("Agent stopped.", a connection banner) — muted the same way,
+            # and deliberately NOT bold: bold is reserved for `error`, and
+            # a restored conversation used to render every one of these
+            # identically to a genuine failure sitting right next to it
+            # (`TranscriptModel.append_note`'s own docstring has the report).
             palette.setColor(QtGui.QPalette.Text, theme.status_color("pending"))
         elif kind in ("user", "queued"):
             user_text = palette.color(QtGui.QPalette.Text)

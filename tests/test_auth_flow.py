@@ -544,7 +544,7 @@ def test_sign_out_failure_from_settings_is_noted_not_lost(qapp, monkeypatch):
     monkeypatch.setattr(client, "logout", lambda: None)
     monkeypatch.setattr(client, "is_running", lambda: True)
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
 
     widget._on_agent_row_sign_out(widget._agent_id)
     client.error.emit("", "the agent refused to log out")
@@ -829,7 +829,7 @@ def test_terminal_login_spawn_failure_also_falls_back_to_the_command(qapp, monke
     widget._terminal_login_command = "/path/to/kimi login"
     widget._terminal_login_url_shown = False
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
 
     widget._on_terminal_login_failed("No such file or directory")
 
@@ -1370,7 +1370,7 @@ def test_stuck_notice_reaches_the_feed_even_when_the_artist_left_the_auth_page(q
     widget._terminal_login_command = "npx --yes @anthropic-ai/claude-code setup-token"
     widget._terminal_login_input_requested_seen = False
     notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(widget, "_note", lambda text, **_: notes.append(text))
 
     widget._on_terminal_login_stuck(widget._agent_id)
 

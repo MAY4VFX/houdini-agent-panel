@@ -216,7 +216,7 @@ def test_cancelling_with_a_queue_says_so_and_keeps_it(qapp, monkeypatch):
     # Checked before the grace period resolves anything: this is the
     # decision itself, not its eventual fallout.
     assert len(state.queued) == 1, "cancelling a turn must not silently drop what's queued"
-    notes = [e.text for e in widget._model(state.session_id).entries() if e.kind == "error"]
+    notes = [e.text for e in widget._model(state.session_id).entries() if e.kind == "note"]
     assert any("queued" in text.lower() for text in notes), (
         "what happens to the queue on cancel must be visible, not a surprise"
     )

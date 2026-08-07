@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 EntryKind = Literal[
-    "user", "activity", "agent", "thought", "tool", "plan", "permission", "error", "queued"
+    "user", "activity", "agent", "thought", "tool", "plan", "permission",
+    "error", "note", "queued",
 ]
 
 #: The feed has one plan per session — the protocol sends it in full on
@@ -264,7 +265,31 @@ class TranscriptModel:
         return entry
 
     def append_error(self, text: str) -> Entry:
+        """A genuine problem — something failed, or needs the artist's
+        attention to move forward. For the panel's own routine status
+        commentary ("Agent stopped.", a connection banner, "Signed in.")
+        use `append_note` instead — see its own docstring for why the two
+        must not share a kind."""
         entry = Entry(kind="error", id=str(uuid.uuid4()), text=text)
+        self._entries.append(entry)
+        return entry
+
+    def append_note(self, text: str) -> Entry:
+        """The panel talking about itself — a connection banner, "Agent
+        stopped.", "Signed in.", "N conversation(s) aren't shown here" —
+        never something that failed.
+
+        Reported for real, from an owner's own store: 408 of 570 persisted
+        entries across 43 conversations were `kind="error"`, and the ones
+        sampled were exactly this shape ("Preparing Claude Agent…", "Agent
+        stopped.") — `ui/panel.py::_note` used to route EVERY one of its
+        37 call sites through `append_error`, with no separate kind to
+        route the merely informational ones to instead. Restored history
+        rendered every one of them bold, identically to a genuine failure
+        sitting right next to it. `append_error` stays for the call sites
+        that really are reporting a failure — this is the other half.
+        """
+        entry = Entry(kind="note", id=str(uuid.uuid4()), text=text)
         self._entries.append(entry)
         return entry
 
@@ -282,13 +307,14 @@ class TranscriptModel:
         # a hang that loses it is the same bug as the one that motivated
         # persisting a prompt the instant it exists at all (`ui/panel.py::
         # _persist_conversations_soon`). Only the text round-trips, same as
-        # "user"/"agent"/"error" — the blocks needed to actually resend it
-        # (attachments in particular) don't survive a restart; `ui/panel.py::
-        # _restore_conversations` rebuilds a plain-text-only block from this.
+        # "user"/"agent"/"error"/"note" — the blocks needed to actually
+        # resend it (attachments in particular) don't survive a restart;
+        # `ui/panel.py::_restore_conversations` rebuilds a plain-text-only
+        # block from this.
         return [
             {"kind": entry.kind, "id": entry.id, "text": entry.text}
             for entry in self._entries
-            if entry.kind in ("user", "agent", "error", "queued") and entry.text
+            if entry.kind in ("user", "agent", "error", "note", "queued") and entry.text
         ]
 
     def load_records(self, records: list[dict]) -> None:

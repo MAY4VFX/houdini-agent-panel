@@ -1036,7 +1036,7 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_launch_prep_failed(self, message: str) -> None:
         self._launch_worker = None
         self._composer.cancel_boot()
-        self._note(message)
+        self._note(message, error=True)
         self._open_agent_management()
 
     def _display_label(self, agent_id: str) -> str:
@@ -1387,7 +1387,14 @@ class AgentPanel(QtWidgets.QWidget):
         # A boot that ended in a dead agent is not progress. The reason goes
         # to the feed; a bar frozen partway would read as "still coming".
         self._composer.cancel_boot()
-        self._note(f"Agent disconnected: {reason}" if reason else "Agent stopped.")
+        # `reason` is only ever non-empty for an ABNORMAL exit (`client.py`'s
+        # own `disconnected.emit` sites: `""` for a normal stop, a real
+        # message only for "agent process exited unexpectedly") — worth the
+        # split rather than one line covering both severities.
+        if reason:
+            self._note(f"Agent disconnected: {reason}", error=True)
+        else:
+            self._note("Agent stopped.")
         # A switch that was in aid of signing in has nowhere left to land —
         # the agent it was headed for just went away.
         self._pending_auth_target = None
@@ -1395,7 +1402,7 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_failed(self, message: str) -> None:
         self._composer.cancel_boot()
-        self._note(f"Agent failed to start: {message}")
+        self._note(f"Agent failed to start: {message}", error=True)
         self._open_agent_management()
         self._pending_auth_target = None
         self._pending_logout_agent = None
@@ -1715,7 +1722,7 @@ class AgentPanel(QtWidgets.QWidget):
             if self._pages.currentIndex() == self.PAGE_AUTH:
                 self._auth_view.show_error(message, self._last_auth_method)
             else:
-                self._note(f"Sign out failed: {message}")
+                self._note(f"Sign out failed: {message}", error=True)
             return
         # A failure while the artist is on the sign-in screen has to appear
         # THERE. Reporting it into a feed they cannot see is the same as not
@@ -1731,7 +1738,7 @@ class AgentPanel(QtWidgets.QWidget):
             return
         target = session_id or (self._current_session().session_id if self._current_session() else "")
         if not target:
-            self._note(message)
+            self._note(message, error=True)
             return
         entry = self._model(target).append_error(message)
         self._touch(target, entry.id)
@@ -2130,7 +2137,8 @@ class AgentPanel(QtWidgets.QWidget):
         self._note(
             "The agent hasn't opened a new conversation. It may be busy or "
             "stuck — try switching agents in the header, or restart it from "
-            "settings."
+            "settings.",
+            error=True,
         )
 
     def _on_session_renamed(self, session_id: str, title: str) -> None:
@@ -2444,7 +2452,8 @@ class AgentPanel(QtWidgets.QWidget):
                 "Couldn't fetch the agent list, so there is nothing to install "
                 "yet. Check the network — or, behind a studio firewall, "
                 "Settings → Network."
-                + (f"\n{reason}" if reason else "")
+                + (f"\n{reason}" if reason else ""),
+                error=True,
             )
         if settings_view is not None and entries:
             from .. import registry
@@ -2591,7 +2600,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._show_page(self.PAGE_SETTINGS)
         self._settings_view.focus_agents()
         if not self._settings_view.trigger_agent_update(update.target):
-            self._note(f"Could not find {update.label} to update — try Settings → Agents.")
+            self._note(f"Could not find {update.label} to update — try Settings → Agents.", error=True)
 
     def _on_panel_update_progressed(self, update: Any, line: str) -> None:
         # `SelfUpdateWorker` already logs every line it receives, argv
@@ -2658,7 +2667,7 @@ class AgentPanel(QtWidgets.QWidget):
         # success, a failure doesn't need to keep being said once the
         # artist has read it, and the ORIGINAL offer comes back so trying
         # again is one click, not a re-explanation.
-        self._note(f"Updating {update.label} failed.\n{message}")
+        self._note(f"Updating {update.label} failed.\n{message}", error=True)
         if self._active_update is None:
             self._active_update = update
         self._notice.show_update(update)
@@ -2737,7 +2746,7 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_agent_install_failed(self, agent_id: str, message: str) -> None:
         self._restart_after_update = None
-        self._note(f"Could not update {self._display_label(agent_id)}: {message}")
+        self._note(f"Could not update {self._display_label(agent_id)}: {message}", error=True)
 
     def _on_blocking_action(self, announcement_id: str, url: str) -> None:
         self._open_url(url)
@@ -2796,7 +2805,8 @@ class AgentPanel(QtWidgets.QWidget):
             self._note(
                 "The agent's package didn't finish downloading, and npx keeps "
                 "reusing the incomplete copy. Clear its cache and start the "
-                "agent again:\n    rm -rf ~/.npm/_npx"
+                "agent again:\n    rm -rf ~/.npm/_npx",
+                error=True,
             )
             return
         if "authorizationrequired" in lowered.replace(" ", ""):
@@ -2806,8 +2816,10 @@ class AgentPanel(QtWidgets.QWidget):
             self._offer_sign_in()
             return
         # Trimmed: agents put timestamps and ANSI colour in stderr, and the
-        # useful part is the tail.
-        self._note(f"Agent: {line.strip()[-200:]}")
+        # useful part is the tail. Reached only when a fatal marker matched
+        # and neither of the two named causes above did — still a real
+        # problem, just not one this panel recognises by name.
+        self._note(f"Agent: {line.strip()[-200:]}", error=True)
 
     def _offer_sign_in(self) -> None:
         """Show the sign-in screen using the methods `initialize` gave us.
@@ -3298,7 +3310,7 @@ class AgentPanel(QtWidgets.QWidget):
         )
         if self._pages.currentIndex() == self.PAGE_AUTH:
             self._auth_view.set_pending_detail(message)
-        self._note(message)
+        self._note(message, error=True)
 
     def _on_terminal_login_input_requested(self) -> None:
         """The child printed its own input prompt (Claude's `setup-token`,
@@ -3401,7 +3413,7 @@ class AgentPanel(QtWidgets.QWidget):
                 if self._terminal_login_got_output
                 else self._terminal_login_no_output_message()
             )
-            self._note(message)
+            self._note(message, error=True)
             self._auth_view.set_pending(message)
             return
         # A real, live report (docs/facts/acp-sdk.md §20): the owner's own
@@ -3447,7 +3459,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._terminal_login_stuck_timer.stop()
             self._terminal_login_stuck_timer = None
         if self._pages.currentIndex() != self.PAGE_AUTH:
-            self._note(f"Terminal login failed: {message}")
+            self._note(f"Terminal login failed: {message}", error=True)
             return
         self._auth_view.show_error(message, self._last_auth_method)
         if not self._terminal_login_url_shown:
@@ -3456,7 +3468,7 @@ class AgentPanel(QtWidgets.QWidget):
                 if self._terminal_login_got_output
                 else self._terminal_login_no_output_message()
             )
-            self._note(fallback)
+            self._note(fallback, error=True)
 
     def _stop_terminal_login(self) -> None:
         """Ends whatever login was in progress in the spawned process —
@@ -3594,7 +3606,7 @@ class AgentPanel(QtWidgets.QWidget):
             if self._pages.currentIndex() == self.PAGE_AUTH:
                 self._auth_view.show_error(message, self._last_auth_method)
             else:
-                self._note(f"Sign out failed: {message}")
+                self._note(f"Sign out failed: {message}", error=True)
             self._record_auth_attempt(self._agent_id, action="sign_out", ok=False, message=message)
             return
         self._pending_logout_agent = self._agent_id
@@ -4045,10 +4057,27 @@ class AgentPanel(QtWidgets.QWidget):
         # look like it did something.
         self._restored = stored
 
-    def _note(self, text: str) -> None:
+    def _note(self, text: str, *, error: bool = False) -> None:
+        """The panel's own single "say something in the feed" mechanism —
+        every call site EXCEPT a genuine failure (`error=True`) is routine
+        commentary, and used to be indistinguishable from one either way.
+
+        Reported for real, from an owner's own persisted store: 408 of 570
+        entries across 43 conversations were `kind="error"`, and the ones
+        sampled ("Preparing Claude Agent…", "Agent stopped.") were never
+        errors at all — every one of this method's call sites routed
+        through `append_error` unconditionally, with nothing else to route
+        the merely informational ones to. `error` defaults to `False`
+        because most of them (a connection banner, "Signed in.", "Code
+        sent — waiting…") are exactly that; the minority that report a
+        real problem (a spawn failure, a stalled turn, a failed sign-out)
+        pass `error=True` at their own call site — see
+        `TranscriptModel.append_note`'s own docstring for the rest.
+        """
         current = self._current_session()
         session_id = current.session_id if current else "__idle__"
-        entry = self._model(session_id).append_error(text)
+        model = self._model(session_id)
+        entry = model.append_error(text) if error else model.append_note(text)
         if current is None:
             self._transcript.set_model(self._model(session_id))
             self._transcript.refresh(None)

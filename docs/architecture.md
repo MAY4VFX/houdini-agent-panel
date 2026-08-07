@@ -534,7 +534,7 @@ Kept separate from rendering, so the logic that assembles the feed can be
 tested without a QApplication.
 
 ```python
-EntryKind = Literal["user", "agent", "thought", "tool", "plan", "permission", "error"]
+EntryKind = Literal["user", "agent", "thought", "tool", "plan", "permission", "error", "note"]
 
 @dataclass
 class Entry:
@@ -577,7 +577,13 @@ class TranscriptModel:
     def apply_plan(self, entries) -> Entry
     def apply_permission(self, view: PermissionView) -> Entry
     def resolve_permission(self, request_key: str, option_id: str | None) -> Entry | None
-    def append_error(self, text: str) -> Entry
+    def append_error(self, text: str) -> Entry   # a genuine failure — bold, distinct from...
+    def append_note(self, text: str) -> Entry    # ...routine panel commentary ("Agent stopped.",
+                                                   # a connection banner) — muted, not bold. `ui/
+                                                   # panel.py::_note`'s own `error` flag picks
+                                                   # between the two; see its docstring for the
+                                                   # report that split them (408/570 persisted
+                                                   # entries wrongly `kind="error"`).
     def entries(self) -> list[Entry]
 ```
 
