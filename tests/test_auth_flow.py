@@ -1211,7 +1211,16 @@ def test_stuck_timer_actually_fires_a_real_qtimer(qapp, monkeypatch):
     widget._on_auth_method_chosen("claude-setup-token")
     assert widget._terminal_login_stuck_timer is not None
 
-    QtTest.QTest.qWait(200)
+    # Polled, not a single fixed sleep — a bare `qWait(200)` measured
+    # flaky under a full-suite run (system load pushes a 50ms QTimer past
+    # a 200ms wait window some of the time); this still proves the timer
+    # actually fires, just tolerant of how long that takes under load,
+    # the same pattern `test_terminal_login_worker.py`'s own `_wait_until`
+    # already uses for exactly this reason.
+    elapsed = 0
+    while widget._terminal_login_stuck_timer is not None and elapsed < 5000:
+        QtTest.QTest.qWait(20)
+        elapsed += 20
 
     assert widget._terminal_login_stuck_timer is None, "the timer never fired"
     assert "Cancel" in widget._auth_view._pending_detail_label.text()
