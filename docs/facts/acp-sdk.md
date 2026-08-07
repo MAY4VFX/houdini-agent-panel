@@ -2643,3 +2643,53 @@ captured (...)` or `Signed in.` in the feed), would close every "not
 established" item above except the general "never independently run
 against a real kernel32.dll" caveat, which by definition stops applying
 once one has.
+
+## 25. The pty had no width, so the token arrived cut in half
+
+Measured on the owner's Linux machine (mayfx02, 2026-08-08), on 0.8.10 —
+after §21's capture bug was already fixed and the token was, for the
+first time, actually being stored.
+
+Sign-in succeeded. `terminal login: OAuth token captured` appeared in the
+log, `settings.agent_oauth_tokens` held a token, the panel returned to
+the transcript. The first prompt came back:
+
+```
+Failed to authenticate. API Error: 401 OAuth access token is invalid.
+```
+
+The log says why, in two lines that had been sitting there since the
+first captured run:
+
+```
+terminal login line:  <79 chars redacted>
+terminal login line:  <29 chars redacted>
+```
+
+79 + 29 = 108, and a leading space plus 79 characters is exactly 80.
+`pty.openpty()` returns a terminal with **no size set**, which an
+Ink-based build reads as the 80-column fallback and hard-wraps to. The
+minted token is 108 characters; the panel captured the first line and
+stored it as the whole thing.
+
+Nothing in the output marks a line as continued — no trailing backslash,
+no indent, no escape. From the reader's side a wrapped token and a
+complete one are indistinguishable, so no downstream parser can repair
+this. It has to be prevented at the source: `_set_pty_size` now sets
+`TIOCSWINSZ` on the slave fd to `_PTY_COLUMNS` (1000) before the child
+is spawned, and the Windows path passes the same width to
+`CreatePseudoConsole` instead of relying on its own separate default of
+120 — two independent defaults drifting apart is how one platform ends
+up quietly truncating a secret while the other doesn't.
+
+Worth noting what this cost: the failure reported as a *successful*
+sign-in. The panel said "Signed in.", the evidence check passed (a token
+was present), and the only symptom reached the artist one prompt later
+as an authentication error with nothing pointing back at sign-in. §21's
+own rule — that storing a wrong value is worse than storing none —
+applies to a truncated value exactly as much as to a placeholder.
+
+Still open, and now clearly urgent rather than theoretical: the panel
+checks that a token EXISTS, never that it WORKS. A 401 from the agent is
+the one signal that distinguishes them, and nothing currently listens
+for it.

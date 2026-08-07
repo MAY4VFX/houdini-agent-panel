@@ -797,3 +797,68 @@ def test_the_token_never_reaches_the_log_either(qapp, tmp_path, caplog):
     messages = [r.message for r in caplog.records]
     assert not any(_FAKE_TOKEN in m for m in messages)
     assert any("OAuth token captured" in m for m in messages)
+
+
+def test_the_pty_is_wide_enough_that_the_child_never_wraps_a_token(qapp, tmp_path):
+    """The `401 OAuth access token is invalid` regression.
+
+    `pty.openpty()` hands out a terminal with no size, which an Ink-based
+    build reads as 80 columns and hard-wraps to. A real run split the
+    108-character token into 79 + 29, and the panel stored the first
+    piece as if it were the whole thing — "Signed in.", then a 401 on the
+    first prompt. Nothing marks a continued line, so this has to be
+    prevented at the source rather than repaired afterwards.
+    """
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    master_fd, slave_fd = pty.openpty()
+    try:
+        rows, cols, _, _ = struct.unpack(
+            "HHHH", fcntl.ioctl(slave_fd, termios.TIOCGWINSZ, b"\0" * 8)
+        )
+        assert cols in (0, 80), f"unexpected default width {cols} — the premise changed"
+
+        tl._set_pty_size(slave_fd)
+
+        rows, cols, _, _ = struct.unpack(
+            "HHHH", fcntl.ioctl(slave_fd, termios.TIOCGWINSZ, b"\0" * 8)
+        )
+        assert cols == tl._PTY_COLUMNS
+        assert rows == tl._PTY_ROWS
+        # The measured failure: a 108-character token plus a leading
+        # space has to fit on one line with room to spare.
+        assert cols > 108 * 2
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_a_real_pty_run_reports_the_width_we_set(qapp, tmp_path):
+    """End to end through `work()`: the child asks its own tty how wide
+    it is and prints the answer — the same question the real build asks
+    before deciding where to wrap."""
+    script = (
+        "import os, sys\n"
+        "print('cols=%d' % os.get_terminal_size(sys.stdout.fileno()).columns)\n"
+        "sys.stdout.flush()\n"
+    )
+    ta = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path), use_pty=True)
+
+    lines: list[str] = []
+    exited: list[int] = []
+    worker.line_received.connect(lines.append)
+    worker.exited.connect(exited.append)
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(exited))
+    worker.wait(3000)
+
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    assert any(f"cols={tl._PTY_COLUMNS}" in line for line in lines), lines

@@ -99,7 +99,9 @@ from .qt import Signal
 from .worker import Worker, WorkerStopped
 
 try:  # pragma: no cover - exercised only on POSIX, where this project runs its tests
+    import fcntl
     import pty
+    import struct
     import termios
 
     _PTY_AVAILABLE = True
@@ -293,6 +295,47 @@ def _redact_for_log(line: str) -> str:
         return f"<{len(match.group(0))} chars redacted>"
 
     return _LOOKS_LIKE_A_TOKEN_RE.sub(_mask, line)
+
+
+#: How wide the pty claims to be. `pty.openpty()` hands out a terminal
+#: with NO size set, and a build that lays its output out with Ink asks
+#: the tty for its width and hard-wraps to it — 80 columns, the fallback
+#: for an unset size.
+#:
+#: That silently corrupted the one thing this whole module exists to
+#: capture. A real Linux run (mayfx02, 2026-08-08) printed the minted
+#: token as TWO lines — 79 characters, then 29 — because a leading space
+#: plus 79 characters is exactly 80. The panel captured the first line,
+#: stored it, reported "Signed in.", and the agent's first prompt came
+#: back `401 OAuth access token is invalid`: a token 79 characters long
+#: where the real one is 108. Nothing in the output says a line was
+#: continued, so no parser downstream can tell a wrapped token from a
+#: complete one — the only honest fix is to stop the wrapping happening.
+#:
+#: Wide enough for several times the longest thing measured here (the
+#: 108-character token; the ~250-character OAuth URL, which arrives
+#: wrapped as an OSC-8 hyperlink at 448 characters, §20), and still well
+#: under `_FORCE_FLUSH_CHARS` so a full-width line can never be mistaken
+#: for a run that forgot to end.
+_PTY_COLUMNS = 1000
+#: Rows matter far less — nothing here is laid out vertically — but a
+#: terminal claiming zero rows is a strange thing to hand a program that
+#: may reasonably check.
+_PTY_ROWS = 50
+
+
+def _set_pty_size(fd: int, *, columns: int = _PTY_COLUMNS, rows: int = _PTY_ROWS) -> None:
+    """Tell the pty how wide it is, so the child stops wrapping output.
+
+    Set on the SLAVE fd — that's the side the child sees as its
+    controlling terminal, and the side whose size `process.stdout.
+    columns` reports. Failure is suppressed for the same reason the
+    `termios` block below suppresses it: an fd that won't take the ioctl
+    is not worth losing a sign-in over, and the old (wrapping) behaviour
+    is what we'd fall back to anyway.
+    """
+    with contextlib.suppress(OSError):
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
 
 class _PtyMasterReader:
@@ -517,6 +560,7 @@ class TerminalLoginWorker(Worker):
             # three, exactly what a real terminal gives a foreground
             # process.
             master_fd, slave_fd = pty.openpty()
+            _set_pty_size(slave_fd)
             with contextlib.suppress(termios.error):
                 # Local echo off — measured to make NO observable
                 # difference either way (a real run with it left on
@@ -567,8 +611,18 @@ class TerminalLoginWorker(Worker):
                     "Windows 10 version 1809 or later is required)."
                 )
             _log.info("terminal login: spawning via ConPTY (windows)")
+            # Same width as the POSIX pty, passed explicitly rather than
+            # left to that module's own default: wrapping corrupts a
+            # token identically on either platform, and two independent
+            # defaults drifting apart is exactly how one platform ends up
+            # quietly capturing 79 characters of a 108-character secret.
             conpty_process = _conpty_windows.spawn(
-                command, list(args), env=env, cwd=self._cwd or None
+                command,
+                list(args),
+                env=env,
+                cwd=self._cwd or None,
+                columns=_PTY_COLUMNS,
+                rows=_PTY_ROWS,
             )
             self._conpty_process = conpty_process
             process = conpty_process
