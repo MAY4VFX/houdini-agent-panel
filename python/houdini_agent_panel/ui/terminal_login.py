@@ -63,6 +63,25 @@ can never fire for this flow, and a real owner's token going uncaptured
 the first time this shipped is the report that added `token_captured`
 below. See `_OAUTH_TOKEN_RE`'s own comment for the exact wording and why
 it's matched on the confirmed variable name, not a generic parser.
+
+§20's own "Windows" note used to end here: "no Windows machine exists in
+this project... that measurement is future work". This is that work,
+still without a Windows machine to run it on. `_conpty_windows.py` is
+the Windows counterpart to `_PtyMasterReader` below — a real ConPTY
+(`CreatePseudoConsole` + `CreateProcessW`, `ctypes`-only, no third-party
+dependency) instead of `pty.openpty()`, for the identical reason: the
+bundled binary needs a real controlling terminal, and Windows has no
+POSIX pty at all. The one rule that changed from §20's own Windows note:
+back then, an unavailable pty silently forced the plain-pipe path — the
+exact path already measured (§20's own opening line) to produce ZERO
+output for this specific binary. That silent downgrade is gone. On
+Windows, `_use_pty` (POSIX) and `_use_conpty` (this module) are mutually
+exclusive and never fall through to plain pipes for `claude-setup-token`
+— an unavailable or failing ConPTY now raises a `ConPtyError` with a
+concrete step and error code, which `Worker.run()` turns into a `failed`
+signal the artist actually sees, instead of a screen that never moves.
+See `_conpty_windows.py`'s own module docstring for exactly what is, and
+is not, verified about the implementation itself.
 """
 
 from __future__ import annotations
@@ -70,6 +89,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import os
+import platform
 import re
 import subprocess
 
@@ -85,6 +105,22 @@ try:  # pragma: no cover - exercised only on POSIX, where this project runs its 
     _PTY_AVAILABLE = True
 except ImportError:  # Windows has no pty/termios modules at all
     _PTY_AVAILABLE = False
+
+try:
+    from . import _conpty_windows
+except Exception:  # noqa: BLE001 - a diagnostics-capable import must never break the panel
+    _conpty_windows = None  # type: ignore[assignment]
+
+#: Mirrors `_PTY_AVAILABLE`'s own role, deliberately kept as a SEPARATE
+#: flag (module docstring, the new §20 addendum) rather than folded into
+#: it — `_PTY_AVAILABLE` means "POSIX pty available", this means "ConPTY
+#: available", and the two are never both true on the same machine (one
+#: is POSIX-only, the other Windows-only) but conflating their NAMES
+#: would make a future reader assume they're interchangeable, which is
+#: exactly the assumption this module's own Windows section had to
+#: correct once already (a silent pipe fallback that looked like "some
+#: kind of terminal was used" but wasn't).
+_CONPTY_AVAILABLE = bool(_conpty_windows is not None and _conpty_windows._CONPTY_AVAILABLE)
 
 _log = _logbook_logger("houdini_agent_panel.ui.terminal_login")
 
@@ -360,6 +396,16 @@ class TerminalLoginWorker(Worker):
         #: setup-token stays silent there until someone with a Windows
         #: machine can measure what it actually needs.
         self._use_pty = use_pty and _PTY_AVAILABLE
+        #: The Windows counterpart to `self._use_pty` — requested
+        #: whenever the caller asked for a real terminal but POSIX `pty`
+        #: isn't there at all (i.e. this is Windows). Deliberately NOT
+        #: gated on `_CONPTY_AVAILABLE` here: `work()` is what decides
+        #: between "spawn via ConPTY" and "raise a clear, specific
+        #: error" — this flag only records what was ASKED for, so a
+        #: Windows machine with no ConPTY support still gets a real
+        #: explanation instead of quietly being treated as if `use_pty`
+        #: had never been passed at all.
+        self._use_conpty = use_pty and not self._use_pty and platform.system() == "Windows"
         #: Read only from the thread that owns it, EXCEPT `stop()`/
         #: `send_line()` — see their own docstrings for why those two
         #: calls are safe from the main thread regardless.
@@ -368,6 +414,11 @@ class TerminalLoginWorker(Worker):
         #: running — `send_line()` writes here instead of `process.stdin`
         #: (which doesn't exist for a pty-backed Popen; see `work()`).
         self._pty_master_fd: int | None = None
+        #: The `_conpty_windows.ConPtyProcess`, only while
+        #: `self._use_conpty` and `work()` is running — `send_line()`
+        #: writes through its `.write()` instead of `process.stdin`, the
+        #: same way `self._pty_master_fd` stands in for it on POSIX.
+        self._conpty_process = None
         #: Set once `_OAUTH_TOKEN_LABEL` is seen — see its own comment.
         #: Every line emitted from then on is redacted before reaching
         #: `line_received`, not only the log.
@@ -470,6 +521,36 @@ class TerminalLoginWorker(Worker):
             os.close(slave_fd)  # the child has its own dup'd copy from Popen; this parent-side one is no longer needed
             self._pty_master_fd = master_fd
             reader = _PtyMasterReader(master_fd)
+        elif self._use_conpty:
+            # Windows: no POSIX pty, but the bundled binary needs a REAL
+            # controlling terminal for exactly the same reason it does on
+            # POSIX (§20) — a ConPTY is the Windows equivalent. Never
+            # silently downgraded to plain pipes (the module docstring's
+            # own Windows addendum, and `_conpty_windows.py`'s own
+            # docstring, both explain why that used to be the trap): an
+            # unavailable or failing ConPTY raises here, `Worker.run()`
+            # turns that into a `failed` signal with a specific step and
+            # error code, and `AgentPanel._on_terminal_login_failed`
+            # already knows how to append the "run it yourself" fallback
+            # command to whatever this says.
+            if not _CONPTY_AVAILABLE:
+                _log.error(
+                    "terminal login: ConPTY unavailable on this Windows build "
+                    "(CreatePseudoConsole not found in kernel32 — Windows 10 "
+                    "1809+ is required)"
+                )
+                raise RuntimeError(
+                    "This Windows build has no ConPTY support "
+                    "(CreatePseudoConsole was not found in kernel32.dll — "
+                    "Windows 10 version 1809 or later is required)."
+                )
+            _log.info("terminal login: spawning via ConPTY (windows)")
+            conpty_process = _conpty_windows.spawn(
+                command, list(args), env=env, cwd=self._cwd or None
+            )
+            self._conpty_process = conpty_process
+            process = conpty_process
+            reader = _conpty_windows.ConPtyReader(conpty_process)
         else:
             process = subprocess.Popen(
                 [command, *args],
@@ -513,8 +594,9 @@ class TerminalLoginWorker(Worker):
             # Reading one character at a time costs nothing on output this
             # small and human-paced, and lets the prompt marker be seen
             # (and `input_requested` fired) the instant it appears,
-            # newline or not. `reader` is `process.stdout` (plain pipes)
-            # or a `_PtyMasterReader` (pty) — both expose the same
+            # newline or not. `reader` is `process.stdout` (plain pipes),
+            # a `_PtyMasterReader` (POSIX pty), or a `_conpty_windows.
+            # ConPtyReader` (Windows ConPTY) — all three expose the same
             # `.read(1) -> str` contract, so nothing below needs to know
             # which one it's talking to.
             #
@@ -579,6 +661,10 @@ class TerminalLoginWorker(Worker):
                 with contextlib.suppress(OSError):
                     os.close(self._pty_master_fd)
                 self._pty_master_fd = None
+            if self._conpty_process is not None:
+                with contextlib.suppress(Exception):
+                    self._conpty_process.close()
+                self._conpty_process = None
             _log.info("terminal login: exited, code=%s", exit_code)
             self.exited.emit(exit_code)
 
@@ -602,16 +688,21 @@ class TerminalLoginWorker(Worker):
         to a file descriptor is a plain syscall, it doesn't need Qt's
         thread-affinity rules the way touching a widget would.
 
-        Two destinations, matching however `work()` spawned the child:
-        the pty master fd (`self._use_pty`) or `process.stdin` (plain
-        pipes). Measured directly (mayfx02, a real run, a garbage code
+        Three destinations, matching however `work()` spawned the child:
+        the pty master fd (`self._use_pty`), the ConPTY input pipe
+        (`self._use_conpty`, Windows), or `process.stdin` (plain pipes).
+        Measured directly on POSIX (mayfx02, a real run, a garbage code
         that could never complete anything, killed right after): what
         comes back through the pty after writing shows the build masking
         its own input as a row of `*` — the character count matched the
         written text exactly, not the text itself — so there is nothing
         of the artist's actual code to redact here either way; only
         `send_line`'s own existing "how many characters" log line, never
-        the content.
+        the content. NOT independently re-measured for the ConPTY branch
+        (no Windows machine in this project) — the mechanism (writing to
+        a pipe the child reads as its own stdin) is the same shape either
+        way, but whether THIS build's own input-masking behaviour is
+        identical on Windows is unverified.
         """
         process = self._process
         if process is None or process.poll() is not None:
@@ -626,6 +717,12 @@ class TerminalLoginWorker(Worker):
                 return
             with contextlib.suppress(OSError):
                 os.write(self._pty_master_fd, line.encode("utf-8"))
+            return
+        if self._use_conpty:
+            if self._conpty_process is None:
+                return
+            with contextlib.suppress(Exception):
+                self._conpty_process.write(line.encode("utf-8"))
             return
         if process.stdin is None:
             return
