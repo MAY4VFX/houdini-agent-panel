@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from ..sessions import SessionState
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
@@ -397,6 +399,31 @@ class ConversationDrawer(QtWidgets.QFrame):
                 # initial `set_sessions`) used to show the old row bleeding
                 # through the new one until then.
                 widget.hide()
+                # A real, reproducible native crash lived here: rebuilding
+                # this list down to EMPTY (the last conversation deleted)
+                # could later segfault in unrelated code, the first time
+                # anything else pumped the event loop hard — confirmed with
+                # lldb, not guessed: `deleteChildren()`, cascading from
+                # THIS widget's own deferred delete, crashed inside
+                # `QObjectPrivate::setParent_helper` while tearing down a
+                # `QToolButton` row-pin/row-more button that still had a
+                # live `clicked` connection to a lambda closing over this
+                # drawer. Isolated by elimination, not by argument:
+                # shrinking to a SMALLER NON-EMPTY list never crashed;
+                # deferring the `deleteLater()` call itself (a `QTimer.
+                # singleShot(0, ...)`) changed nothing, since `deleteLater`
+                # already posts its event asynchronously regardless of
+                # when it's called; the one change that reliably closed it,
+                # every time, was severing the connection BEFORE deletion
+                # rather than leaving Qt's own destructor to walk a live
+                # one during `deleteChildren()`. Scoped to `QAbstractButton`
+                # because that covers every signal `_build_row` actually
+                # connects today (the row's own button, `rowPin`,
+                # `rowMore`) — revisit this if a future row starts wiring
+                # up a different widget type's signal.
+                for button in widget.findChildren(QtWidgets.QAbstractButton):
+                    with contextlib.suppress(RuntimeError, TypeError):
+                        button.clicked.disconnect()
                 widget.deleteLater()
         self._buttons.clear()
         self._pin_buttons.clear()

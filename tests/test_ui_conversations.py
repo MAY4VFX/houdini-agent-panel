@@ -10,7 +10,7 @@ from houdini_agent_panel.ui.conversations import (
     scope_label_text,
     summarize_title,
 )
-from houdini_agent_panel.ui.qt import QtGui
+from houdini_agent_panel.ui.qt import QtGui, QtWidgets
 
 
 def _state(session_id: str, title: str, created_at: float) -> SessionState:
@@ -210,6 +210,50 @@ def test_rebuilding_the_row_list_hides_the_stale_widget_immediately(qapp):
     assert stale_row.isVisible() is False
 
 
+def test_deleting_the_last_conversation_disconnects_its_row_buttons(qapp):
+    """A real, reproducible native crash lived here: rebuilding the list
+    down to EMPTY (the shape "delete the last conversation" makes) could
+    later segfault in unrelated code, the first time anything else pumped
+    the event loop hard. Confirmed with lldb, not guessed:
+    `deleteChildren()`, cascading from a row's own deferred delete,
+    crashed inside `QObjectPrivate::setParent_helper` while tearing down a
+    `QToolButton` (the row's pin/more button) that still had a live
+    `clicked` connection to a lambda closing over the drawer. Isolated by
+    elimination: shrinking to a SMALLER NON-EMPTY list never crashed;
+    deferring the `deleteLater()` call itself changed nothing (it already
+    posts its event asynchronously regardless of when it's called); the
+    one change that closed it, reliably, was severing the connection
+    BEFORE deletion. This test can't reproduce the segfault itself (it
+    needed real concurrent QThread activity elsewhere in the full suite to
+    manifest) — it verifies the actual fix mechanism directly: the
+    outgoing row's buttons have no live connections left by the time
+    `deleteLater` is even called.
+    """
+    # `receivers()` wants Qt's own normalized signal signature, not the
+    # bound-signal object — `QAbstractButton.clicked` is `clicked(bool)`
+    # for both QPushButton and QToolButton; the leading "2" is Qt's old
+    # SIGNAL()-macro normalization prefix, still what `receivers()` wants
+    # (measured directly: `receivers("clicked(bool)")` — no prefix —
+    # always answers 0, connected or not).
+    clicked_signature = "2clicked(bool)"
+
+    host = ConversationDrawer()
+    host.set_sessions([_state("s1", "Chat", 1.0)], "s1")
+    buttons = list(host._buttons["s1"].parentWidget().findChildren(QtWidgets.QAbstractButton))
+    assert buttons, "the row has no buttons to check — test itself is broken"
+    assert any(b.receivers(clicked_signature) > 0 for b in buttons), (
+        "sanity check: the row's buttons should start out connected"
+    )
+
+    host.set_sessions([], None)
+
+    assert all(b.receivers(clicked_signature) == 0 for b in buttons), (
+        "a row's button still has a live connection after being removed — "
+        "the exact state that crashed deleteChildren() during a later "
+        "deferred delete"
+    )
+
+
 def test_renaming_emits_session_renamed_with_the_typed_text(qapp, monkeypatch):
     host = ConversationDrawer()
     host.set_sessions([_state("s1", "Old name", 1.0)], "s1")
@@ -380,21 +424,14 @@ def test_drawer_scope_label_tracks_the_shown_session_count(qapp):
     )
     assert host._scope_label.text() == "2 conversations here"
 
-    # NOT extended here to `set_sessions([], None)` on this same, now-
-    # populated `host` — found by accident while writing exactly that:
-    # rebuilding a `ConversationDrawer` from a nonempty row list down to
-    # an EMPTY one reproducibly corrupts native (PySide6/Qt) state and
-    # segfaults later, in unrelated code, on this machine. Confirmed NOT
-    # caused by this feature (reproduces identically on main before this
-    # change) and NOT a test-only artifact (the same call sequence a real
-    # "delete the last conversation" makes). Reported separately rather
-    # than guess-fixed here — see the message to team-lead for the
-    # reproduction and why the obvious fix (flushing `QEvent.
-    # DeferredDelete` inside `set_sessions`) is unsafe in its own right:
-    # `set_sessions` is reachable from a row's OWN signal handler
-    # (`_toggle_pin`), and Qt's `deleteLater()` exists specifically so an
-    # object is never deleted while still inside its own event handling —
-    # forcing that flush there traded one crash for a more direct one.
-    # `test_drawer_shows_nothing_here_yet_before_any_sessions` and
-    # `test_scope_label_text_for_zero_one_and_many` still cover the empty
-    # state itself; only the DANGEROUS transition is left unexercised.
+    # This exact next call — a nonempty drawer going to empty, the same
+    # shape as deleting the last conversation — used to reproducibly
+    # corrupt native (PySide6/Qt) state here and segfault later, in
+    # unrelated code, before `set_sessions` was fixed to disconnect the
+    # outgoing rows' buttons rather than leaving Qt's own destructor to
+    # walk a live `clicked` connection during `deleteChildren()` (see
+    # `set_sessions`'s own comment, and
+    # `test_deleting_the_last_conversation_disconnects_its_row_buttons`
+    # below for the fix verified directly).
+    host.set_sessions([], None)
+    assert host._scope_label.text() == "No conversations here yet"
