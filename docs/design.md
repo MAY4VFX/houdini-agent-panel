@@ -79,7 +79,7 @@ Plus **"Custom Agent"** — a field for a command and arguments, speaking ACP wi
 
 **cwd = `$HIP`**, shown as a string with no picker. Access to files outside that folder is gated by the standard permission request.
 
-**Updates via version comparison.** Agents: `version` from the registry against what's installed. The panel and fx: `pypi.org/pypi/<name>/json`. Checked no more than once a day, cached. A quiet "Update available X → Update" banner, not a modal.
+**Updates via version comparison.** Agents: `version` from the registry against what's installed. The panel and fx: `pypi.org/pypi/<name>/json`. Cached, but not for a flat day anymore — that stopped being right once this project started shipping several releases in an hour and a day-old cache kept saying nothing about them (`updates.py::_FRESH_START_MAX_AGE`/`_SESSION_MAX_AGE`): a panel that just opened trusts the cache for minutes, one that's already been running trusts it for a couple of hours, via a recurring re-check (`ui/panel.py::_on_session_refresh_due`) so a panel left open all day still notices without a restart. A quiet "Update available X → Update" banner, not a modal.
 
 **Telemetry — anonymous, with explicit consent.** Asked at first launch, off by default. Only panel/fx/agent versions, OS, and crash facts. Never scene contents, prompts, or paths. Can be turned off at any time; needs a short policy page in the repository.
 
@@ -132,7 +132,7 @@ python/houdini_agent_panel/
   client.py            # ACP on top of agent-client-protocol, asyncio on a QThread
   sessions.py          # session pool per agent id, over that agent's connection
   auth.py              # authMethods / authenticate / logout
-  updates.py           # versions from the registry and PyPI, cached daily
+  updates.py           # versions from the registry and PyPI, cached (window depends on fresh_start)
   announcements.py     # announcements feed, version targeting, seen-id memory
   settings.py          # reading/writing panel settings
   telemetry.py         # optional, off by default

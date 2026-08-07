@@ -44,6 +44,7 @@ def daily_refresh(
     fetch: Fetcher | None = None,
     entries: Sequence[AgentEntry] = (),
     now: datetime | None = None,
+    fresh_start: bool = True,
 ) -> RefreshResult:
     """Updates + announcements in a single pass. Never raises.
 
@@ -56,6 +57,13 @@ def daily_refresh(
     the failed step will be empty for this call — there's no way to
     synthetically pull them from a past successful cache without lying
     about how current they are).
+
+    ``fresh_start`` only reaches ``updates_mod.check`` — see its own
+    docstring (``_FRESH_START_MAX_AGE``/``_SESSION_MAX_AGE``).
+    ``announcements`` keeps its own, separate once-a-day cache untouched:
+    the report this answers was specifically about the update banner going
+    stale for hours during a day of frequent releases, not about the
+    announcements feed, which has no comparable cadence to react to.
     """
     base_fetch = fetch or urlopen_fetch
     call_count = 0
@@ -80,6 +88,7 @@ def daily_refresh(
             fetch=counting_fetch,
             now=now,
             panel_version=panel_version,
+            fresh_start=fresh_start,
         )
     except NetworkError:
         pass

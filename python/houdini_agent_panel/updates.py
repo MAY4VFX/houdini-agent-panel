@@ -44,7 +44,28 @@ _PANEL_PACKAGE = "houdini-agent-panel"
 _FX_PACKAGE = "fxhoudinimcp"
 
 _CACHE_FILE_NAME = "updates.json"
-_MAX_AGE = timedelta(days=1)
+#: How long a cached answer is trusted, and WHICH of the two depends on
+#: why `check()` is being called at all — see `check`'s own `fresh_start`
+#: parameter. A single one-day window (the original policy) was tuned for
+#: a release cadence of maybe one a week; it stopped being right the day
+#: this project started shipping several versions in an hour; the owner
+#: restarted Houdini repeatedly on 0.6.1 while 0.7.0 and 0.7.1 were both
+#: already on PyPI, and the banner said nothing every single time,
+#: because the cache it read was written hours before either existed and
+#: was still, by the old rule, "fresh." If release cadence ever slows
+#: back down to roughly weekly, both numbers below are the first thing to
+#: revisit — they exist for THIS project's current pace, not as a law.
+#:
+#: `_FRESH_START_MAX_AGE`: what a panel that JUST opened trusts. Minutes,
+#: not hours — a process that has just started is exactly the moment a
+#: stale answer costs the artist a whole session on an old build, and
+#: nothing else is going to correct it until the NEXT restart.
+_FRESH_START_MAX_AGE = timedelta(minutes=10)
+#: `_SESSION_MAX_AGE`: what a periodic re-check, from a panel that has
+#: already been open for a while, trusts. Long enough that a panel left
+#: open all day does not poll PyPI every few minutes — short enough that
+#: it still notices a same-day release without needing a restart at all.
+_SESSION_MAX_AGE = timedelta(hours=2)
 
 
 @dataclass(frozen=True)
@@ -209,7 +230,7 @@ def _cache_path() -> Path:
     return paths.cache_dir() / _CACHE_FILE_NAME
 
 
-def _read_cache(now: datetime) -> list[Update] | None:
+def _read_cache(now: datetime, *, fresh_start: bool) -> list[Update] | None:
     path = _cache_path()
     try:
         payload = json.loads(path.read_text("utf-8"))
@@ -224,7 +245,8 @@ def _read_cache(now: datetime) -> list[Update] | None:
         checked_at = datetime.fromisoformat(checked_at_raw)
     except ValueError:
         return None
-    if now - checked_at >= _MAX_AGE:
+    max_age = _FRESH_START_MAX_AGE if fresh_start else _SESSION_MAX_AGE
+    if now - checked_at >= max_age:
         return None
     if payload.get("panel_version") != (_current_panel_version() or ""):
         # A different build wrote this. Its answers are about a version that
@@ -279,6 +301,7 @@ def check(
     now: datetime | None = None,
     panel_version: str | None = None,
     fx_version: str | None = None,
+    fresh_start: bool = True,
 ) -> list[Update]:
     """The list of available updates: agents (from ``entries``), the panel, fx.
 
@@ -286,10 +309,17 @@ def check(
     calls, verified by a test via the ``FakeFetcher.calls`` counter.
 
     The cache at ``<cache>/updates.json`` covers the whole check as one unit
-    (agents end up in it too, even though they need no network) no more
-    than once a day — it's simpler this way, and matches the design.md
-    contract, which doesn't split agents and PyPI into different check
-    frequencies. ``force`` bypasses the cache.
+    (agents end up in it too, even though they need no network) — how long
+    it's trusted depends on ``fresh_start`` (``_FRESH_START_MAX_AGE`` vs.
+    ``_SESSION_MAX_AGE``, see their own comments), not one fixed window for
+    every caller. ``force`` bypasses the cache entirely regardless.
+
+    ``fresh_start=True`` (the default) is a panel that just opened — a new
+    tab, a Houdini that just started. ``False`` is a periodic re-check from
+    a panel that has already been running for a while
+    (``ui/panel.py``'s own recurring timer, reusing this same cache file
+    and the same ``_RefreshWorker`` — deliberately not a second, separate
+    polling mechanism).
 
     ``panel_version``/``fx_version`` override the auto-detected current
     version (tests need to control it without real package metadata in the
@@ -300,7 +330,7 @@ def check(
 
     now = now or datetime.now(timezone.utc)
     if not force:
-        cached = _read_cache(now)
+        cached = _read_cache(now, fresh_start=fresh_start)
         if cached is not None:
             return cached
 

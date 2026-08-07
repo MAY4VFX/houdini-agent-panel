@@ -173,7 +173,10 @@ def test_check_pypi_failure_for_one_package_does_not_hide_the_other(fetcher):
 # --- check(): the once-a-day cache --------------------------------------------------
 
 
-def test_check_uses_cache_within_a_day(fetcher):
+def test_check_uses_cache_within_the_fresh_start_window(fetcher):
+    """`fresh_start=True` (the default — a panel that just opened) trusts
+    the cache for `_FRESH_START_MAX_AGE`, not a day — see that constant's
+    own comment for why a full day stopped being right."""
     fetcher.add_json(
         updates.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "9.9.9"}}
     )
@@ -193,11 +196,102 @@ def test_check_uses_cache_within_a_day(fetcher):
         fetch=fetcher,
         panel_version="0.1.0",
         fx_version="2.10.0",
-        now=now + timedelta(hours=1),
+        now=now + timedelta(minutes=5),
     )
 
     assert second == first
     assert len(fetcher.calls) == calls_after_first  # not a single new request
+
+
+def test_a_fresh_start_past_the_short_window_checks_again(fetcher):
+    """The exact report this fixes: the owner restarted Houdini repeatedly
+    while several versions shipped in an hour, and a day-long cache said
+    nothing every time. An hour is well past `_FRESH_START_MAX_AGE`
+    (minutes) — a fresh panel start that old must trigger a real check,
+    not silently reuse an answer from before the newer releases existed.
+    """
+    fetcher.add_json(
+        updates.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "9.9.9"}}
+    )
+    fetcher.add_json(updates.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    settings = Settings(check_updates=True)
+    now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+
+    updates.check(
+        settings=settings, entries=[], fetch=fetcher, panel_version="0.1.0", fx_version="2.10.0", now=now
+    )
+    calls_after_first = len(fetcher.calls)
+
+    updates.check(
+        settings=settings,
+        entries=[],
+        fetch=fetcher,
+        panel_version="0.1.0",
+        fx_version="2.10.0",
+        now=now + timedelta(hours=1),
+        fresh_start=True,
+    )
+
+    assert len(fetcher.calls) > calls_after_first
+
+
+def test_a_session_recheck_trusts_the_cache_longer_than_a_fresh_start_would(fetcher):
+    """`fresh_start=False` — a periodic re-check from a panel that has
+    already been open for a while (`ui/panel.py`'s own recurring timer) —
+    must not re-hit PyPI every time it fires just because an hour is well
+    past the SHORT window; it has its own, longer one
+    (`_SESSION_MAX_AGE`), so a panel left open all day doesn't poll PyPI
+    every few minutes."""
+    fetcher.add_json(
+        updates.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "9.9.9"}}
+    )
+    fetcher.add_json(updates.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    settings = Settings(check_updates=True)
+    now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+
+    first = updates.check(
+        settings=settings, entries=[], fetch=fetcher, panel_version="0.1.0", fx_version="2.10.0", now=now
+    )
+    calls_after_first = len(fetcher.calls)
+
+    second = updates.check(
+        settings=settings,
+        entries=[],
+        fetch=fetcher,
+        panel_version="0.1.0",
+        fx_version="2.10.0",
+        now=now + timedelta(hours=1),
+        fresh_start=False,
+    )
+
+    assert second == first
+    assert len(fetcher.calls) == calls_after_first  # not a single new request
+
+
+def test_a_session_recheck_still_refreshes_once_its_own_longer_window_passes(fetcher):
+    fetcher.add_json(
+        updates.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "9.9.9"}}
+    )
+    fetcher.add_json(updates.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    settings = Settings(check_updates=True)
+    now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+
+    updates.check(
+        settings=settings, entries=[], fetch=fetcher, panel_version="0.1.0", fx_version="2.10.0", now=now
+    )
+    calls_after_first = len(fetcher.calls)
+
+    updates.check(
+        settings=settings,
+        entries=[],
+        fetch=fetcher,
+        panel_version="0.1.0",
+        fx_version="2.10.0",
+        now=now + updates._SESSION_MAX_AGE + timedelta(minutes=1),
+        fresh_start=False,
+    )
+
+    assert len(fetcher.calls) > calls_after_first
 
 
 def test_check_force_bypasses_cache(fetcher):
@@ -252,8 +346,8 @@ def test_check_refreshes_after_a_day(fetcher):
 
 
 def test_the_cache_is_not_trusted_across_a_panel_upgrade(tmp_path, monkeypatch):
-    """Results are cached for a day, and the panel is the thing that updates
-    most often — so after an upgrade the old build's answer is still there,
+    """Results are cached, and the panel is the thing that updates most
+    often — so after an upgrade the old build's answer is still there,
     telling a freshly-updated panel to upgrade to the version it just left.
     Reported as 0.1.7 being offered 0.1.5.
     """
@@ -267,9 +361,11 @@ def test_the_cache_is_not_trusted_across_a_panel_upgrade(tmp_path, monkeypatch):
         updates.Update(kind="panel", target="houdini-agent-panel",
                        label="houdini-agent-panel 0.1.5", current="0.1.4", latest="0.1.5")
     ])
-    assert updates._read_cache(now) is not None, "same version, same day — should be reused"
+    assert updates._read_cache(now, fresh_start=True) is not None, (
+        "same version, same moment — should be reused"
+    )
 
     monkeypatch.setattr(updates, "_current_panel_version", lambda: "0.1.7")
-    assert updates._read_cache(now) is None, (
+    assert updates._read_cache(now, fresh_start=True) is None, (
         "a newer panel reused an older build's answer about itself"
     )
