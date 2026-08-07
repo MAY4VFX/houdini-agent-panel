@@ -210,6 +210,25 @@ _FORCE_FLUSH_CHARS = 2000
 #: that entirely.
 _OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 _OAUTH_TOKEN_RE = re.compile(re.escape(_OAUTH_TOKEN_ENV_VAR) + r"=(\S+)")
+#: `<token>` in that instruction line is LITERAL placeholder text the
+#: artist is meant to replace by hand — not a slot the binary fills in.
+#: §21 read the wording off the binary's string table and assumed the
+#: opposite, and this module's own test encoded the same assumption by
+#: interpolating a real token where the real build prints six characters
+#: of punctuation. A real run on Linux (mayfx02, 2026-08-07) settles it:
+#:
+#:     Your OAuth token (valid for 1 year):
+#:     <the token — 79 characters, ALONE on its own line>
+#:     Store this token securely. You won't be able to see it again.
+#:     Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>
+#:
+#: So the value is never on the `VAR=` line at all. It arrives bare, one
+#: line after `_OAUTH_TOKEN_LABEL`, which is why capture anchors on that
+#: label rather than on the variable name. The `VAR=` path is kept only
+#: for a future build that might really interpolate there — and is now
+#: shape-checked, so the literal `<token>` can never be stored and
+#: reported as a successful sign-in.
+_TOKEN_VALUE_RE = re.compile(r"[A-Za-z0-9_\-\.]{24,}")
 #: The label line that starts this build's token dump — matched the same
 #: whitespace-insensitive way as `_INPUT_PROMPT_MARKERS`, for the same
 #: reason (§20). Once seen, every line emitted for the rest of this run is
@@ -423,6 +442,9 @@ class TerminalLoginWorker(Worker):
         #: Every line emitted from then on is redacted before reaching
         #: `line_received`, not only the log.
         self._token_flow_active = False
+        #: Set the moment `_OAUTH_TOKEN_LABEL` is seen: the very next
+        #: token-shaped line is the minted secret itself.
+        self._awaiting_token_value = False
 
     @staticmethod
     def build_env(terminal_auth) -> dict[str, str]:
@@ -633,9 +655,11 @@ class TerminalLoginWorker(Worker):
                     # BEFORE emitting THIS line, in case a future build
                     # ever puts the label and the token on the same line.
                     self._token_flow_active = True
-                token_match = _OAUTH_TOKEN_RE.search(line)
-                if token_match:
-                    self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token_match.group(1))
+                    self._awaiting_token_value = True
+                token = self._token_value_in(line)
+                if token:
+                    self._awaiting_token_value = False
+                    self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token)
                     _log.info("terminal login: OAuth token captured (%s)", _OAUTH_TOKEN_ENV_VAR)
                 self._emit_line(line)
                 if any(_marker_in(marker, line) for marker in _INPUT_PROMPT_MARKERS):
@@ -667,6 +691,30 @@ class TerminalLoginWorker(Worker):
                 self._conpty_process = None
             _log.info("terminal login: exited, code=%s", exit_code)
             self.exited.emit(exit_code)
+
+    def _token_value_in(self, line: str) -> str:
+        """The minted OAuth token if THIS line carries it, else `""`.
+
+        Two shapes, in the order a real run produces them. The bare line
+        right after the label is the one that actually fires on today's
+        build; the `VAR=value` form has never been observed carrying a
+        real value and is kept only so a future build that starts doing
+        it isn't missed.
+
+        Both are shape-checked. Without that check the instruction line
+        `export CLAUDE_CODE_OAUTH_TOKEN=<token>` hands over the literal
+        string `<token>`, which stores cleanly, reports "Signed in." and
+        then fails on the artist's first prompt with nothing pointing
+        back here — strictly worse than capturing nothing at all.
+        """
+        if self._awaiting_token_value:
+            candidate = line.strip()
+            if _TOKEN_VALUE_RE.fullmatch(candidate):
+                return candidate
+        match = _OAUTH_TOKEN_RE.search(line)
+        if match and _TOKEN_VALUE_RE.fullmatch(match.group(1)):
+            return match.group(1)
+        return ""
 
     def _emit_line(self, line: str) -> None:
         # A device code or an OAuth URL is safe to show — the artist is

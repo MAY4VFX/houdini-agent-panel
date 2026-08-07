@@ -668,16 +668,21 @@ def test_use_pty_true_parses_a_real_pty_shaped_run_end_to_end(qapp, tmp_path):
 
 _FAKE_TOKEN = "FAKE-TOKEN-VALUE-NOT-REAL-1234567890"
 
-#: Shaped after the real wording, confirmed from the bundled binary's own
-#: string table (§21): the label, the bare token on its own line, the
-#: "won't be able to see it again" warning, then the `export VAR=token`
-#: line — the SAME four-part shape the owner's own real run produced.
+#: Byte-for-byte the shape of a real run, taken from a captured Linux
+#: sign-in (mayfx02, 2026-08-07) and not from the binary's string table.
+#:
+#: The last line matters as much as the token line. This fixture used to
+#: interpolate `_FAKE_TOKEN` after `CLAUDE_CODE_OAUTH_TOKEN=`, and that
+#: single wrong character span is why capture shipped broken: the code
+#: matched the fixture, the fixture matched the assumption, and neither
+#: matched the build. The real build prints `<token>` there — literally,
+#: angle brackets and all — as instructions for a human to fill in.
 _CLAUDE_TOKEN_SCRIPT = (
     "import sys\n"
     "print('Your OAuth token (valid for 1 year):')\n"
     f"print('{_FAKE_TOKEN}')\n"
     "print(\"Store this token securely. You won't be able to see it again.\")\n"
-    f"print('Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN={_FAKE_TOKEN}')\n"
+    "print('Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>')\n"
     "sys.stdout.flush()\n"
 )
 
@@ -693,6 +698,61 @@ def test_setup_token_output_fires_token_captured_with_the_real_variable_name(qap
     _wait_until(qapp, lambda: bool(captured))
     assert captured == [("CLAUDE_CODE_OAUTH_TOKEN", _FAKE_TOKEN)]
     worker.wait(3000)
+
+
+def test_the_literal_placeholder_is_never_mistaken_for_a_token(qapp, tmp_path):
+    """The regression that cost a real sign-in on Linux.
+
+    A build that prints ONLY the instruction line — no label, no bare
+    token — has handed the artist nothing worth storing. Capturing the
+    literal `<token>` from it is worse than capturing nothing: it stores
+    cleanly, reports "Signed in.", and then fails on the first prompt
+    with no trace pointing back at the sign-in step.
+    """
+    script = (
+        "import sys\n"
+        "print('Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>')\n"
+        "sys.stdout.flush()\n"
+    )
+    ta = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+
+    captured: list[tuple[str, str]] = []
+    exited: list[int] = []
+    worker.token_captured.connect(lambda env_var, token: captured.append((env_var, token)))
+    worker.exited.connect(exited.append)
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(exited))
+    worker.wait(3000)
+    assert captured == [], f"stored a placeholder as if it were a token: {captured}"
+
+
+def test_the_token_is_taken_from_the_bare_line_after_the_label(qapp, tmp_path):
+    """Where the real build actually puts it (§21 corrected).
+
+    The token arrives ALONE on the line after `Your OAuth token (valid
+    for 1 year):`, and never appears after `CLAUDE_CODE_OAUTH_TOKEN=`.
+    Anchoring on the variable name — as this module first did — cannot
+    see it at all, which is exactly what a real Linux run produced:
+    login succeeded, token printed, `agent_oauth_tokens` left empty.
+    """
+    script = (
+        "import sys\n"
+        "print('Your OAuth token (valid for 1 year):')\n"
+        f"print('  {_FAKE_TOKEN}  ')\n"
+        "sys.stdout.flush()\n"
+    )
+    ta = TerminalAuth(command=sys.executable, args=["-c", script], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+
+    captured: list[tuple[str, str]] = []
+    worker.token_captured.connect(lambda env_var, token: captured.append((env_var, token)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(captured))
+    worker.wait(3000)
+    assert captured == [("CLAUDE_CODE_OAUTH_TOKEN", _FAKE_TOKEN)]
 
 
 def test_the_token_never_reaches_line_received_once_the_label_is_seen(qapp, tmp_path):

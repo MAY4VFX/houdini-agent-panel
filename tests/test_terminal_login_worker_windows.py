@@ -316,7 +316,9 @@ def test_conpty_branch_token_capture_and_redaction_still_apply(qapp, monkeypatch
         [
             b"Your OAuth token (valid for 1 year):\n",
             fake_token.encode() + b"\n",
-            f"Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN={fake_token}\n".encode(),
+            # Literally `<token>` — see `_TOKEN_VALUE_RE`. The value comes
+            # from the bare line above, never from this one.
+            b"Use this token by setting: export CLAUDE_CODE_OAUTH_TOKEN=<token>\n",
         ]
     )
     process._finished = True
