@@ -6,7 +6,10 @@ never appears, since the format isn't guaranteed stable (n=1 sample).
 
 from __future__ import annotations
 
+import os
 import sys
+
+import pytest
 
 from houdini_agent_panel import orphans
 from houdini_agent_panel.client import TerminalAuth
@@ -517,4 +520,138 @@ def test_no_resolve_command_uses_terminal_auth_unchanged(qapp, tmp_path):
     _wait_until(qapp, lambda: bool(lines))
 
     assert any("plain run" in line for line in lines)
+    worker.wait(3000)
+
+
+# --- §20: a real pty run ------------------------------------------------
+#
+# The bundled `claude setup-token` binary prints nothing at all over plain
+# pipes (docs/facts/acp-sdk.md §20) — it wants a real controlling terminal.
+# `use_pty=True` is the fix; these tests cover the pieces that fix needed:
+# `_marker_in` and `_is_spinner_noise` (unit-level, no process involved),
+# `_PtyMasterReader` (the two POSIX quirks it exists to paper over), and an
+# end-to-end run of `TerminalLoginWorker(use_pty=True)` itself, shaped after
+# the real raw bytes captured on mayfx02, not synthesized from imagination.
+
+
+def test_marker_in_ignores_whitespace_lost_to_cursor_positioning_escapes():
+    """A real pty capture of "Paste code here if prompted >" arrived, after
+    ANSI stripping, as the literal string "Pastecodehereifprompted>" — the
+    build simulates spacing with cursor-move escapes, not space characters,
+    and stripping the escapes throws the spacing away with them. The plain
+    substring check this module used before §20 can never match that."""
+    from houdini_agent_panel.ui.terminal_login import _marker_in
+
+    assert _marker_in("paste code here", "Pastecodehereifprompted>")
+    assert not _marker_in("paste code here", "totally unrelated output")
+
+
+def test_marker_in_is_case_insensitive():
+    from houdini_agent_panel.ui.terminal_login import _marker_in
+
+    assert _marker_in("paste code here", "PASTE CODE HERE if prompted >")
+
+
+def test_is_spinner_noise_matches_only_a_lone_symbol():
+    """docs/facts/acp-sdk.md §20: a real capture showed this build cycling
+    a single glyph per redraw frame (`✢ * ✶ ✻ ✽ ✻ ✶ * ✢ ·`) — filtered so
+    it doesn't flash through the artist's own status field and the log as
+    dozens of near-identical one-character lines. Must never fire on a
+    real word, not even the shortest one."""
+    from houdini_agent_panel.ui.terminal_login import _is_spinner_noise
+
+    for glyph in ("✢", "*", "✶", "✻", "✽", "·"):
+        assert _is_spinner_noise(glyph), f"{glyph!r} should be recognised as spinner noise"
+
+    for word in ("a", "1", "A", "ok", ""):
+        assert not _is_spinner_noise(word), f"{word!r} must not be dropped as spinner noise"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pty is POSIX-only — see _PTY_AVAILABLE")
+def test_pty_master_reader_treats_eio_as_eof(monkeypatch):
+    """`os.read()` on a pty master fd raises `OSError` (EIO) once the slave
+    side closes — a real, measured POSIX quirk (mayfx02, §20), NOT the
+    clean `b""` EOF a pipe gives. Must be caught and treated as the same
+    end-of-output signal, not left to crash the read loop."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    def _raise(_fd, _n):
+        raise OSError("Input/output error")
+
+    monkeypatch.setattr(terminal_login_mod.os, "read", _raise)
+    reader = terminal_login_mod._PtyMasterReader(99)
+    assert reader.read(1) == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pty is POSIX-only — see _PTY_AVAILABLE")
+def test_pty_master_reader_reassembles_a_utf8_character_split_across_reads(monkeypatch):
+    """Multi-byte UTF-8 characters (this build's own spinner glyphs are all
+    multi-byte) can arrive split across two separate `os.read()` calls — a
+    naive per-chunk `.decode()` raised `UnicodeDecodeError` against the
+    real captured bytes until `_PtyMasterReader` used an incremental
+    decoder instead."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    encoded = "✢".encode("utf-8")
+    assert len(encoded) == 3  # a real multi-byte character, not a coincidence
+    chunks = [encoded[:1], encoded[1:]]
+
+    def _fake_read(_fd, _n):
+        return chunks.pop(0)
+
+    monkeypatch.setattr(terminal_login_mod.os, "read", _fake_read)
+    reader = terminal_login_mod._PtyMasterReader(99)
+    assert reader.read(1) == "✢"
+
+
+#: Shaped after the real raw bytes captured on mayfx02 (docs/facts/acp-
+#: sdk.md §20), not a plain print — the three things that made plain-pipe
+#: parsing insufficient, all in one script: a cursor-absolute-positioning
+#: escape mid-prompt (spacing simulated by moving the cursor, not spaces),
+#: an OSC-8 hyperlink wrapping the URL (BEL-terminated, with a truncated
+#: repeated copy of the URL as "display text"), and a spinner glyph burst
+#: before either of those. Blocks on stdin like the real build does.
+_PTY_SHAPED_SCRIPT = (
+    "import sys\n"
+    "for glyph in '✢*✶':\n"
+    "    sys.stdout.write(glyph + chr(13))\n"
+    "    sys.stdout.flush()\n"
+    "sys.stdout.write('Opening browser to sign in...\\n')\n"
+    "url = 'https://claude.com/cai/oauth/authorize?state=abc123'\n"
+    "sys.stdout.write('\\x1b]8;id=1;' + url + '\\x07' + url[:30] + '\\x1b]8;;\\x07\\n')\n"
+    "sys.stdout.write('Paste\\x1b[10Gcode\\x1b[15Ghere\\x1b[20Gif\\x1b[25Gprompted\\x1b[35G> ')\n"
+    "sys.stdout.flush()\n"
+    "code = sys.stdin.readline().strip()\n"
+    "sys.stdout.write('got:' + code + chr(10))\n"
+)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pty is POSIX-only — see _PTY_AVAILABLE")
+def test_use_pty_true_parses_a_real_pty_shaped_run_end_to_end(qapp, tmp_path):
+    """The integration case §20 exists for: a real child spawned with a
+    real pty (not a mocked reader), through the actual `TerminalLoginWorker`
+    codepath the panel uses (`use_pty=True`) — the URL must survive OSC-8
+    wrapping, the input prompt must still be detected despite cursor-
+    positioning spacing, and the spinner burst must not reach the artist
+    as noise."""
+    ta = TerminalAuth(command=sys.executable, args=["-c", _PTY_SHAPED_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path), use_pty=True)
+    assert worker._use_pty is True  # confirms _PTY_AVAILABLE on this (POSIX) test machine
+
+    lines: list[str] = []
+    found: list[tuple[str, str]] = []
+    awaiting: list[bool] = []
+    worker.line_received.connect(lines.append)
+    worker.url_found.connect(lambda url, code: found.append((url, code)))
+    worker.input_requested.connect(lambda: awaiting.append(True))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(awaiting), timeout_ms=8000)
+    assert found == [("https://claude.com/cai/oauth/authorize?state=abc123", "")]
+    assert not any(line.strip() in ("✢", "*", "✶") for line in lines), (
+        "a lone spinner glyph must be filtered, not shown to the artist as a line"
+    )
+
+    worker.send_line("PTY-INTEGRATION-TEST-CODE")
+    _wait_until(qapp, lambda: any("got:PTY-INTEGRATION-TEST-CODE" in line for line in lines), timeout_ms=8000)
     worker.wait(3000)

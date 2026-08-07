@@ -1925,3 +1925,158 @@ text names what's actually running) the moment the real answer is ready.
    nothing bundled to find yet, and this is the only one of the three
    that still works there. The one that can look exactly like a hang on
    a bad connection, which is the entire reason for the other two.
+
+## 20. The bundled binary needs a real pty — plain pipes get zero output
+
+§19's bundled-binary fix reached mayfx02 and hit a second, different live
+failure — the owner completed the browser step and the panel never moved:
+
+```
+17:42:30  terminal login: spawning .../claude-agent-sdk-linux-x64/claude setup-token
+(nothing after — no output line, no prompt, no exit)
+```
+
+§19 itself already contains the clue, easy to read past the first time:
+getting ANY output out of the bundled binary required `script -qec`, and
+piping stdin from `/dev/null` gave zero output even after 15s. That's not
+"prints slowly" — it's "detects a non-interactive terminal and refuses to
+print anything at all." `TerminalLoginWorker` gives its child plain pipes
+(`subprocess.Popen(..., stdin=PIPE, stdout=PIPE)`), so the bundled binary
+stays silent by design, and the panel waits forever for a prompt that will
+never come. This also explains why the OLD npx-wrapped path (§14, §18)
+behaved differently under the same plain-pipe spawn: it printed the
+non-tty variant instead ("Or paste the redirect URL here" — found next to
+the string `no_tty_stdin` inside the binary), i.e. it detects the same
+condition and CHOOSES to speak anyway. The bundled binary does not.
+
+### Confirming it's a pty requirement, not something else — A/B on mayfx02
+
+Same binary, same `setup-token` argument, two spawns differing only in
+stdio: `pty.openpty()` + `os.fork()`/`os.execv()` with the slave fd wired
+to stdin/stdout/stderr, versus plain `os.pipe()`. The pipe spawn produced
+nothing in 12s. The pty spawn produced real, immediate output — confirming
+the requirement is specifically a controlling terminal, not a timing or
+buffering difference.
+
+### The fix: `pty.openpty()` instead of plain pipes, scoped to this one path
+
+`TerminalLoginWorker` gained a keyword-only `use_pty: bool = False`
+parameter (default preserves every existing caller's behaviour — see
+Kimi below). When true, `work()` calls `pty.openpty()`, spawns via
+`subprocess.Popen(stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+start_new_session=True)` (kept as `Popen`, not a raw `fork`/`exec`, so
+`.pid`/`.wait()`/`.terminate()`/`.poll()` all still work the way the rest
+of the class already relies on), closes the parent's copy of the slave fd,
+and reads from the master fd through a small `_PtyMasterReader` adapter
+giving it the same `.read(1) -> str` shape `process.stdout.read(1)`
+already had for the pipe path — the rest of the read loop doesn't need to
+know which one it's talking to.
+
+Two POSIX quirks `_PtyMasterReader` exists to handle, both measured, not
+assumed:
+
+- `os.read()` on a pty master fd raises `OSError` (EIO) once the slave
+  side closes — a real, documented POSIX behaviour, NOT the clean `b""`
+  EOF a pipe gives. Treated as EOF explicitly; anything else re-raises.
+- Multi-byte UTF-8 characters (the spinner glyphs below) can land split
+  across two separate `os.read()` chunks — `text=True` on `Popen` handles
+  this transparently for the pipe path, but reading raw bytes off a pty
+  master fd doesn't get that for free. Fixed with
+  `codecs.getincrementaldecoder("utf-8")(errors="replace")` rather than a
+  naive per-chunk `.decode()`.
+
+`panel.py`'s `_start_terminal_login` sets `use_pty = method.id ==
+"claude-setup-token"` — scoped to exactly this one method, the same way
+`resolve_command` is already scoped there (§19). Kimi's own `kimi login`
+was re-measured directly (not inferred from the ACP-channel probe in §13,
+which is a different subprocess on a different channel) and already
+produces real output over plain pipes — unaffected either way, so its
+path is left exactly as it was.
+
+### Parsing under a real pty needed three fixes plain-pipe testing never surfaced
+
+All three found and fixed by capturing real raw bytes from a live pty run
+of `setup-token` on mayfx02 and feeding them through the actual parsing
+functions before touching anything — not synthesized test data.
+
+1. **The OAuth URL regex was consuming past its own terminator.** A real
+   pty stream wraps the URL in an OSC 8 terminal hyperlink: `\x1b]8;id=X;
+   <url>\x07<display text>\x1b]8;;\x07`. The old `https?://\S+` pattern
+   is greedy across `\S`, which includes `\x07` (BEL) and `\x1b` (ESC) —
+   it read straight through the terminator into the OSC-8 "display text"
+   half (itself a truncated repeat of the same URL), producing a garbled
+   link. Fixed by excluding `\x07`/`\x1b` from the character class on
+   both `_URL_RE` and `_BARE_URL_RE`; verified clean against the same
+   captured bytes.
+
+2. **The input-prompt marker never matched.** A real capture of `Paste
+   code here if prompted >` arrived, after ANSI stripping, as
+   `"Pastecodehereifprompted>"` — zero spaces. The build simulates the
+   visual spacing with cursor-absolute-positioning escapes (`\x1b[<N>G`,
+   "move to column N"), not literal space characters; stripping the
+   escapes (necessary to read anything at all) throws the spacing away
+   with them. `"paste code here" in text.lower()` — the existing
+   substring check — can never fire against that. Fixed with a new
+   `_marker_in(marker, text)` helper that squeezes ALL whitespace out of
+   both sides before comparing; verified it matches the real captured
+   line.
+
+3. **`_ANSI_RE` left two escape shapes unstripped.** `\x1b[>0q` (a device-
+   attributes query this build sends on startup) uses a `>` prefix the
+   old CSI parameter class (`[0-9;?]`) didn't include; `\x1b7`/`\x1b8`
+   (save/restore cursor) are a different, bracket-less 2-byte escape
+   family, not `\x1b[...` at all. Both confirmed present, unstripped, in
+   the raw capture. Fixed by widening the regex to `r"\x1b\[[0-9;?>]*
+   [ -/]*[@-~]|\x1b[78]"`.
+
+A fourth issue was cosmetic, not a parsing bug, but worth filtering for
+the same reason §18 already filters other noise: this build's "thinking"
+spinner cycles a single glyph (`✢ * ✶ ✻ ✽ ✻ ✶ * ✢ ·` measured, one frame
+per `\r`-redraw) that would otherwise flash through the artist's own
+status field and the log as dozens of near-identical single-character
+lines. `_is_spinner_noise()` drops a line that is exactly one non-word
+character after stripping — verified against all six glyphs actually
+seen, and confirmed it does NOT fire on any real word (the shortest,
+`"a"`, still passes).
+
+`_FORCE_FLUSH_CHARS` (§18) was checked against the real line lengths
+this produces, not just assumed adequate: the OSC-8-wrapped URL line,
+escape sequence and repeated display text included, measured 448
+characters — only 52 below the previous 500-char threshold, and that
+length tracks variable OAuth query params (`state`, `code_challenge`,
+`client_id`) a future build could easily push past, silently splitting
+the escape sequence mid-flush. Raised to 2000 for real headroom.
+
+### Writing the pasted code back through a pty is safe — measured, not assumed
+
+Two concerns, both settled by writing a fake code (never a real one) back
+into a live pty session and watching what the parent process reads back:
+
+- **Does the child's own terminal echo leak the pasted text into what we
+  read?** No — this build masks its own input, printing one `*` per
+  character rather than the literal text, whether the kernel's own ECHO
+  flag is left on or explicitly disabled on the slave fd before spawn.
+  The parent process reading the master fd never sees the actual code at
+  all, only its length reflected in asterisk count. `send_line()`'s own
+  docstring records this so nobody adds redaction logic for something
+  that was never there to redact.
+- **Does writing to the master fd work the same way `process.stdin.write`
+  already does for the pipe path?** Yes, mechanically — `os.write(master_
+  fd, text.encode("utf-8"))`, wrapped in `contextlib.suppress(OSError)`
+  for the same reason the pipe path already tolerates a already-exited
+  child. `send_line()` branches on `self._use_pty`; either path still
+  only logs the character COUNT, never the content, as before.
+
+### Windows: the pipe path stays, on purpose, not by accidental fallthrough
+
+`pty` and `termios` don't exist on Windows at all — a guarded import sets
+`_PTY_AVAILABLE = False` there, and `self._use_pty = use_pty and
+_PTY_AVAILABLE` forces the pipe path regardless of what a caller (i.e.
+`panel.py`'s `claude-setup-token` scoping) requests. This is a stated
+constraint, not a silent gap: no Windows machine exists in this project
+(same gap already noted elsewhere in this document) to measure what a
+Windows build of the bundled binary actually needs — a real controlling
+terminal probably means something different there (`ConPTY`, not POSIX
+`pty`), and that measurement is future work, not something to guess at
+here. Until then, `setup-token` on Windows stays exactly as silent as it
+was before this section — no worse, not fixed either.

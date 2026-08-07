@@ -965,6 +965,52 @@ def test_start_terminal_login_attaches_the_resolver_only_for_the_npx_placeholder
     widget.shutdown()
 
 
+def test_use_pty_is_attached_only_for_claude_setup_token(qapp, monkeypatch):
+    """docs/facts/acp-sdk.md §20: the bundled `claude setup-token` binary
+    prints nothing at all over plain pipes and needs a real pty to speak
+    at all; Kimi's own `kimi login` was re-measured directly and already
+    works fine over plain pipes. `use_pty` must be scoped to exactly the
+    one method that was measured to need it — the same discipline as
+    `resolve_command`'s own scoping right above."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import terminal_login as terminal_login_mod
+
+    monkeypatch.setattr(terminal_login_mod.TerminalLoginWorker, "start", lambda self: None)
+    monkeypatch.setattr(
+        panel_mod.shutil, "which", lambda name: "/usr/local/bin/claude" if name == "claude" else None
+    )
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+    widget._on_auth_method_chosen("claude-setup-token")
+    assert widget._terminal_login_worker._use_pty is True
+    widget._stop_terminal_login()
+
+    widget._rejoin_agent("kimi")
+    client = panel_mod.shared_client(widget._agent_id)
+    ta = client_mod.TerminalAuth(command="/bin/fake-kimi", args=["login"], env={})
+    monkeypatch.setattr(
+        client,
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="kimi", version="1.49.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(
+                client_mod.AuthMethod(id="login", name="Login with Kimi account", terminal_auth=ta),
+            ),
+        ),
+    )
+    widget._on_auth_method_chosen("login")
+    assert widget._terminal_login_worker._use_pty is False
+    widget.shutdown()
+
+
 def test_command_resolved_corrects_the_run_it_yourself_fallback_text(qapp, monkeypatch):
     """`_on_terminal_login_stuck`'s manual-fallback advice is built from
     `_terminal_login_command`, set BEFORE the worker even starts (the npx

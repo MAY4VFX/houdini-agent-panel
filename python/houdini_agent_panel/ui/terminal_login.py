@@ -33,10 +33,31 @@ interactive run — the one this module was originally measured against.
 Two changes follow from that: a second marker, and ANSI stripped from
 whatever's checked, since a build willing to reformat for a non-tty stdin
 is equally free to colour it.
+
+A second live failure (docs/facts/acp-sdk.md §20) found the same build
+going all the way to SILENT with plain pipes: the bundled binary
+`_resolve_claude_terminal_command` finds prints nothing at all — no URL,
+no prompt, not even the non-tty variant above — and just sits there. It
+wants a REAL terminal, not merely non-empty stdin. `use_pty=True` is the
+fix, and it changes what this module has to parse: a real pty run
+(measured, mayfx02) is drastically richer than either pipe shape — cursor-
+absolute-positioning escapes (`\x1b[<N>G`, simulating spaces by MOVING
+the cursor rather than sending space characters — stripping them without
+accounting for this loses the spacing, corrupting substring matches: a
+real capture produced literal `"Pastecodehereifprompted>"`, no spaces at
+all), OSC-8 terminal hyperlinks wrapping the OAuth URL (`\x1b]8;id=X;
+<url><BEL><display text>\x1b]8;;<BEL>` — the display text this build
+renders is a truncated, REPEATED copy of the same URL, and a naive
+`\\S+`-style URL match runs straight through the BEL into it, corrupting
+what should be a clean link), and animated spinner frames arriving as a
+rapid burst of single-glyph "lines". All three are handled below,
+each with the real captured bytes that justified the fix — see
+`_strip_ansi`, `_marker_in`, `_BARE_URL_RE`, `_is_spinner_noise`.
 """
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import os
 import re
@@ -47,13 +68,31 @@ from ..logbook import logger as _logbook_logger
 from .qt import Signal
 from .worker import Worker, WorkerStopped
 
+try:  # pragma: no cover - exercised only on POSIX, where this project runs its tests
+    import pty
+    import termios
+
+    _PTY_AVAILABLE = True
+except ImportError:  # Windows has no pty/termios modules at all
+    _PTY_AVAILABLE = False
+
 _log = _logbook_logger("houdini_agent_panel.ui.terminal_login")
 
 #: Sampled once from a real run (docs/facts/acp-sdk.md §14) — the format is
 #: NOT established as stable across kimi versions or runs (n=1). A line that
 #: doesn't match simply never fires `url_found`; the artist still sees every
 #: raw line via `line_received`, so nothing is hidden if this regex goes stale.
-_URL_RE = re.compile(r"Verification URL:\s*(\S+)")
+#:
+#: Excludes BEL (`\x07`) and ESC (`\x1b`) from the URL body, alongside plain
+#: whitespace — neither can be part of a real URL, and under a pty (§20) an
+#: OSC-8 terminal hyperlink wraps the OAuth URL as `\x1b]8;id=X;<url><BEL>
+#: <display text>\x1b]8;;<BEL>`; a bare `\S+` runs straight through that BEL
+#: into the display text (measured: a real capture produced the real URL
+#: with the SAME url, truncated and re-wrapped, appended after it — a
+#: broken link, not a cosmetic glitch). No agent measured so far puts a URL
+#: inside a hyperlink on the plain-pipe path, only under a pty, but the
+#: exclusion costs nothing either way.
+_URL_RE = re.compile(r"Verification URL:\s*([^\s\x07\x1b]+)")
 #: Kimi's own URL happens to carry the device code as a query parameter —
 #: convenient to show separately, but optional: `url_found` still fires with
 #: an empty code if this doesn't match.
@@ -62,8 +101,9 @@ _CODE_RE = re.compile(r"[?&]user_code=([\w-]+)")
 #: URL itself is the whole artefact, docs/facts/acp-sdk.md §14) on its own
 #: line, distinct from kimi's "Verification URL:" prefix. Matched only when
 #: `_URL_RE` above didn't already claim the line, so a future agent that
-#: happens to print both shapes doesn't double-fire.
-_BARE_URL_RE = re.compile(r"https?://\S+")
+#: happens to print both shapes doesn't double-fire. Same BEL/ESC exclusion
+#: as `_URL_RE`, same reason.
+_BARE_URL_RE = re.compile(r"https?://[^\s\x07\x1b]+")
 #: What Claude's `setup-token` prints right before it blocks on stdin —
 #: two shapes measured so far (§14, §18), both matched loosely
 #: (case-insensitive substring) since the exact wording is exactly the
@@ -71,6 +111,8 @@ _BARE_URL_RE = re.compile(r"https?://\S+")
 #: here if prompted >" (an interactive run) and "Or paste the redirect
 #: URL here:" (found in a build's own binary strings, apparently specific
 #: to a non-tty stdin — precisely what this module always gives it).
+#: Checked with `_marker_in`, not a plain substring test — see its own
+#: docstring for why (§20: a real pty run loses ALL spacing around these).
 _INPUT_PROMPT_MARKERS = ("paste code here", "paste the redirect url here")
 #: CSI escape sequences (`\x1b[` + parameters + a final letter) — cursor
 #: moves, colour, clearing. Stripped before anything is matched against
@@ -79,17 +121,68 @@ _INPUT_PROMPT_MARKERS = ("paste code here", "paste the redirect url here")
 #: (§18: the build measured there uses `\r`-redraws for at least some of
 #: its output) must not be able to hide plain text inside escape noise
 #: either from our detection or from the artist's own eyes.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+#:
+#: `>` added to the parameter class and the bare two-byte `\x1b7`/`\x1b8`
+#: (save/restore cursor) added alongside — both measured missing from a
+#: real pty capture (§20): `\x1b[>0q` (a device-attributes query this
+#: build sends on startup) uses a `>` prefix the CSI parameter class
+#: didn't include, and `\x1b7`/`\x1b8` aren't `\x1b[...` sequences at all,
+#: a different (2-byte, no bracket) escape family entirely.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?>]*[ -/]*[@-~]|\x1b[78]")
 #: A run this long with no line break, no carriage return and no
 #: recognised marker is almost certainly not a human-paced prompt —
 #: flushed as a line anyway so raw output is never invisible for good
 #: (§18: "must not be able to wait forever with no way forward"),
 #: regardless of whether the child ever sends a `\n`/`\r` at all.
-_FORCE_FLUSH_CHARS = 500
+#:
+#: Sized well above real OSC-8 lines, not just above plain text: a real
+#: pty capture (§20) of the OAuth verification URL — wrapped as an OSC-8
+#: hyperlink, escape sequence and repeated display text included — ran to
+#: 448 characters, within 52 of the old 500-char threshold. That length
+#: tracks variable OAuth query params (`state`, `code_challenge`,
+#: `client_id`); a longer state token in a future build would silently
+#: force-flush mid-sequence, splitting the OSC-8 escape and breaking both
+#: `_URL_RE`/`_BARE_URL_RE` matching and the terminator that lets
+#: `_ANSI_RE` strip it. 2000 leaves several times the measured length as
+#: headroom.
+_FORCE_FLUSH_CHARS = 2000
+#: A pty run's own animated "thinking" spinner (§20: a real capture showed
+#: this build cycling `✢ * ✶ ✻ ✽ ✻ ✶ * ✢ ·`, one glyph per redraw frame,
+#: each arriving as its own "line" once `\r`-flushed) — pure animation
+#: noise, not information, and unfiltered it would flash through the
+#: artist's own "still working" field and the log as dozens of near-
+#: identical single-character entries. Never fires on a real word (the
+#: shortest word — "a" — passes `isalnum()`); only a lone symbol/glyph is
+#: dropped.
+_SPINNER_NOISE_RE = re.compile(r"^\W$", re.UNICODE)
 
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def _marker_in(marker: str, text: str) -> bool:
+    """Is `marker` present in `text`, ignoring case AND all whitespace on
+    both sides?
+
+    A plain substring check was enough for every shape measured before a
+    real pty run (§20): a real `claude setup-token` capture produced the
+    literal string `"Pastecodehereifprompted>"` for what a normal
+    terminal renders as "Paste code here if prompted >" — cursor-
+    absolute-positioning escapes (`\\x1b[<N>G`, "move to column N")
+    simulate spacing by MOVING the cursor rather than sending space
+    characters, so stripping them (necessary to read the text at all)
+    loses the spacing along with it. `"paste code here" in text.lower()`
+    would never fire again on this build. Comparing with all whitespace
+    removed on both sides is immune to however much — or how little —
+    spacing a given render happens to preserve.
+    """
+    squeeze = lambda s: re.sub(r"\s+", "", s.lower())  # noqa: E731
+    return squeeze(marker) in squeeze(text)
+
+
+def _is_spinner_noise(line: str) -> bool:
+    return bool(_SPINNER_NOISE_RE.match(line.strip()))
 
 
 #: A device code (kimi's `user_code`, an OAuth redirect fragment) is meant
@@ -108,6 +201,46 @@ def _redact_for_log(line: str) -> str:
         return f"<{len(match.group(0))} chars redacted>"
 
     return _LOOKS_LIKE_A_TOKEN_RE.sub(_mask, line)
+
+
+class _PtyMasterReader:
+    """Adapts a pty master fd to the same one-character-at-a-time
+    `.read(1) -> str` interface `process.stdout.read(1)` already gives
+    the plain-pipe path (`text=True` on `Popen`), so `TerminalLoginWorker.
+    work`'s own read loop needs only one version, not two.
+
+    Two real pty quirks, both measured directly (mayfx02, a real
+    `claude setup-token` run under a pty, §20) rather than assumed:
+
+    - `os.read()` on the master fd raises `OSError` (`EIO`) once the
+      slave side closes, instead of returning `b""` the way a pipe's EOF
+      does — caught here and turned into the same `""` a pipe EOF
+      already means to the caller, so `work()` doesn't need to know the
+      difference.
+    - Multi-byte UTF-8 characters (this build's own spinner glyphs are
+      ALL multi-byte) can arrive split across two separate `os.read`
+      calls. An incremental decoder, not a bare `.decode()` per chunk,
+      is what keeps a character split mid-sequence from becoming two
+      mangled ones (a naive per-chunk decode raised
+      `UnicodeDecodeError` on this exact capture until this was added).
+    """
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._pending = ""
+
+    def read(self, _size: int = 1) -> str:
+        while not self._pending:
+            try:
+                chunk = os.read(self._fd, 4096)
+            except OSError:
+                return ""  # EIO — the slave side closed; same meaning as a pipe's b""
+            if not chunk:
+                return ""
+            self._pending = self._decoder.decode(chunk)
+        char, self._pending = self._pending[0], self._pending[1:]
+        return char
 
 
 class TerminalLoginWorker(Worker):
@@ -153,6 +286,7 @@ class TerminalLoginWorker(Worker):
         cwd: str,
         parent=None,
         resolve_command=None,
+        use_pty: bool = False,
     ) -> None:
         super().__init__(parent)
         self._agent_id = agent_id
@@ -170,10 +304,28 @@ class TerminalLoginWorker(Worker):
         #: "figure it out off the main thread" mechanism, generic to any
         #: terminal-auth command, not just Claude's.
         self._resolve_command = resolve_command
+        #: Give the child a real pty instead of plain pipes — see the
+        #: module's own docstring (§20) for why: Claude's bundled binary
+        #: prints NOTHING at all over plain pipes and just sits there,
+        #: unlike every other command measured for this class so far.
+        #: Defaults to `False`, unchanged plain-pipe behaviour, because
+        #: it's the one already MEASURED correct for everything else —
+        #: Kimi's own `kimi login`, run for real (not the ACP channel
+        #: probe from §13, a different target entirely): plain pipes
+        #: already produce its `Verification URL:` line immediately, no
+        #: pty needed. Silently forced back to `False` on a platform with
+        #: no `pty` module (Windows) — see `_PTY_AVAILABLE`; Claude's
+        #: setup-token stays silent there until someone with a Windows
+        #: machine can measure what it actually needs.
+        self._use_pty = use_pty and _PTY_AVAILABLE
         #: Read only from the thread that owns it, EXCEPT `stop()`/
         #: `send_line()` — see their own docstrings for why those two
         #: calls are safe from the main thread regardless.
         self._process: subprocess.Popen | None = None
+        #: The pty master fd, only while `self._use_pty` and `work()` is
+        #: running — `send_line()` writes here instead of `process.stdin`
+        #: (which doesn't exist for a pty-backed Popen; see `work()`).
+        self._pty_master_fd: int | None = None
 
     @staticmethod
     def build_env(terminal_auth) -> dict[str, str]:
@@ -238,16 +390,52 @@ class TerminalLoginWorker(Worker):
             _redact_for_log(" ".join(args)),
         )
 
-        process = subprocess.Popen(
-            [command, *args],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            cwd=self._cwd,
-            text=True,
-            bufsize=1,
-        )
+        if self._use_pty:
+            # A real pty, not plain pipes — see the module docstring
+            # (§20) for why: Claude's bundled `setup-token` prints
+            # nothing at all otherwise. `master_fd` is ours to read/write;
+            # `slave_fd` becomes the child's stdin/stdout/stderr, all
+            # three, exactly what a real terminal gives a foreground
+            # process.
+            master_fd, slave_fd = pty.openpty()
+            with contextlib.suppress(termios.error):
+                # Local echo off — measured to make NO observable
+                # difference either way (a real run with it left on
+                # produced identical output, §20): this build already
+                # puts the pty into raw mode itself once it reaches an
+                # actual input prompt, overriding whatever's set here.
+                # Kept anyway as a second line of defence for whatever
+                # command runs here next that might not manage its own
+                # echo — cheap, and `termios.error` (an unsupported fd,
+                # not expected here but not worth crashing over) is the
+                # only way this can fail.
+                attrs = termios.tcgetattr(slave_fd)
+                attrs[3] = attrs[3] & ~termios.ECHO  # lflags
+                termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+            process = subprocess.Popen(
+                [command, *args],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+                cwd=self._cwd,
+                start_new_session=True,  # the child becomes its own session leader — needed for the pty to act as its controlling terminal, same as a real interactive shell would give it
+            )
+            os.close(slave_fd)  # the child has its own dup'd copy from Popen; this parent-side one is no longer needed
+            self._pty_master_fd = master_fd
+            reader = _PtyMasterReader(master_fd)
+        else:
+            process = subprocess.Popen(
+                [command, *args],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                cwd=self._cwd,
+                text=True,
+                bufsize=1,
+            )
+            reader = process.stdout
         self._process = process
         # Same insurance as every agent process (`orphans.py`'s own module
         # docstring): if Houdini dies outright between here and this
@@ -268,7 +456,6 @@ class TerminalLoginWorker(Worker):
         buffer = ""
         exit_code = None
         try:
-            assert process.stdout is not None
             # Reading whole LINES (`for line in process.stdout`) was the
             # first cut here, and it deadlocks against Claude's own
             # `setup-token`: "Paste code here if prompted >" is an actual
@@ -280,7 +467,10 @@ class TerminalLoginWorker(Worker):
             # Reading one character at a time costs nothing on output this
             # small and human-paced, and lets the prompt marker be seen
             # (and `input_requested` fired) the instant it appears,
-            # newline or not.
+            # newline or not. `reader` is `process.stdout` (plain pipes)
+            # or a `_PtyMasterReader` (pty) — both expose the same
+            # `.read(1) -> str` contract, so nothing below needs to know
+            # which one it's talking to.
             #
             # `\r` flushes exactly like `\n` now (docs/facts/acp-sdk.md
             # §18) — a build redrawing a status line with carriage returns
@@ -289,13 +479,13 @@ class TerminalLoginWorker(Worker):
             # progress line drawn that way now actually reaches the
             # artist, the same way a plain `\n`-terminated one already did.
             while True:
-                char = process.stdout.read(1)
+                char = reader.read(1)
                 if not char:
                     break  # EOF — the child closed its output
                 if char not in ("\n", "\r") and len(buffer) < _FORCE_FLUSH_CHARS:
                     buffer += char
                     stripped = _strip_ansi(buffer)
-                    if any(marker in stripped.lower() for marker in _INPUT_PROMPT_MARKERS):
+                    if any(_marker_in(marker, stripped) for marker in _INPUT_PROMPT_MARKERS):
                         self._emit_line(stripped)
                         buffer = ""
                         self.input_requested.emit()
@@ -308,10 +498,10 @@ class TerminalLoginWorker(Worker):
                     buffer += char
                 line = _strip_ansi(buffer)
                 buffer = ""
-                if not line.strip():
+                if not line.strip() or _is_spinner_noise(line):
                     continue
                 self._emit_line(line)
-                if any(marker in line.lower() for marker in _INPUT_PROMPT_MARKERS):
+                if any(_marker_in(marker, line) for marker in _INPUT_PROMPT_MARKERS):
                     self.input_requested.emit()
                     _log.info("terminal login: input prompt detected")
                 if not url_already_found:
@@ -330,6 +520,10 @@ class TerminalLoginWorker(Worker):
             exit_code = process.wait()
             with contextlib.suppress(Exception):
                 orphans.record_stopped(process.pid)
+            if self._pty_master_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self._pty_master_fd)
+                self._pty_master_fd = None
             _log.info("terminal login: exited, code=%s", exit_code)
             self.exited.emit(exit_code)
 
@@ -338,23 +532,43 @@ class TerminalLoginWorker(Worker):
         _log.info("terminal login line: %s", _redact_for_log(line))
 
     def send_line(self, text: str) -> None:
-        """Write one line to the child's stdin — the one thing Claude's
+        """Write one line to the child's input — the one thing Claude's
         `setup-token` needs once the artist has the code from their
         browser (docs/facts/acp-sdk.md §14: it blocks at "Paste code here
         if prompted >" for exactly this). Safe to call from the main
         thread while `work()` runs on this worker's own thread — writing
-        to a pipe's file descriptor is a plain syscall, it doesn't need
-        Qt's thread-affinity rules the way touching a widget would.
+        to a file descriptor is a plain syscall, it doesn't need Qt's
+        thread-affinity rules the way touching a widget would.
+
+        Two destinations, matching however `work()` spawned the child:
+        the pty master fd (`self._use_pty`) or `process.stdin` (plain
+        pipes). Measured directly (mayfx02, a real run, a garbage code
+        that could never complete anything, killed right after): what
+        comes back through the pty after writing shows the build masking
+        its own input as a row of `*` — the character count matched the
+        written text exactly, not the text itself — so there is nothing
+        of the artist's actual code to redact here either way; only
+        `send_line`'s own existing "how many characters" log line, never
+        the content.
         """
         process = self._process
-        if process is None or process.poll() is not None or process.stdin is None:
+        if process is None or process.poll() is not None:
             return
+        line = text.rstrip("\n") + "\n"
         # The content itself is never logged — it's what the artist just
         # pasted from their browser, closer to a credential than a device
         # code is. Only the fact that something was sent.
         _log.info("terminal login: artist input submitted (%d chars)", len(text))
+        if self._use_pty:
+            if self._pty_master_fd is None:
+                return
+            with contextlib.suppress(OSError):
+                os.write(self._pty_master_fd, line.encode("utf-8"))
+            return
+        if process.stdin is None:
+            return
         with contextlib.suppress(OSError, ValueError):
-            process.stdin.write(text.rstrip("\n") + "\n")
+            process.stdin.write(line)
             process.stdin.flush()
 
     def stop(self) -> None:

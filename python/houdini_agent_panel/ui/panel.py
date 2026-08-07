@@ -3145,8 +3145,23 @@ class AgentPanel(QtWidgets.QWidget):
         if method.id == "claude-setup-token" and ta.command == "npx":
             resolve_command = self._resolve_claude_terminal_command
 
+        # `claude-setup-token`'s own binary (bundled or npx-resolved, either
+        # way) prints nothing at all over plain pipes — it wants a real
+        # controlling terminal and stays silent without one (measured on
+        # mayfx02, §20: a live run sat with no output at all after the
+        # owner completed the browser step). A pty fixes that; scoped to
+        # this one method only, same as `resolve_command` above — Kimi's
+        # own `kimi login` was measured unaffected by a pty and already
+        # works over plain pipes, so it keeps the pipe path unchanged.
+        use_pty = method.id == "claude-setup-token"
+
         worker = TerminalLoginWorker(
-            self._agent_id, ta, cwd=scene.hip_dir(), parent=self, resolve_command=resolve_command
+            self._agent_id,
+            ta,
+            cwd=scene.hip_dir(),
+            parent=self,
+            resolve_command=resolve_command,
+            use_pty=use_pty,
         )
         worker.line_received.connect(self._on_terminal_login_line)
         worker.url_found.connect(self._on_terminal_login_url)
