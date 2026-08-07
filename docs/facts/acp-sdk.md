@@ -1555,9 +1555,10 @@ agent ids the panel lists by name):
 - Whether `~/.gemini/oauth_creds.json`, when it exists, actually contains
   what its name implies — only checked for existence, never seen
   populated on a real machine in this pass.
-- Where kimi's own device-code OAuth login (§14) actually persists its
+- ~~Where kimi's own device-code OAuth login (§14) actually persists its
   token, if anywhere on disk rather than only in the running process —
-  not identified.
+  not identified.~~ **Corrected — see §22 below.** `kimi` writes it
+  itself, after login, to `~/.kimi/credentials/*.json`.
 - Whether `XAI_API_KEY`/`MOONSHOT_API_KEY` are the exact variable names
   `grok-build`/`kimi` read — real, vendor-documented names, not confirmed
   against these specific ACP adapters the way Codex's pair was.
@@ -2204,6 +2205,86 @@ characters too.
    owner completed a real sign-in and the panel gave him nothing: the
    token existed for exactly as long as that one process's stdout did,
    then was gone.
+
+## 22. Where `kimi`'s own OAuth token actually lives on disk — the §16 gap closed
+
+§16 measured that `kimi` had "nothing reliably checkable" beyond the
+unconfirmed `MOONSHOT_API_KEY`/`KIMI_API_KEY` env vars, and left open
+where `kimi login`'s own device-code OAuth flow (§14) persists its token,
+if anywhere. Closed here.
+
+Source: DeepWiki's read of `MoonshotAI/kimi-cli`, section "OAuth and
+Authentication" — after a successful device-code login, the `kimi` CLI
+itself writes its tokens to `~/.kimi/credentials/*.json` (mode 0o600,
+atomic write).
+
+Confirmed against a real, in-use machine (maymac01, not mayfx02 —
+`kimi` was never installed on mayfx02): `~/.kimi/credentials/kimi-code.json`
+exists, mode 0o600, a JSON object with keys `access_token`, `refresh_token`,
+`expires_at`, `scope`, `token_type`, `expires_in`. The DeepWiki description
+matched the real file on this machine exactly — path, permissions, and the
+"one file per login" shape (the directory holds exactly this one file).
+
+`signin_evidence._kimi` now checks this directory (globbing `*.json` rather
+than pinning the single observed filename, since nothing establishes that
+name as the CLI's only output) on the same "existence and non-emptiness,
+never validity" bar every other check in that module already holds to —
+see `has_credential_evidence` and `docs/design.md`'s own reasoning for why
+a stale token still counts as evidence here. Previously, an artist signed
+into `kimi` through the browser got no "Signed in." confirmation from the
+panel at all, because `has_credential_evidence("kimi", ...)` had nothing
+to check but two env vars a device-code login never sets.
+
+**Not established:** whether `kimi-code.json` is the only filename the CLI
+ever writes there (e.g. a differently-named file for a different login
+mode) — the glob is deliberately not narrowed to the one observed name.
+
+## 23. The decision on `claude-acp`'s login path, and why it isn't being reopened
+
+This project's own issue #41 records the same reasoning about Claude
+sign-in being redone five times in one week, because it was never written
+down anywhere durable. This section is that write-down.
+
+### What is measured
+
+- The panel takes its `claude-acp` agent from the live ACP registry
+  (`cdn.agentclientprotocol.com/registry/v1/latest/registry.json`).
+  Checked 2026-08-07: 38 agents in the registry, exactly one Claude entry
+  — `claude-acp`, resolving to npx package
+  `@agentclientprotocol/claude-agent-acp@0.66.0`. There is no
+  `claude-code-acp` entry in the registry.
+- That package is an ACP adapter built on top of the **Claude Agent
+  SDK**, not the Claude Code CLI. Confirmed on a live, running process: it
+  launches `@anthropic-ai/claude-agent-sdk-<platform>/claude`.
+- Anthropic's own documentation, `code.claude.com/docs/en/agent-sdk/overview`,
+  states verbatim (confirmed by loading the page directly, 2026-08-07):
+  "Unless previously approved, Anthropic does not allow third party
+  developers to offer claude.ai login or rate limits for their products,
+  including agents built on the Claude Agent SDK. Use the API key
+  authentication methods described in the Quickstart instead."
+- The same page's Branding guidelines section permits the name "Claude
+  Agent" for menus and UI, and disallows "Claude Code" for the same use.
+  The panel's own UI says "Claude Agent" — consistent with that guidance.
+- Secondary context, explicitly NOT a primary source, kept only for
+  completeness: a February 2026 press statement by an Anthropic engineer
+  about third-party harnesses, and an April 2026 announcement that
+  Pro/Max subscriptions do not cover third-party harnesses.
+
+### The owner's decision
+
+The login path stays as it is. Reasoning: the `@agentclientprotocol/
+claude-agent-acp` package is published by the ACP organization itself,
+publicly, and is used by other clients (Zed). The panel does not proxy or
+resell anything — it runs on the artist's own machine, under the artist's
+own subscription, using the artist's own token.
+
+### The known asymmetry — recorded honestly, not smoothed over
+
+The "unless previously approved" wording describes an approval granted to
+a specific partner, not a property of the package itself. Whatever
+approval Zed may have does not, by that text, transfer to anyone else who
+installs the same package. This is a risk the owner has chosen to accept,
+not a permission that has been demonstrated to exist for this project.
 
 ### The variable is `CLAUDE_CODE_OAUTH_TOKEN` — and it is NOT `ANTHROPIC_API_KEY`
 

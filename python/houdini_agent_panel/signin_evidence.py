@@ -127,6 +127,15 @@ def _codex(home: Path, env: dict[str, str]) -> bool:
     # on a signed-in machine — keys `auth_mode`, `OPENAI_API_KEY`,
     # `tokens`, `last_refresh`; existence and non-emptiness is the bar
     # here, not validating any of those fields.
+    #
+    # `CODEX_API_KEY` specifically comes from that error string printed by
+    # the `codex-acp` ADAPTER itself, not from the `codex` CLI's own
+    # documentation — the official Codex docs name `OPENAI_API_KEY` and
+    # `CODEX_ACCESS_TOKEN` instead. `CODEX_ACCESS_TOKEN` is deliberately
+    # NOT checked here: it has no confirmed link to this specific adapter
+    # the way `CODEX_API_KEY` does (it only ever appeared in the adapter's
+    # own error text), so adding it would be a guess this module otherwise
+    # avoids.
     if env.get("CODEX_API_KEY") or env.get("OPENAI_API_KEY"):
         return True
     return bool(_read_json_object(home / ".codex" / "auth.json"))
@@ -174,20 +183,32 @@ def _gemini(home: Path, env: dict[str, str]) -> bool:
     return (home / ".gemini" / "oauth_creds.json").exists()
 
 
-def _kimi(env: dict[str, str]) -> bool:
+def _kimi(home: Path, env: dict[str, str]) -> bool:
     # `MOONSHOT_API_KEY` is Moonshot AI's (Kimi's maker) own documented
     # variable name — included on the same unconfirmed-but-safe basis as
     # x.ai's above. `~/.kimi-code/config.toml` was measured and rejected
     # as a file check: its `providers.*.api_key` entries configure upstream
     # LLM backends Kimi CLI can route THROUGH (this machine's is an
     # OpenRouter key), which is a real, populated value but not confirmed
-    # to mean the kimi-acp ADAPTER itself is signed in — docs/facts/acp-
-    # sdk.md §14 documents `kimi login` as a separate device-code OAuth
-    # flow, and where THAT persists its own token was not identified
-    # within this pass. So: env var only here, falling back to
-    # `settings.signed_in_agents` the same as any agent with nothing
-    # reliably checkable.
-    return bool(env.get("MOONSHOT_API_KEY") or env.get("KIMI_API_KEY"))
+    # to mean the kimi-acp ADAPTER itself is signed in.
+    #
+    # Where `kimi login`'s own device-code OAuth flow (docs/facts/acp-
+    # sdk.md §14) persists ITS token was the one gap left open by that
+    # section — closed here: per DeepWiki's read of `MoonshotAI/kimi-cli`
+    # (OAuth and Authentication), the `kimi` CLI writes its token itself,
+    # after a successful login, to `~/.kimi/credentials/*.json` (mode
+    # 0o600, atomic write). Confirmed against a real, in-use machine
+    # (maymac01): `~/.kimi/credentials/kimi-code.json` exists with exactly
+    # that mode and keys `access_token`/`refresh_token`/`expires_at`/
+    # `scope`/`token_type`/`expires_in` — the DeepWiki description matched
+    # reality here, not just the docs. Glob rather than the fixed name
+    # `kimi-code.json`, since nothing pins that filename as the only one
+    # the CLI ever writes.
+    if env.get("MOONSHOT_API_KEY") or env.get("KIMI_API_KEY"):
+        return True
+    return any(
+        _read_json_object(path) for path in (home / ".kimi" / "credentials").glob("*.json")
+    )
 
 
 #: One check per known agent id (`registry.FEATURED_AGENT_IDS`) — kept as
@@ -228,7 +249,7 @@ def has_credential_evidence(
     """
     resolved_home = home if home is not None else Path.home()
     if agent_id == "kimi":
-        return _kimi(env)
+        return _kimi(resolved_home, env)
     if agent_id == "claude-acp":
         return _claude(resolved_home, env, agent_oauth_tokens or {})
     check = _CHECKS.get(agent_id)

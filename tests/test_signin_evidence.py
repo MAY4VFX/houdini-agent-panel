@@ -206,12 +206,38 @@ def test_gemini_nothing_present_is_not_evidence(tmp_path):
     assert not sie.has_credential_evidence("gemini", env={}, home=tmp_path)
 
 
-# --- kimi: no file check, env only -----------------------------------------
+# --- kimi ----------------------------------------------------------------
 
 
 def test_kimi_env_var_is_evidence(tmp_path):
     assert sie.has_credential_evidence("kimi", env={"MOONSHOT_API_KEY": "x"}, home=tmp_path)
     assert sie.has_credential_evidence("kimi", env={"KIMI_API_KEY": "x"}, home=tmp_path)
+
+
+def test_kimi_credentials_file_is_evidence(tmp_path):
+    """`kimi` itself (not an env var) writes its device-code OAuth token to
+    `~/.kimi/credentials/*.json` after a successful `kimi login` — measured
+    on a real, in-use machine (maymac01): `~/.kimi/credentials/kimi-code.json`,
+    mode 0o600, keys `access_token`/`refresh_token`/`expires_at`/`scope`/
+    `token_type`/`expires_in`. This closes the "where THAT persists its own
+    token was not identified" gap this module's docstring used to note."""
+    creds_dir = tmp_path / ".kimi" / "credentials"
+    creds_dir.mkdir(parents=True)
+    (creds_dir / "kimi-code.json").write_text(
+        json.dumps({"access_token": "x", "refresh_token": "y", "token_type": "Bearer"})
+    )
+
+    assert sie.has_credential_evidence("kimi", env={}, home=tmp_path)
+
+
+def test_kimi_empty_credentials_file_is_not_evidence(tmp_path):
+    """Same "existence AND non-emptiness" bar every JSON check in this
+    module holds to (see the codex/opencode/grok equivalents)."""
+    creds_dir = tmp_path / ".kimi" / "credentials"
+    creds_dir.mkdir(parents=True)
+    (creds_dir / "kimi-code.json").write_text("{}")
+
+    assert not sie.has_credential_evidence("kimi", env={}, home=tmp_path)
 
 
 def test_kimi_config_toml_is_never_read(tmp_path):
