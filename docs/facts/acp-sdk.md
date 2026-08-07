@@ -2389,6 +2389,44 @@ a specific partner, not a property of the package itself. Whatever
 approval Zed may have does not, by that text, transfer to anyone else who
 installs the same package. This is a risk the owner has chosen to accept,
 not a permission that has been demonstrated to exist for this project.
+
+### A second public precedent, and what it reveals about billing
+
+Checked 2026-08-07 by reading the source directly, not by reputation:
+`NousResearch/hermes-agent` — a public agent from a well-known lab —
+accepts the very same credential this panel captures.
+
+- `plugins/model-providers/anthropic/__init__.py`:
+  `env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")`
+- `hermes_cli/runtime_provider.py` tells its own users, verbatim:
+  `"run 'claude setup-token', or authenticate with 'claude /login'."`
+- `agent/anthropic_adapter.py` recognises the `cc-` token prefix as
+  "Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)".
+
+The more useful find is in that project's own provider documentation
+(`website/docs/integrations/providers.md`), which describes its Anthropic
+support as:
+
+> "Claude Max + **extra usage credits** via OAuth; also supports Anthropic
+> API key or manual setup-token"
+
+That phrase resolves what the February/April 2026 statements actually
+changed. The subscription login is not being refused; what changed is
+that a third-party harness's consumption is not covered by the flat
+Pro/Max subscription and bills through separately purchased extra usage
+instead. Two independent sources agree on this: the April 2026
+announcement, and a shipping product that documents exactly that billing
+shape to its own users.
+
+This narrows the asymmetry above without erasing it. The permission
+question remains as written. The **billing** question, however, is now
+settled enough to act on, and it is the one that actually reaches an
+artist's wallet: signing in with a subscription may spend metered extra
+usage rather than the flat plan. Issue #41 already set the standard here
+— silently moving a subscriber onto metered billing is not acceptable —
+so that fact belongs in front of the artist at the sign-in step, stated
+as a fact about money, not as a warning about rules.
+
 ## 24. Windows sign-in via ConPTY — implemented, not yet run on Windows
 
 §20's own Windows note ended with "no Windows machine exists in this
