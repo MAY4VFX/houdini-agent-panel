@@ -759,11 +759,80 @@ def test_terminal_login_exit_with_credential_evidence_says_signed_in(qapp, monke
     widget._show_page(widget.PAGE_AUTH)
     widget._terminal_login_url_shown = True
     widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
 
     widget._on_terminal_login_exited(0)
 
-    text = widget._auth_view._pending_label.text()
-    assert "signed in" in text.lower()
+    assert any("signed in" in n.lower() for n in notes)
+    widget.shutdown()
+
+
+def test_terminal_login_exit_with_credential_evidence_returns_to_the_agent(qapp, monkeypatch):
+    """The owner's own ask: "после логина если все окей панель сразу
+    вернула меня в агента" — a confirmed success must leave PAGE_AUTH for
+    PAGE_TRANSCRIPT on its own, not wait for a Cancel click."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    monkeypatch.setattr(signin_evidence_mod, "has_credential_evidence", lambda *a, **kw: True)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+
+    widget._on_terminal_login_exited(0)
+
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
+    widget.shutdown()
+
+
+def test_terminal_login_exit_with_credential_evidence_restarts_the_agent(qapp, monkeypatch):
+    """A captured token (`_on_terminal_login_token_captured`) only reaches
+    the agent's env at its NEXT spawn (`runtime.py::_with_oauth_tokens`) —
+    the process this tab is already talking to started before the token
+    existed. Landing back on the transcript without restarting would show
+    a "working" agent that is, underneath, still unauthenticated."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    monkeypatch.setattr(signin_evidence_mod, "has_credential_evidence", lambda *a, **kw: True)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+    restarted: list[bool] = []
+    monkeypatch.setattr(widget, "_restart_agent", lambda: restarted.append(True))
+
+    widget._on_terminal_login_exited(0)
+
+    assert restarted, "the agent process must restart to pick up the new token"
+    widget.shutdown()
+
+
+def test_stale_terminal_login_exit_does_not_return_to_a_different_agents_screen(qapp, monkeypatch):
+    """The existing stale-worker guard must still hold: an `exited` signal
+    that arrives for an agent this tab has since left behind must not pull
+    the artist back onto whatever tab is showing now, and must not restart
+    an agent process nobody asked to restart."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    monkeypatch.setattr(signin_evidence_mod, "has_credential_evidence", lambda *a, **kw: True)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_agent_id = "kimi"
+    widget._agent_id = "gemini"
+    restarted: list[bool] = []
+    monkeypatch.setattr(widget, "_restart_agent", lambda: restarted.append(True))
+
+    widget._on_terminal_login_exited(0)
+
+    assert widget._pages.currentIndex() == widget.PAGE_AUTH
+    assert not restarted
     widget.shutdown()
 
 

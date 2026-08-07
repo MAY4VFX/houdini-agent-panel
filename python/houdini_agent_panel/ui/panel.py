@@ -550,6 +550,18 @@ class AgentPanel(QtWidgets.QWidget):
         #: (same signal, same slot); this is how `_on_notice_action` tells
         #: them apart.
         self._active_update: Any = None
+        #: `(id, show)` for whatever `self._notice` is actually rendering
+        #: right now, or `None` if it's empty — see `_offer_notice`/
+        #: `_release_notice`. There is exactly one notice strip, and until
+        #: this existed, whichever call site called `NoticeStrip.show_
+        #: notice`/`show_update` LAST simply won, silently discarding
+        #: whatever the strip already showed: a sign-in offer that nobody
+        #: had dismissed yet sat there for three released versions while
+        #: the panel's own "0.8.8 available" banner never got a turn.
+        self._notice_shown: tuple[str, Any] | None = None
+        #: Notices waiting for `self._notice` to free up, oldest first —
+        #: see `_offer_notice`.
+        self._notice_queue: list[tuple[str, Any]] = []
         #: The in-flight `SelfUpdateWorker`, if the notice strip's "Update"
         #: button is currently running a panel/fxhoudinimcp update — see
         #: `_start_update`. `None` the rest of the time, including right
@@ -1368,14 +1380,17 @@ class AgentPanel(QtWidgets.QWidget):
         ):
             return
         label = self._pending_agent_label or getattr(info, "name", "") or "This agent"
-        self._notice.show_notice(
-            Announcement(
-                id=_SIGNIN_OFFER_PREFIX + self._agent_id,
-                severity="info",
-                title=f"{label} may not be signed in yet.",
-                buttons=(Button("Sign in", ""),),
-            )
+        ann = Announcement(
+            id=_SIGNIN_OFFER_PREFIX + self._agent_id,
+            severity="info",
+            title=f"{label} may not be signed in yet.",
+            buttons=(Button("Sign in", ""),),
         )
+        # Through `_offer_notice`, not a direct `self._notice.show_notice`:
+        # this offer is exactly the persistent tenant that used to starve a
+        # later update banner or announcement out of the one notice strip
+        # for good — see `_offer_notice`'s own docstring for the report.
+        self._offer_notice(ann.id, lambda a=ann: self._notice.show_notice(a))
 
     def _on_disconnected(self, reason: str) -> None:
         self._pending_permissions.clear()
@@ -2462,6 +2477,66 @@ class AgentPanel(QtWidgets.QWidget):
 
     # ------------------------------------------------- announcements and updates
 
+    def _offer_notice(self, notice_id: str, show: Any) -> None:
+        """Claim `self._notice` for `notice_id`, or wait in line for it.
+
+        There is exactly one notice strip, and several unrelated sources
+        want it: a sign-in offer (`_maybe_offer_sign_in`, which nobody may
+        ever dismiss) and whatever a periodic refresh finds (`_on_refresh_
+        done`) chief among them. Before this existed, whichever call site
+        happened to call `NoticeStrip.show_notice`/`show_update` LAST simply
+        won, silently discarding whatever the strip already showed —
+        reported for real: a never-dismissed sign-in offer sat there for
+        three released versions, and the panel's own "0.8.8 available"
+        banner (sitting in `cache/updates.json` the whole time) never got a
+        turn to be seen. This makes "already occupied" a queue instead of a
+        discard, so both eventually reach the artist.
+
+        The self-update lifecycle (`_render_panel_update_notice`, `_show_
+        panel_update_restart_notice`, the retry in `_on_panel_update_
+        failed`) deliberately does NOT come through here — an update the
+        artist just clicked has to be seen immediately, exactly as before
+        this queue existed, and `_panel_update_restart_pending`'s own
+        "never replaced by another banner" guarantee already lives upstream
+        of this, at the top of `_on_refresh_done`.
+        """
+        if self._notice_shown is not None and self._notice_shown[0] == notice_id:
+            # A refresh of what's already showing (an update result that
+            # simply confirms itself again) — not a new claim.
+            show()
+            self._notice_shown = (notice_id, show)
+            return
+        if self._notice_shown is None:
+            show()
+            self._notice_shown = (notice_id, show)
+            return
+        for i, (queued_id, _queued_show) in enumerate(self._notice_queue):
+            if queued_id == notice_id:
+                # A fresher copy of something already waiting in line (the
+                # same update, re-offered by a later refresh) — replace it
+                # in place rather than piling up duplicates.
+                self._notice_queue[i] = (notice_id, show)
+                return
+        self._notice_queue.append((notice_id, show))
+
+    def _release_notice(self, notice_id: str) -> None:
+        """The strip is done showing `notice_id` — free it for whatever is
+        waiting in line, if anything, or empty the strip if nothing is.
+
+        Ignored if `notice_id` isn't what the strip is actually showing
+        right now: a stale or repeated release must never pull a QUEUED
+        notice's turn early.
+        """
+        if self._notice_shown is None or self._notice_shown[0] != notice_id:
+            return
+        self._notice_shown = None
+        if self._notice_queue:
+            next_id, show = self._notice_queue.pop(0)
+            show()
+            self._notice_shown = (next_id, show)
+        else:
+            self._notice.hide_notice()
+
     def _on_refresh_done(self, result: Any, entries: Any = ()) -> None:
         # A self-update is running, or one just finished and Houdini hasn't
         # restarted since — either way the notice strip is already saying
@@ -2516,8 +2591,14 @@ class AgentPanel(QtWidgets.QWidget):
                 self._blocking.show_notice(announcement)
                 self._composer.block_input(announcement.title)
                 return
-            self._active_update = None
-            self._notice.show_notice(announcement)
+            # Through `_offer_notice`, not a direct `self._notice.show_
+            # notice`: a periodic refresh landing while the strip is
+            # already showing something else (a sign-in offer, chiefly)
+            # must not just discard this — see `_offer_notice`'s own
+            # docstring for the report.
+            self._offer_notice(
+                announcement.id, lambda a=announcement: self._show_quiet_announcement(a)
+            )
             return
         for update in getattr(result, "updates", []):
             # Checked against what is on disk right now, the same guard the
@@ -2530,9 +2611,24 @@ class AgentPanel(QtWidgets.QWidget):
             # exactly how this was reported.
             if _update_is_stale(update):
                 continue
-            self._active_update = update
-            self._notice.show_update(update)
+            self._offer_notice(update.target, lambda u=update: self._show_update_banner(u))
             return
+
+    def _show_quiet_announcement(self, announcement: Announcement) -> None:
+        """Actually render a quiet announcement — separated from the loop
+        above so `_offer_notice` can call it later, once the strip frees up,
+        exactly as if it had run right away."""
+        self._active_update = None
+        self._notice.show_notice(announcement)
+
+    def _show_update_banner(self, update: Any) -> None:
+        """Actually render the "Update available" banner — see `_show_
+        quiet_announcement`'s own docstring for why this is a separate
+        method rather than inline in the loop above. `_active_update` is
+        set HERE, not before queueing: an update sitting in the queue,
+        not yet on screen, has no button for the artist to press yet."""
+        self._active_update = update
+        self._notice.show_update(update)
 
     def _on_notice_action(self, identifier: str, url: str) -> None:
         # `_maybe_offer_sign_in`'s own notice, on the same strip and the
@@ -2543,7 +2639,10 @@ class AgentPanel(QtWidgets.QWidget):
         # `_open_url`/`_remember_seen` — there is no URL, and this isn't a
         # feed announcement to remember having seen.
         if identifier.startswith(_SIGNIN_OFFER_PREFIX):
-            self._notice.hide_notice()
+            # `_release_notice`, not a bare `hide_notice()`: something else
+            # may be waiting in line for the strip (`_offer_notice`), and
+            # this is the moment to let it have its turn.
+            self._release_notice(identifier)
             self._offer_sign_in()
             return
         # The strip's "Update" button fires this SAME signal (see
@@ -2557,6 +2656,14 @@ class AgentPanel(QtWidgets.QWidget):
         self._remember_seen(identifier)
 
     def _on_notice_dismissed(self, identifier: str) -> None:
+        # `NoticeStrip._on_close` already hid the widget before emitting
+        # this — this is the moment to let whatever is waiting in line
+        # (`_offer_notice`) take the now-empty strip. A no-op if
+        # `identifier` isn't what was actually showing (never true for a
+        # real ✕ click, but true for the restart-pending id, whose branch
+        # below never went through `_offer_notice` in the first place — see
+        # `_release_notice`'s own guard).
+        self._release_notice(identifier)
         if identifier.startswith(_SIGNIN_OFFER_PREFIX):
             # "Not now," not "never" — kept in-memory, per tab, per the
             # owner's own ask (`_dismissed_signin_offers`'s own docstring).
@@ -2663,13 +2770,19 @@ class AgentPanel(QtWidgets.QWidget):
         elapsed = ""
         if self._panel_update_started_at is not None:
             elapsed = f" ({int(time.monotonic() - self._panel_update_started_at)}s)"
-        self._notice.show_notice(
-            Announcement(
-                id=f"panel-update-progress:{update.target}",
-                severity="info",
-                title=f"Updating {update.label}… {self._panel_update_display_line}{elapsed}",
-            )
+        ann = Announcement(
+            id=f"panel-update-progress:{update.target}",
+            severity="info",
+            title=f"Updating {update.label}… {self._panel_update_display_line}{elapsed}",
         )
+        # Deliberately NOT through `_offer_notice` — see its own docstring:
+        # an update the artist just clicked has to be seen right now, not
+        # wait in line behind whatever the strip happened to be showing.
+        # `_notice_shown` is still kept accurate here (not left stale)
+        # purely so a LATER `_release_notice` (once this update resolves)
+        # correctly hands the strip to anything that queued up behind it.
+        self._notice.show_notice(ann)
+        self._notice_shown = (ann.id, lambda u=update: self._render_panel_update_notice(u))
 
     def _stop_panel_update_tick(self) -> None:
         if self._panel_update_tick_timer is not None:
@@ -2688,18 +2801,24 @@ class AgentPanel(QtWidgets.QWidget):
         update = self._panel_update_restart_pending
         if update is None:
             return
-        self._notice.show_notice(
-            Announcement(
-                id=_panel_update_notice_id(update),
-                severity="info",
-                title=(
-                    f"Updated {update.label} to {update.latest} — takes effect after "
-                    "Houdini restarts. Starting a different agent for the first time "
-                    "before then isn't recommended: some of the panel's own code may "
-                    "now be a mix of old and new."
-                ),
-            )
+        ann = Announcement(
+            id=_panel_update_notice_id(update),
+            severity="info",
+            title=(
+                f"Updated {update.label} to {update.latest} — takes effect after "
+                "Houdini restarts. Starting a different agent for the first time "
+                "before then isn't recommended: some of the panel's own code may "
+                "now be a mix of old and new."
+            ),
         )
+        # Same reasoning as `_render_panel_update_notice`: bypasses
+        # `_offer_notice` (this must win immediately and stay put — the
+        # very guarantee `_on_refresh_done`'s own top guard exists for),
+        # but still keeps `_notice_shown` accurate so dismissing it
+        # (`_on_notice_dismissed`) correctly frees the strip for anything
+        # that queued up in the meantime.
+        self._notice.show_notice(ann)
+        self._notice_shown = (ann.id, lambda: self._show_panel_update_restart_notice())
 
     def _on_panel_update_failed(self, update: Any, message: str) -> None:
         self._stop_panel_update_tick()
@@ -2714,7 +2833,11 @@ class AgentPanel(QtWidgets.QWidget):
         self._note(f"Updating {update.label} failed.\n{message}", error=True)
         if self._active_update is None:
             self._active_update = update
+        # Bypasses `_offer_notice` too, same "must be seen now" reasoning —
+        # `update.target` as the id keeps `_notice_shown` consistent with
+        # what `_show_update_banner` would have used for the same update.
         self._notice.show_update(update)
+        self._notice_shown = (update.target, lambda u=update: self._notice.show_update(u))
 
     def _before_agent_install(self, agent_id: str) -> None:
         """About to overwrite `agent_id`'s files on disk (install OR update,
@@ -2767,7 +2890,10 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_agent_install_succeeded(self, agent_id: str) -> None:
         if self._active_update is not None and self._active_update.target == agent_id:
             self._active_update = None
-            self._notice.hide_notice()
+            # `_release_notice`, not a bare `hide_notice()`: anything
+            # waiting in line (`_offer_notice`) gets the strip now that
+            # this update banner is resolved.
+            self._release_notice(agent_id)
         if self._restart_after_update == agent_id:
             self._restart_after_update = None
             self._note(f"{self._display_label(agent_id)} updated — restarting it…")
@@ -3519,11 +3645,35 @@ class AgentPanel(QtWidgets.QWidget):
             if signin_evidence.has_credential_evidence(
                 self._agent_id, env=env, agent_oauth_tokens=self._settings.agent_oauth_tokens
             ):
-                message = "Signed in."
-                self._note(message)
-                self._auth_view.set_pending(message)
+                self._complete_terminal_login_success()
                 return
         self._note(f"Terminal login process ended (exit {exit_code}).")
+
+    def _complete_terminal_login_success(self) -> None:
+        """Evidence says the login just worked — leave the sign-in screen
+        and get the artist back to the agent, instead of stranding them on
+        a screen that now shows "Signed in." beside a disabled "Sign in
+        with browser" button and a Cancel that's the only way out (the
+        owner's own ask: "после логина если все окей панель сразу вернула
+        меня в агента").
+
+        Restarting, not just switching pages: `_on_terminal_login_token_
+        captured` already wrote the token to `settings.agent_oauth_tokens`,
+        but `runtime.py::_with_oauth_tokens` only ever injects it into a
+        process's env AT SPAWN. The agent THIS tab is attached to started
+        before the token existed, so without a fresh process it would sit
+        there unauthenticated no matter what the sign-in screen says.
+        `_restart_agent` is the exact mechanism that already exists for
+        this shape of problem — a Network setting change needs the same
+        kind of bounce to take effect — reused here rather than inventing
+        a second way to relaunch an agent process.
+        """
+        message = "Signed in."
+        self._note(message)
+        self._auth_pending = False
+        self._auth_view.clear_pending()
+        self._show_page(self.PAGE_TRANSCRIPT)
+        self._restart_agent()
 
     def _on_terminal_login_failed(self, message: str) -> None:
         """`work()` raised before ever spawning anything readable — e.g. the
