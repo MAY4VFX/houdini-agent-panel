@@ -93,7 +93,7 @@ import platform
 import re
 import subprocess
 
-from .. import orphans, shellenv
+from .. import orphans, shellenv, token_check
 from ..logbook import logger as _logbook_logger
 from .qt import Signal
 from .worker import Worker, WorkerStopped
@@ -475,6 +475,10 @@ class TerminalLoginWorker(Worker):
     #: this is the one and only chance to capture it. Never logged, never
     #: on `line_received` — see `_OAUTH_TOKEN_RE`/`_emit_line`.
     token_captured = Signal(str, str)
+    #: The capture produced something the API refused. Nothing was
+    #: stored — see `_verify_and_emit_token` for why that matters more
+    #: than it sounds.
+    token_rejected = Signal(str)
     #: The process's own exit code. Not evidence of success OR failure by
     #: itself — docs/facts/acp-sdk.md §14 explicitly could not measure what
     #: kimi prints when the login actually succeeds (the probe killed it
@@ -560,6 +564,9 @@ class TerminalLoginWorker(Worker):
         #: Set the moment `_OAUTH_TOKEN_LABEL` is seen: the very next
         #: token-shaped line is the minted secret itself.
         self._awaiting_token_value = False
+        #: Held between capture and verification — see
+        #: `_verify_and_emit_token`.
+        self._captured_token = ""
 
     @staticmethod
     def build_env(terminal_auth) -> dict[str, str]:
@@ -790,7 +797,11 @@ class TerminalLoginWorker(Worker):
                 token = self._token_value_in(line)
                 if token:
                     self._awaiting_token_value = False
-                    self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token)
+                    # Held, not emitted: verified once the child has
+                    # finished, so a slow network can't stall the read
+                    # loop while the build is still printing. See
+                    # `_verify_and_emit_token`.
+                    self._captured_token = token
                     # The length is not a secret, and it is the single
                     # cheapest tripwire there is: a token 79 characters
                     # long (§25) or one character short is obvious here
@@ -822,6 +833,7 @@ class TerminalLoginWorker(Worker):
                         if bare:
                             self.url_found.emit(bare.group(0), "")
                             url_already_found = True
+            self._verify_and_emit_token()
         finally:
             exit_code = process.wait()
             with contextlib.suppress(Exception):
@@ -836,6 +848,42 @@ class TerminalLoginWorker(Worker):
                 self._conpty_process = None
             _log.info("terminal login: exited, code=%s", exit_code)
             self.exited.emit(exit_code)
+
+    def _verify_and_emit_token(self) -> None:
+        """Hand over the captured token — but only if it actually works.
+
+        Runs on the worker thread, after the child has finished printing,
+        so a slow check never stalls the read loop and never touches the
+        UI thread.
+
+        The rule this enforces comes straight from the owner's report:
+        signing in again is the obvious thing to try when something looks
+        wrong, and until now doing so OVERWROTE a working credential with
+        whatever capture produced. Three different parsing faults (§21,
+        §25, §26) each shipped a plausible-looking, unusable token and
+        each was announced as a successful sign-in. A rejected token is
+        therefore not stored at all: whatever was there before it is
+        worth more.
+
+        `UNKNOWN` — offline, proxy down, timeout — stores the token, the
+        same as before this check existed. Being unable to ask is not an
+        answer, and an artist with no connection still deserves to keep
+        the credential they just minted.
+        """
+        token = self._captured_token
+        if not token:
+            return
+        self._captured_token = ""
+
+        status = token_check.verify(token)
+        _log.info("terminal login: token check: %s", status)
+        if status == token_check.REJECTED:
+            self.token_rejected.emit(
+                "That sign-in produced a token the API rejected, so it was not saved — "
+                "any token already stored is untouched. Please try signing in again."
+            )
+            return
+        self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token)
 
     def _token_value_in(self, line: str) -> str:
         """The minted OAuth token if THIS line carries it, else `""`.

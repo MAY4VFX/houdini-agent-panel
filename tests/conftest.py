@@ -146,6 +146,21 @@ def no_real_network(monkeypatch):
 
     monkeypatch.setattr("houdini_agent_panel.network.urlopen_fetch", explode)
     monkeypatch.setattr("houdini_agent_panel.network.stream_fetch", explode)
+    # `token_check.verify` builds its own request (it needs headers that
+    # `urlopen_fetch` has no way to carry), so the two guards above never
+    # see it. Left as `VALID` rather than exploding: every existing
+    # sign-in test asserts on `token_captured`, and the check sits
+    # directly in front of that signal — a test suite that had to opt in
+    # to it one file at a time would be a suite where the next new test
+    # quietly reaches api.anthropic.com. Tests that care about the check
+    # itself drive `token_check.verify` directly (`test_token_check.py`)
+    # or override this.
+    monkeypatch.setattr(
+        "houdini_agent_panel.token_check.verify",
+        lambda token, **kwargs: __import__(
+            "houdini_agent_panel.token_check", fromlist=["VALID"]
+        ).VALID,
+    )
 
 
 @pytest.fixture(scope="session")

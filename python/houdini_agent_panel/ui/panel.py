@@ -3359,6 +3359,7 @@ class AgentPanel(QtWidgets.QWidget):
         worker.failed.connect(self._on_terminal_login_failed)
         worker.command_resolved.connect(self._on_terminal_login_command_resolved)
         worker.token_captured.connect(self._on_terminal_login_token_captured)
+        worker.token_rejected.connect(self._on_terminal_login_token_rejected)
         self._terminal_login_worker = worker
         worker.start()
 
@@ -3452,6 +3453,21 @@ class AgentPanel(QtWidgets.QWidget):
         settings_mod.save(current)
         self._settings = current
         self._note(f"Captured and saved a {self._display_label(self._agent_id)} sign-in token.")
+
+    def _on_terminal_login_token_rejected(self, message: str) -> None:
+        """The API refused what capture produced, so nothing was stored.
+
+        Deliberately does NOT clear `agent_oauth_tokens`: the owner's own
+        report is that a working chat broke *after* signing in again, and
+        that is only possible because a capture used to overwrite a good
+        credential unconditionally. Whatever is stored stays stored, and
+        the artist is told plainly that this attempt changed nothing.
+        """
+        if self._terminal_login_agent_id != self._agent_id:
+            return  # stale — see `_start_terminal_login`'s own comment
+        self._note(message, error=True)
+        if self._pages.currentIndex() == self.PAGE_AUTH:
+            self._auth_view.set_pending(message)
 
     def _on_terminal_login_line(self, line: str) -> None:
         if self._terminal_login_agent_id != self._agent_id:

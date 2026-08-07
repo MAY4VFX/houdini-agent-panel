@@ -2742,3 +2742,59 @@ the wrong anchor (§21), line wrapping (§25), and this. All three reported
 the failure as a *successful* sign-in, because the panel checks that a
 token EXISTS and never that it WORKS. That check is the one thing that
 would have caught all three in seconds, and it is still not written.
+
+## 27. Checking that a token WORKS, not just that one exists
+
+Three different faults have now shipped a token that was structurally
+plausible and completely unusable — the wrong anchor (§21), truncation by
+line wrapping (§25), and a character eaten by an escape sequence (§26).
+All three were announced to the artist as a **successful sign-in**,
+because the only question the panel ever asked was whether a token
+existed.
+
+The owner's own account is what settled the design:
+
+> "the time before last, I checked the chat before signing in and it
+>  worked, and after signing in it broke"
+
+That is the real cost, and it is worse than a failed sign-in. Capture
+overwrote `settings.agent_oauth_tokens` unconditionally, so an artist
+holding a working credential who signs in again — the obvious thing to
+try when something looks wrong — destroyed the one good token they had.
+
+### The check, measured
+
+`GET https://api.anthropic.com/v1/models` with `Authorization: Bearer
+<token>` and `anthropic-beta: oauth-2025-04-20`, from the owner's machine
+through its own proxy, 2026-08-08:
+
+| token | response |
+| --- | --- |
+| whole, 108 characters | HTTP 200, the model list |
+| one character short (§26) | HTTP 401 `authentication_error` |
+
+`/v1/models` is the right question: it authenticates exactly as a prompt
+does and invokes no model, so a check on every sign-in costs the artist
+nothing. `/v1/messages` would have billed them for it.
+
+### What each outcome does
+
+- **200 → store.** The token works.
+- **401 → do not store, and say so.** Whatever was already there is left
+  untouched. This is the whole point: a broken capture can no longer
+  destroy a working credential.
+- **Anything else → store, unverified.** Offline, proxy down, timeout,
+  and also 403 `Request not allowed` — that last one is an answer about
+  the *request*, not the token, and the API only produces it after
+  reading the credential successfully. Being unable to ask is never a
+  reason to throw a token away; an artist with no connection still
+  deserves the one they just minted.
+
+The check runs on the worker thread after the child process has finished
+printing, so a slow network can neither stall the read loop nor touch the
+UI thread.
+
+A note on the test suite: `conftest`'s `no_real_network` guard could not
+see this, because `token_check.verify` builds its own request (it needs
+headers `urlopen_fetch` cannot carry). It is stubbed there too — without
+that, the next sign-in test written would quietly call the real API.
