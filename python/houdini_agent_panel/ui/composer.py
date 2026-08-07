@@ -665,6 +665,17 @@ class Composer(QtWidgets.QWidget):
         self._info: "AgentInfo | None" = None
         self._busy = False
         self._blocked = False
+        #: Reported for real: the "+" file picker "opened again by itself"
+        #: right after a successful attach. `QFileDialog.getOpenFileNames`
+        #: on macOS is realised as a native SHEET attached to the window,
+        #: not an application-modal dialog — the rest of the app's event
+        #: loop keeps running while it's up, so a fast double-click can
+        #: deliver its second press straight to this still-enabled button
+        #: while the first dialog is still showing, opening a second one on
+        #: top of it. Set for the duration of `_on_attach_clicked`'s own
+        #: call to the dialog; a click arriving while it's `True` is
+        #: dropped rather than opening another dialog — see that method.
+        self._attach_dialog_open = False
         self._attachments: list[dict] = []
         self._all_commands: list["AvailableCommand"] = []
         self._config_chips: list[ChoiceButton] = []
@@ -1349,12 +1360,21 @@ class Composer(QtWidgets.QWidget):
         return "All files (*)"
 
     def _on_attach_clicked(self) -> None:
+        if self._attach_dialog_open:
+            # A second click landing while the picker from the FIRST one is
+            # still up (see `_attach_dialog_open`'s own comment) — dropped,
+            # not a second dialog opened on top of the first.
+            return
         if self._info is None:
             self.attachment_rejected.emit("Connect an agent before attaching files.")
             return
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self, "Attach files", "", self._attachment_filter()
-        )
+        self._attach_dialog_open = True
+        try:
+            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+                self, "Attach files", "", self._attachment_filter()
+            )
+        finally:
+            self._attach_dialog_open = False
         failed = []
         for raw_path in paths:
             path = Path(raw_path)

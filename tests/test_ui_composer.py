@@ -324,6 +324,114 @@ def test_add_attachment_without_capability_is_rejected(qapp, tmp_path):
     assert composer.add_attachment(path) is False
 
 
+# --- "+" reopening the picker by itself ----------------------------------------
+#
+# Reported for real: attached an image through "+", the chip appeared
+# correctly, and then the file picker opened again on its own. `QFileDialog.
+# getOpenFileNames` on macOS is a native SHEET, not an application-modal
+# dialog — the rest of the app's event loop keeps running while it's up, so a
+# fast double-click can deliver its second press straight to the still-
+# enabled button while the first dialog is still showing. Counting picker
+# invocations, not just checking an attachment landed (a second, cancelled
+# dialog leaves the SAME one attachment either way).
+
+
+def test_attach_click_invokes_the_picker_exactly_once(qapp, monkeypatch, tmp_path):
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    calls = []
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileNames", lambda *a, **kw: (calls.append(1), ([], ""))[1]
+    )
+
+    composer._attach_button.click()
+
+    assert len(calls) == 1
+
+
+def test_a_second_click_while_the_picker_is_still_open_is_dropped(qapp, monkeypatch, tmp_path):
+    """Simulates the reported shape directly: the SECOND click lands WHILE
+    the first dialog call is still executing (a real fast double-click
+    landing on the still-enabled button before the sheet visually steals
+    focus) — not a later, independent click. Without `_attach_dialog_open`
+    guarding `_on_attach_clicked`, this reopens the dialog a second time
+    before the first has even returned."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    calls = []
+
+    def fake_dialog(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            # The reentrant click, fired from mid-dialog — exactly what a
+            # native sheet not blocking the rest of the event loop allows.
+            composer._attach_button.click()
+        return ([], "")
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames", fake_dialog)
+
+    composer._attach_button.click()
+
+    assert len(calls) == 1, "a click landing while the picker is already open must be dropped"
+
+
+def test_drag_and_drop_never_opens_the_file_picker(qapp, monkeypatch, tmp_path):
+    """`add_attachment` is shared by the picker, drag-and-drop and paste —
+    but only the picker ever calls `QFileDialog` at all. Confirms the fault
+    can only be in `_on_attach_clicked`'s own wiring, not in the shared
+    `add_attachment` tail every route funnels through."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    calls = []
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileNames", lambda *a, **kw: (calls.append(1), ([], ""))[1]
+    )
+
+    image_path = tmp_path / "pic.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngdata")
+    # `mime` held as its own named reference, not inlined into the
+    # constructor call: `QDropEvent` does not take ownership of the
+    # `QMimeData` it's given, and a temporary with nothing else referencing
+    # it can be garbage-collected out from under the event (measured: a
+    # segfault inside `dropEvent` with the inline form).
+    mime = _mime_with_file_url(image_path)
+    event = QtGui.QDropEvent(
+        QtCore.QPointF(0, 0),
+        QtCore.Qt.CopyAction,
+        mime,
+        QtCore.Qt.LeftButton,
+        QtCore.Qt.NoModifier,
+    )
+    composer.dropEvent(event)
+
+    assert len(composer._attachments) == 1
+    assert calls == []
+
+
+def test_pasting_an_image_file_never_opens_the_file_picker(qapp, monkeypatch, tmp_path):
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_image=True), "")
+
+    calls = []
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getOpenFileNames", lambda *a, **kw: (calls.append(1), ([], ""))[1]
+    )
+
+    image_path = tmp_path / "pic.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngdata")
+    composer._text_edit.insertFromMimeData(_mime_with_file_url(image_path))
+
+    assert len(composer._attachments) == 1
+    assert calls == []
+
+
 # --- build_attachment_block directly -------------------------------------------
 
 
