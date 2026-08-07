@@ -1871,13 +1871,28 @@ class AgentPanel(QtWidgets.QWidget):
         Replaces `SessionPool.set_current` (see its removal note): a click
         in one tab's drawer, or restoring history on boot, must never move
         a sibling tab's own conversation.
+
+        Reported for real: an owner's entire history was unreachable —
+        clicking a past conversation in the drawer left the pane showing
+        whatever screen was already up (the sign-in advice text, in his
+        case), never the conversation itself. `_show_session` below DOES
+        rebuild the transcript correctly (measured directly: the model
+        ends up with the right entries, correctly keyed) — the artist just
+        never got shown it, because nothing here ever brought PAGE_
+        TRANSCRIPT forward. `_on_session_started` already does this as an
+        explicit, separate line for a brand-new live session; the drawer's
+        own click (`session_selected.connect(self._set_current_session)`,
+        wired directly, no wrapper) never did. Also fires for the "already
+        current" early return below — clicking the SAME conversation again
+        from Settings or the sign-in screen is still "take me back to it",
+        not a no-op.
         """
         if session_id not in [s.session_id for s in self._pool.all()]:
             return
-        if session_id == self._current_session_id:
-            return
-        self._current_session_id = session_id
-        self._show_session(session_id)
+        if session_id != self._current_session_id:
+            self._current_session_id = session_id
+            self._show_session(session_id)
+        self._show_page(self.PAGE_TRANSCRIPT)
 
     def _on_pool_session_removed(self, session_id: str) -> None:
         """A session left the shared pool — react only if THIS tab had it open.

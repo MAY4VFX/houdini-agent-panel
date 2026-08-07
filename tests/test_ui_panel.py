@@ -394,6 +394,48 @@ def test_closing_one_tab_leaves_the_other_receiving_updates(qapp):
     second.shutdown()
 
 
+def test_clicking_a_restored_conversation_actually_shows_it(qapp, monkeypatch):
+    """Reported for real: his entire history was unreachable — clicking a
+    past conversation in the drawer left the pane showing whatever screen
+    was up before (the sign-in advice text, in his case), not the
+    conversation's own contents. The drawer itself was fine (right count,
+    right titles, the row highlighted as selected) and the transcript MODEL
+    was fine too (loaded, correctly keyed) — only the visible PAGE never
+    came forward to PAGE_TRANSCRIPT to show it. `_on_session_started` is
+    the one place that already calls `_show_page(PAGE_TRANSCRIPT)`
+    explicitly; the drawer's click goes straight to `_set_current_session`
+    with no such step."""
+    from houdini_agent_panel import conversations_store as store
+
+    conversation = store.StoredConversation.new(title="che to ne mogu vs", cwd="/tmp", agent_id="claude-acp")
+    conversation.entries = [
+        {"kind": "user", "id": "u1", "text": "hello there"},
+        {"kind": "agent", "id": "a1", "text": "hi, how can I help"},
+    ]
+    store.save([conversation])
+
+    widget = _make_panel(qapp)
+    widget._rejoin_agent("claude-acp")
+    widget._restore_conversations()
+    restored_key = panel_mod._RESTORED_PREFIX + conversation.id
+    assert widget._pool.get(restored_key) is not None, "the conversation never entered the pool"
+
+    # The artist is on the sign-in screen — a very real starting point
+    # (`_maybe_offer_sign_in` lands here on connect) — when they open the
+    # drawer and click an old conversation.
+    widget._show_page(widget.PAGE_AUTH)
+
+    widget._conversations.session_selected.emit(restored_key)
+
+    assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT, (
+        "selecting a conversation must bring the transcript page forward"
+    )
+    assert [widget._model(restored_key).entries()[i].text for i in range(2)] == [
+        "hello there", "hi, how can I help",
+    ]
+    widget.shutdown()
+
+
 def test_switching_conversation_in_one_tab_does_not_move_the_other(qapp):
     """Issue #21: two tabs share one `SessionPool` — same session list, same
     live agent process, per `sessions.py`'s own docstring — but "which
