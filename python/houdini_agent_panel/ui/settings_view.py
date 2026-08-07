@@ -25,12 +25,15 @@ from typing import TYPE_CHECKING, Callable
 from .. import bugreport
 from .. import paths
 from .. import settings as settings_module
+from .. import updates as updates_module
 from .agents import AgentsView
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
+from .worker import Worker, release
 
 if TYPE_CHECKING:
     from ..network import Fetcher
+    from ..updates import Update
 
 _RAIL_WIDTH = 736
 #: Floor for the centered rail — see `Composer._MIN_RAIL_WIDTH`.
@@ -59,6 +62,7 @@ _MIN_RAIL_WIDTH = 180
 # the kind of drift this rewrite exists to stop.
 _ROW_LABELS = (
     "Whisper endpoint", "Data folder", "Proxy", "No proxy", "CA bundle", "Bug report endpoint",
+    "Panel", "fxhoudinimcp",
 )
 
 
@@ -262,6 +266,60 @@ class _Section(QtWidgets.QWidget):
         self._toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
 
 
+class _CheckUpdatesNowWorker(Worker):
+    """The "Check now" button: a manual, immediate version check, off the
+    main thread — independent of the "Check for updates" toggle.
+
+    `updates.check()` is the AUTOMATIC path (`ui/panel.py`'s
+    `_RefreshWorker`, feeding the quiet notice-strip banner): gated by
+    `settings.check_updates`, backed by a cache (`_FRESH_START_MAX_AGE`/
+    `_SESSION_MAX_AGE`), and — deliberately — it swallows a `NetworkError`
+    on either the panel or fx package so one unreachable PyPI response
+    never hides a real answer for the other. All three of those are wrong
+    for a button the artist just pressed: it must run regardless of the
+    toggle, right now, and it must say something specific if PyPI could
+    not be reached at all — silence after the click is exactly the
+    complaint this button exists to fix (an owner's panel sat three
+    releases behind with no way to find out short of an ssh session). So
+    this calls `pypi_latest`/`is_newer`/`_current_panel_version`/
+    `_current_fx_version` directly — the same primitives `check()` itself
+    is built from — rather than going through `check()`, and lets a
+    `NetworkError` propagate into `Worker.failed` the normal way instead
+    of being caught and hidden. It also never touches the cache file
+    `check()` reads/writes: a manual check answers the button that asked
+    for it, it does not reach into the automatic path's own bookkeeping.
+    """
+
+    #: `{"panel": Update | None, "fx": Update | None}` — a key is present
+    #: only for a package that was ACTUALLY checked (i.e. its current
+    #: version could be determined at all; fx is not importable outside a
+    #: real Houdini plugin process, which is not a network failure and
+    #: must not be reported as one).
+    done = Signal(dict)
+
+    def __init__(self, *, fetch: "Fetcher | None", parent=None) -> None:
+        super().__init__(parent)
+        self._fetch = fetch
+
+    def work(self) -> None:  # noqa: D102 - Worker.work override
+        results: dict[str, object] = {}
+        for kind, package, current in (
+            ("panel", updates_module._PANEL_PACKAGE, updates_module._current_panel_version()),
+            ("fx", updates_module._FX_PACKAGE, updates_module._current_fx_version()),
+        ):
+            if not current:
+                continue
+            latest = updates_module.pypi_latest(package, fetch=self._fetch)
+            if latest and updates_module.is_newer(latest, current):
+                results[kind] = updates_module.Update(
+                    kind=kind, target=package, label=f"{package} {latest}",
+                    current=current, latest=latest,
+                )
+            else:
+                results[kind] = None
+        self.done.emit(results)
+
+
 class SettingsView(QtWidgets.QWidget):
     changed = Signal()
     #: Forwarded straight from `AgentsView` — see its docstring. The panel
@@ -297,6 +355,14 @@ class SettingsView(QtWidgets.QWidget):
     #: any business touching; it only reports the click, same shape as
     #: `restart_agent_requested`.
     bug_report_requested = Signal()
+    #: "Update" clicked on the Panel or fxhoudinimcp row, after a "Check
+    #: now" found one — `Update` (the same record type the notice strip's
+    #: own "Update" button carries). Actually running it needs `hou`-free
+    #: process control (`SelfUpdateWorker`) that lives on `AgentPanel`, not
+    #: here (design.md's four layers) — `AgentPanel._start_update` already
+    #: handles `update.kind` "panel"/"fx" for the notice strip; connecting
+    #: this signal to that SAME method is reuse, not a second update path.
+    panel_update_requested = Signal(object)
 
     def __init__(
         self,
@@ -307,6 +373,11 @@ class SettingsView(QtWidgets.QWidget):
         before_uninstall: "Callable[[str], None] | None" = None,
     ) -> None:
         super().__init__(parent)
+        # Kept for `_CheckUpdatesNowWorker` — the same `fetch` already
+        # handed to `AgentsView` below (tests pass a `FakeFetcher`,
+        # production leaves it `None` and the worker falls back to the
+        # real network through `pypi_latest`'s own default).
+        self._fetch = fetch
         self.setObjectName("settingsOverlay")
         # This view lays over the transcript page, so it needs a slightly
         # different shade from the rest of the panel (the owner's wording).
@@ -379,6 +450,62 @@ class SettingsView(QtWidgets.QWidget):
 
         self._show_announcements_checkbox = QtWidgets.QCheckBox("Show announcements", self)
         self._show_announcements_checkbox.toggled.connect(self._on_field_changed)
+
+        # --- Version + "Check now" — the owner's own report: the panel sat
+        # on 0.8.5 with 0.8.8 already on PyPI, autoupdate never caught it,
+        # and there was no way to even SEE the running version from inside
+        # Houdini short of an ssh session onto the deps tree. Two rows
+        # (Panel, fxhoudinimcp), always showing the current version — no
+        # click required (`_refresh_version_labels`, called from `__init__`
+        # and every `reload()`) — plus one shared button that checks both
+        # immediately, regardless of the checkbox above. See
+        # `_CheckUpdatesNowWorker` for why this does not reuse `updates.
+        # check()` itself.
+        self._panel_version_label = QtWidgets.QLabel(self)
+        self._panel_version_label.setWordWrap(True)
+        self._panel_version_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self._panel_update_button = QtWidgets.QPushButton("Update", self)
+        self._panel_update_button.setVisible(False)
+        self._panel_update_button.clicked.connect(self._on_panel_update_clicked)
+        panel_version_row = QtWidgets.QHBoxLayout()
+        panel_version_row.setContentsMargins(0, 0, 0, 0)
+        panel_version_row.addWidget(self._panel_version_label, 1)
+        panel_version_row.addWidget(self._panel_update_button)
+
+        self._fx_version_label = QtWidgets.QLabel(self)
+        self._fx_version_label.setWordWrap(True)
+        self._fx_version_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self._fx_update_button = QtWidgets.QPushButton("Update", self)
+        self._fx_update_button.setVisible(False)
+        self._fx_update_button.clicked.connect(self._on_fx_update_clicked)
+        fx_version_row = QtWidgets.QHBoxLayout()
+        fx_version_row.setContentsMargins(0, 0, 0, 0)
+        fx_version_row.addWidget(self._fx_version_label, 1)
+        fx_version_row.addWidget(self._fx_update_button)
+
+        self._check_updates_now_button = QtWidgets.QPushButton("Check now", self)
+        self._check_updates_now_button.clicked.connect(self._on_check_updates_now_clicked)
+
+        # In-flight `_CheckUpdatesNowWorker`, if any — `None` the rest of
+        # the time, including right after it finishes (`_forget_check_now_
+        # worker` clears it), same shape as `AgentPanel._panel_update_worker`.
+        self._check_now_worker: "_CheckUpdatesNowWorker | None" = None
+        # What a found update's own "Update" button (above) actually acts
+        # on — set by `_on_check_now_done`, read by `_on_panel_update_
+        # clicked`/`_on_fx_update_clicked`, cleared whenever a fresh check
+        # starts.
+        self._pending_panel_update: "Update | None" = None
+        self._pending_fx_update: "Update | None" = None
+        # The text appended after " — " on each row: "", "checking…", "up
+        # to date", "update available: X", or "check failed: <reason>".
+        # Kept separate from the base "package version" text
+        # (`_panel_base_text`/`_fx_base_text`) so a re-render never has to
+        # parse its own previous label back apart.
+        self._panel_status_suffix = ""
+        self._fx_status_suffix = ""
+        self._panel_base_text = ""
+        self._fx_base_text = ""
+        self._refresh_version_labels()
 
         self._telemetry_checkbox = QtWidgets.QCheckBox(
             "Telemetry (anonymous, off by default)", self
@@ -517,6 +644,9 @@ class SettingsView(QtWidgets.QWidget):
         )
         updates_section.add_checkbox(self._check_updates_checkbox)
         updates_section.add_checkbox(self._show_announcements_checkbox)
+        updates_section.add_row("Panel", panel_version_row)
+        updates_section.add_row("fxhoudinimcp", fx_version_row)
+        updates_section.add_action_row(self._check_updates_now_button)
 
         voice_section = _Section("Voice", self, expanded=True, grid=grid_metrics)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
@@ -708,6 +838,7 @@ class SettingsView(QtWidgets.QWidget):
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
             self._ca_bundle_edit.setText(current.ca_bundle)
+            self._refresh_version_labels()
             # A reload is a fresh read of what's on disk, not an edit — the
             # invitation to restart only belongs to an edit THIS screen just
             # made (`_on_network_field_changed`).
@@ -808,14 +939,124 @@ class SettingsView(QtWidgets.QWidget):
         if clipboard is not None:
             clipboard.setText(text)
 
+    # --- version + "Check now" ------------------------------------------
+
+    def _refresh_version_labels(self) -> None:
+        """The "always visible, no click needed" half (design.md's own
+        requirement) — the base "package version" text for both rows,
+        read from what THIS process actually has loaded
+        (`updates._current_panel_version`/`_current_fx_version`), not from
+        on-disk package metadata: see that function's own docstring for
+        why the two can disagree, and what a stale answer here used to
+        cost (an update banner offering a version already applied). Any
+        status suffix from a previous "Check now" (or one still running)
+        is left exactly as it was — this only refreshes what version is
+        actually running, which can change out from under this screen
+        after a successful update + restart, or simply on `reload()`.
+        """
+        panel_version = updates_module._current_panel_version()
+        self._panel_base_text = (
+            f"houdini-agent-panel {panel_version}" if panel_version else "houdini-agent-panel — version unknown"
+        )
+        fx_version = updates_module._current_fx_version()
+        self._fx_base_text = f"fxhoudinimcp {fx_version}" if fx_version else "fxhoudinimcp — not detected"
+        self._render_panel_row()
+        self._render_fx_row()
+
+    def _render_panel_row(self) -> None:
+        text = self._panel_base_text
+        if self._panel_status_suffix:
+            text += f" — {self._panel_status_suffix}"
+        self._panel_version_label.setText(text)
+
+    def _render_fx_row(self) -> None:
+        text = self._fx_base_text
+        if self._fx_status_suffix:
+            text += f" — {self._fx_status_suffix}"
+        self._fx_version_label.setText(text)
+
+    def _on_check_updates_now_clicked(self) -> None:
+        if self._check_now_worker is not None:
+            return  # already running — a second click while it's in flight is a no-op, not a second check
+        self._pending_panel_update = None
+        self._pending_fx_update = None
+        self._panel_update_button.setVisible(False)
+        self._fx_update_button.setVisible(False)
+        self._panel_status_suffix = "checking…"
+        self._fx_status_suffix = "checking…"
+        self._render_panel_row()
+        self._render_fx_row()
+        self._check_updates_now_button.setEnabled(False)
+
+        worker = _CheckUpdatesNowWorker(fetch=self._fetch, parent=self)
+        self._check_now_worker = worker
+        worker.done.connect(self._on_check_now_done)
+        worker.failed.connect(self._on_check_now_failed)
+        worker.finished.connect(self._forget_check_now_worker)
+        worker.start()
+
+    def _forget_check_now_worker(self) -> None:
+        # `finished` fires just BEFORE the thread actually stops — same
+        # `wait()`-before-drop reasoning as `AgentsView._forget_thread`.
+        if self._check_now_worker is not None:
+            self._check_now_worker.wait()
+        self._check_now_worker = None
+        self._check_updates_now_button.setEnabled(True)
+
+    def _on_check_now_done(self, results: dict) -> None:
+        if "panel" in results:
+            update = results["panel"]
+            self._pending_panel_update = update
+            self._panel_status_suffix = f"update available: {update.latest}" if update is not None else "up to date"
+            self._panel_update_button.setVisible(update is not None)
+        else:
+            # Should not actually happen — the panel's own version is
+            # always known from inside the panel itself — but "nothing to
+            # say" beats a stale "checking…" left on screen forever.
+            self._pending_panel_update = None
+            self._panel_status_suffix = ""
+        if "fx" in results:
+            update = results["fx"]
+            self._pending_fx_update = update
+            self._fx_status_suffix = f"update available: {update.latest}" if update is not None else "up to date"
+            self._fx_update_button.setVisible(update is not None)
+        else:
+            self._pending_fx_update = None
+            self._fx_status_suffix = "not checked — fxhoudinimcp isn't importable here"
+        self._render_panel_row()
+        self._render_fx_row()
+
+    def _on_check_now_failed(self, message: str) -> None:
+        # A single shared failure: `_CheckUpdatesNowWorker` checks the
+        # panel first and lets a `NetworkError` propagate immediately
+        # rather than trying fx next — panel and fx are both fetched from
+        # pypi.org, so a network that can't reach one can't reach the
+        # other either; there is no real partial-failure case here to
+        # preserve, unlike `updates.check()`'s own per-package handling.
+        self._panel_status_suffix = f"check failed: {message}"
+        self._fx_status_suffix = f"check failed: {message}"
+        self._render_panel_row()
+        self._render_fx_row()
+
+    def _on_panel_update_clicked(self) -> None:
+        if self._pending_panel_update is not None:
+            self.panel_update_requested.emit(self._pending_panel_update)
+
+    def _on_fx_update_clicked(self) -> None:
+        if self._pending_fx_update is not None:
+            self.panel_update_requested.emit(self._pending_fx_update)
+
     def shutdown(self) -> None:
         """Forwarded to the embedded `AgentsView` — see its own `shutdown`.
         Called from `AgentPanel.shutdown()`: a `_InstallWorker` still
         running when this whole widget tree comes down is exactly the
         same hazard as this panel's own workers (docs/facts/houdini.md
-        §14), just one screen further in.
+        §14), just one screen further in. `_check_now_worker` is the same
+        hazard, one screen further still — released the same way.
         """
         self._agents_view.shutdown()
+        release(self._check_now_worker)
+        self._check_now_worker = None
 
 
 __all__ = ["SettingsView"]

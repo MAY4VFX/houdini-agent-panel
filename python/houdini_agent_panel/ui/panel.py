@@ -756,6 +756,12 @@ class AgentPanel(QtWidgets.QWidget):
         view.sign_out_requested.connect(self._on_agent_row_sign_out)
         view.restart_agent_requested.connect(self._restart_agent)
         view.bug_report_requested.connect(self._open_bug_report)
+        # Settings' own "Check now" found an update and the artist clicked
+        # its "Update" button — `_start_update` already handles `update.
+        # kind` "panel"/"fx" for the notice strip's own "Update" (the same
+        # `SelfUpdateWorker`, the same progress notice); this is a second
+        # ENTRY POINT onto that one mechanism, not a second update path.
+        view.panel_update_requested.connect(self._start_update)
         return view
 
     def _make_auth_view(self) -> QtWidgets.QWidget:

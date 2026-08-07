@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from houdini_agent_panel import paths
 from houdini_agent_panel import settings as settings_module
+from houdini_agent_panel import updates as updates_module
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 from houdini_agent_panel.ui.agents import AgentsView
 from houdini_agent_panel.ui.qt import QtCore, QtWidgets
@@ -423,3 +424,188 @@ def test_overlay_background_does_not_replace_child_control_palette(qapp):
 def test_settings_screen_does_not_pin_the_panel_wide(qapp):
     view = SettingsView()
     assert view.minimumSizeHint().width() <= 200
+
+
+# --- version + "Check now" -------------------------------------------------
+#
+# The owner's own report: the panel sat on 0.8.5 with 0.8.8 already on PyPI,
+# autoupdate never caught it, and there was no way to even see the running
+# version from inside Houdini without an ssh session onto the deps tree.
+
+
+def _wait_until(condition, *, timeout_ms: int = 5000) -> None:
+    from PySide6 import QtTest
+
+    app = QtWidgets.QApplication.instance()
+    elapsed = 0
+    step = 20
+    while not condition() and elapsed < timeout_ms:
+        app.processEvents()
+        QtTest.QTest.qWait(step)
+        elapsed += step
+    assert condition(), "condition did not become true in time"
+
+
+def test_version_row_shows_the_running_version_with_no_action_needed(qapp, monkeypatch):
+    """Item 1: always visible, before a single click — this is the whole
+    point, the owner could not tell the version without ssh."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+
+    view = SettingsView()
+
+    assert view._panel_version_label.text() == "houdini-agent-panel 0.8.5"
+    assert view._fx_version_label.text() == "fxhoudinimcp 2.10.0"
+    assert view._panel_update_button.isVisible() is False
+
+
+def test_version_row_survives_an_unreadable_fx_version(qapp, monkeypatch):
+    """`_current_fx_version()` returns `None` when fxhoudinimcp isn't
+    importable (outside a real Houdini plugin process) — the row must say
+    so plainly, not show a blank or crash."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: None)
+
+    view = SettingsView()
+
+    assert view._fx_version_label.text() == "fxhoudinimcp — not detected"
+
+
+def test_check_now_sets_the_checking_state_synchronously(qapp, fetcher, monkeypatch):
+    """The click handler sets "checking…" and disables the button on the
+    calling thread, before the worker thread has had any chance to run —
+    silence between the click and a result is exactly what this whole
+    feature exists to end."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    view = SettingsView(fetch=fetcher)
+
+    view._check_updates_now_button.click()
+
+    assert "checking…" in view._panel_version_label.text()
+    assert "checking…" in view._fx_version_label.text()
+    assert view._check_updates_now_button.isEnabled() is False
+    _wait_until(lambda: view._check_now_worker is None)
+
+
+def test_check_now_ignores_the_check_for_updates_checkbox(qapp, fetcher, monkeypatch):
+    """Item 2: "Check now" must work regardless of the auto-check toggle —
+    a manual check the artist just asked for is not gated on a setting
+    they may not even know exists."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    fetcher.add_json(updates_module.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "0.8.5"}})
+    fetcher.add_json(updates_module.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    view = SettingsView(fetch=fetcher)
+    view._check_updates_checkbox.setChecked(False)
+    assert settings_module.load().check_updates is False
+
+    view._check_updates_now_button.click()
+    _wait_until(lambda: view._check_now_worker is None)
+
+    assert fetcher.calls  # the network was actually reached, unlike updates.check() with the toggle off
+
+
+def test_check_now_reports_up_to_date(qapp, fetcher, monkeypatch):
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    fetcher.add_json(updates_module.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "0.8.5"}})
+    fetcher.add_json(updates_module.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    view = SettingsView(fetch=fetcher)
+
+    view._check_updates_now_button.click()
+    _wait_until(lambda: view._check_now_worker is None)
+
+    assert view._panel_version_label.text() == "houdini-agent-panel 0.8.5 — up to date"
+    assert view._fx_version_label.text() == "fxhoudinimcp 2.10.0 — up to date"
+    assert view._panel_update_button.isVisible() is False
+    assert view._fx_update_button.isVisible() is False
+    assert view._check_updates_now_button.isEnabled() is True
+
+
+def test_check_now_finds_a_panel_update_and_the_update_button_wires_through(qapp, fetcher, monkeypatch):
+    """Item 4: an update found by "Check now" has a real path to install
+    it — the same `SelfUpdateWorker` mechanism the notice strip's own
+    "Update" button already drives (`AgentPanel._start_update`), reached
+    here through `panel_update_requested`."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    fetcher.add_json(updates_module.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "0.8.9"}})
+    fetcher.add_json(updates_module.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    view = SettingsView(fetch=fetcher)
+    view.show()  # isVisible() below follows the whole ancestor chain — see test_grid_measuring_labels_never_render_over_the_page
+    requested = []
+    view.panel_update_requested.connect(requested.append)
+
+    view._check_updates_now_button.click()
+    _wait_until(lambda: view._check_now_worker is None)
+
+    assert view._panel_version_label.text() == "houdini-agent-panel 0.8.5 — update available: 0.8.9"
+    assert view._panel_update_button.isVisible() is True
+    assert view._fx_update_button.isVisible() is False
+
+    view._panel_update_button.click()
+
+    assert len(requested) == 1
+    update = requested[0]
+    assert update.kind == "panel"
+    assert update.target == "houdini-agent-panel"
+    assert update.latest == "0.8.9"
+    assert update.current == "0.8.5"
+
+
+def test_check_now_finds_an_fx_update(qapp, fetcher, monkeypatch):
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    fetcher.add_json(updates_module.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "0.8.5"}})
+    fetcher.add_json(updates_module.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.11.0"}})
+    view = SettingsView(fetch=fetcher)
+    view.show()
+    requested = []
+    view.panel_update_requested.connect(requested.append)
+
+    view._check_updates_now_button.click()
+    _wait_until(lambda: view._check_now_worker is None)
+
+    assert view._fx_version_label.text() == "fxhoudinimcp 2.10.0 — update available: 2.11.0"
+    assert view._fx_update_button.isVisible() is True
+
+    view._fx_update_button.click()
+
+    assert len(requested) == 1
+    assert requested[0].kind == "fx"
+    assert requested[0].target == "fxhoudinimcp"
+
+
+def test_check_now_reports_a_network_failure_plainly(qapp, monkeypatch):
+    """Item 3: a check that could not reach PyPI must say so, not sit
+    silent or claim "up to date" — the exact silence that cost the owner
+    three versions of not knowing."""
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    # No fetcher fixture registered for either URL — FakeFetcher raises NetworkError.
+    from tests.conftest import FakeFetcher
+
+    view = SettingsView(fetch=FakeFetcher())
+
+    view._check_updates_now_button.click()
+    _wait_until(lambda: view._check_now_worker is None)
+
+    assert "check failed" in view._panel_version_label.text().lower()
+    assert "check failed" in view._fx_version_label.text().lower()
+    assert view._check_updates_now_button.isEnabled() is True
+
+
+def test_a_second_click_while_checking_is_a_noop(qapp, fetcher, monkeypatch):
+    monkeypatch.setattr(updates_module, "_current_panel_version", lambda: "0.8.5")
+    monkeypatch.setattr(updates_module, "_current_fx_version", lambda: "2.10.0")
+    fetcher.add_json(updates_module.PYPI_URL.format(name="houdini-agent-panel"), {"info": {"version": "0.8.5"}})
+    fetcher.add_json(updates_module.PYPI_URL.format(name="fxhoudinimcp"), {"info": {"version": "2.10.0"}})
+    view = SettingsView(fetch=fetcher)
+
+    view._check_updates_now_button.click()
+    first_worker = view._check_now_worker
+    view._check_updates_now_button.click()  # while the button is already disabled
+
+    assert view._check_now_worker is first_worker
+    _wait_until(lambda: view._check_now_worker is None)
