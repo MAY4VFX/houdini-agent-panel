@@ -741,6 +741,83 @@ def test_terminal_login_says_nothing_extra_once_a_url_was_already_shown(qapp, mo
     widget.shutdown()
 
 
+def test_terminal_login_exit_with_credential_evidence_says_signed_in(qapp, monkeypatch):
+    """docs/facts/acp-sdk.md §20: a real report — the owner's browser page
+    showed no code at all, just "you can close this window", so there was
+    never a code to submit and "process ended (exit 0)" alone left him with
+    no idea whether it actually worked. A clean exit plus credential
+    evidence (`signin_evidence`, the SAME check `_maybe_offer_sign_in`
+    already uses, not a second definition of "signed in") is the real
+    success signal for this variant."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    monkeypatch.setattr(signin_evidence_mod, "has_credential_evidence", lambda *a, **kw: True)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+
+    widget._on_terminal_login_exited(0)
+
+    text = widget._auth_view._pending_label.text()
+    assert "signed in" in text.lower()
+    widget.shutdown()
+
+
+def test_terminal_login_exit_without_credential_evidence_stays_neutral(qapp, monkeypatch):
+    """No evidence on disk -> the existing, deliberately neutral message
+    (docs/facts/acp-sdk.md's own "not evidence of success OR failure"
+    reasoning) — never claim "Signed in." without something checkable
+    backing it."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    monkeypatch.setattr(signin_evidence_mod, "has_credential_evidence", lambda *a, **kw: False)
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_terminal_login_exited(0)
+
+    assert not any("signed in" in n.lower() for n in notes)
+    assert any("exit 0" in n for n in notes)
+    widget.shutdown()
+
+
+def test_terminal_login_nonzero_exit_never_checks_credential_evidence(qapp, monkeypatch):
+    """A cancelled or failed attempt must not be reported as "Signed in."
+    just because OLDER, unrelated credentials happen to already be on
+    disk — gated on a clean exit specifically."""
+    from houdini_agent_panel import signin_evidence as signin_evidence_mod
+
+    checked: list[bool] = []
+    monkeypatch.setattr(
+        signin_evidence_mod,
+        "has_credential_evidence",
+        lambda *a, **kw: (checked.append(True), True)[1],
+    )
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._show_page(widget.PAGE_AUTH)
+    widget._terminal_login_url_shown = True
+    widget._auth_view.set_terminal_login_link("https://example.com/authorize", "")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+
+    widget._on_terminal_login_exited(1)
+
+    assert checked == []
+    assert any("exit 1" in n for n in notes)
+    widget.shutdown()
+
+
 def test_terminal_login_spawn_failure_also_falls_back_to_the_command(qapp, monkeypatch):
     """`work()` raising before ever spawning anything readable (e.g. the
     command doesn't exist) gets the same fallback as a process that ran

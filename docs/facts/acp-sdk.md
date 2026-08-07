@@ -2080,3 +2080,68 @@ terminal probably means something different there (`ConPTY`, not POSIX
 `pty`), and that measurement is future work, not something to guess at
 here. Until then, `setup-token` on Windows stays exactly as silent as it
 was before this section — no worse, not fixed either.
+
+### A second live report: the browser page shows no code at all
+
+Owner correction, direct observation on his own machine, not recollection:
+the browser page this build sends the artist to says only that the window
+can be closed — no code, nothing to copy, nothing to paste. §14's own
+measured prompt text — "Paste code here **if prompted**" — already said
+this in the wording; the paste-back step this whole module was built
+around is conditional, not universal. A flow that completes entirely on
+the server side never prints anything for a human to act on, so a panel
+waiting only for `input_requested` before it considers anything
+"actionable" can be waiting for something that will never come.
+
+**Established without completing anyone's login** — a live, real process
+on mayfx02 made this checkable directly, no browser ever visited:
+
+- The owner's OWN already-stuck process (pid 3748010, spawned by the
+  pre-fix, plain-pipe build) was watched, read-only, for over a minute:
+  `ss -tnp` and `/proc/<pid>/fd` never showed a single network connection,
+  fd count never changed (steady at 9: two pipes, an eventpoll, an
+  eventfd, `/dev/urandom`, its own `/proc/<pid>/statm`), `/proc/<pid>/
+  wchan` sat on `do_epoll_wait` throughout. `~/.claude/.credentials.json`
+  does not exist. Plain pipes don't just suppress the CLI's OUTPUT (§20's
+  main finding) — this process never even opened a connection to try to
+  complete anything. It is not "waiting for a code that will never come";
+  it is doing nothing at all, network included.
+- A SEPARATE, fresh `setup-token` attempt (own new OAuth state, never the
+  owner's own flow) spawned under a real pty, taken to the same prompt,
+  then only WATCHED — the URL was never opened in a browser, nothing was
+  ever written back. Within ~10 seconds of reaching the prompt, `ss -tnp`
+  showed a genuine outbound HTTPS connection (port 443) to the CLI's own
+  backend, held **ESTABLISHED continuously for the full 45-second
+  observation window** — a long-poll/SSE-shaped wait, not a one-shot
+  request. Killed at the end of the window; nothing was ever typed, no
+  browser tab was ever opened.
+
+Read together: this build has a real, working background channel for
+completing the exchange without any typed code — exactly the shape the
+"no code at all" report describes — and it only opens under a real
+controlling terminal, same root cause as everything else in this section.
+The pty fix already shipped here should let that channel do its job. What
+it does NOT establish (deliberately not pushed further, per instructions:
+completing this measurement for real would mean finishing someone's actual
+sign-in, the owner's call to make, not ours) is what the CLI prints or
+exits with once that channel actually reports success — only that it is
+genuinely trying, actively, the whole time it sits at the prompt.
+
+### The fix: check for completion, not only for a prompt
+
+`_on_terminal_login_exited` (`ui/panel.py`) used to report every exit the
+same uninformative way once a URL had been shown — "Terminal login process
+ended (exit N)" — deliberately treating the exit code as neither success
+nor failure (a completed ACP turn remained, and remains, the one signal
+the rest of the file trusts, `_remember_signed_in`). That was fine when a
+paste-back step existed to reassure the artist something was progressing;
+it leaves nothing at all to look at for the no-code variant above.
+
+Now, on a clean exit (`exit_code == 0`) specifically, it checks
+`signin_evidence.has_credential_evidence` — the SAME check `_maybe_offer_
+sign_in` already uses at connect time, not a second definition of "signed
+in" — and reports "Signed in." when it finds something. Gated on a clean
+exit so a cancelled attempt on a machine that happens to already have
+older, unrelated credentials doesn't get a false "Signed in." A non-zero
+exit, or a zero exit with nothing found, keeps the original neutral
+message unchanged.

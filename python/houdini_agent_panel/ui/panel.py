@@ -3404,6 +3404,29 @@ class AgentPanel(QtWidgets.QWidget):
             self._note(message)
             self._auth_view.set_pending(message)
             return
+        # A real, live report (docs/facts/acp-sdk.md §20): the owner's own
+        # browser page showed no code at all, just "you can close this
+        # window" — a variant that never gives `_on_terminal_login_input_
+        # submitted` anything to react to. "Terminal login process ended
+        # (exit N)" alone would leave the artist with no idea whether that
+        # actually worked. `signin_evidence.has_credential_evidence` is the
+        # SAME check `_maybe_offer_sign_in` already uses at connect time —
+        # reused here rather than inventing a second definition of "signed
+        # in", and gated on a clean exit so a cancelled attempt on a machine
+        # that happened to have older, unrelated credentials still gets the
+        # neutral message below, not a false "Signed in.".
+        #
+        # Still not the LAST word either way — a completed turn
+        # (`_remember_signed_in`, via `_on_turn_finished`) remains the one
+        # signal the rest of this file treats as proof; this only replaces
+        # an uninformative exit message with a genuinely checkable one.
+        if exit_code == 0:
+            env = shellenv.merged(dict(os.environ))
+            if signin_evidence.has_credential_evidence(self._agent_id, env=env):
+                message = "Signed in."
+                self._note(message)
+                self._auth_view.set_pending(message)
+                return
         self._note(f"Terminal login process ended (exit {exit_code}).")
 
     def _on_terminal_login_failed(self, message: str) -> None:
