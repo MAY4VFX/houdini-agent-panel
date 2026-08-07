@@ -446,7 +446,15 @@ class AgentPanel(QtWidgets.QWidget):
         #: "never tell me again." A fresh tab, or a Houdini restart, offers
         #: it again if it's still warranted by then.
         self._dismissed_signin_offers: set[str] = set()
-        self._models: dict[str, TranscriptModel] = {}
+        # `self._models` and `self._conversation_ids` (below) are properties,
+        # not plain dicts set here — see them by `_pool` for why: a
+        # session's transcript and its stored-conversation id are facts
+        # about the SESSION, shared process-wide per agent id
+        # (`sessions.models`/`sessions.conversation_ids`), not about this
+        # tab. Kept as instance-attribute-shaped properties (not renamed)
+        # so every existing `self._models[...]`/`self._conversation_ids[...]`
+        # call site below keeps working unchanged, against whichever
+        # agent's dict `self._agent_id` currently names.
         self._pending_permissions: dict[str, str] = {}
         self._permission_views: dict[str, PermissionView] = {}
         self._permission_popover: PermissionRow | None = None
@@ -466,9 +474,6 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_agent_label: str = ""
         #: Blocks typed before any session existed, waiting for `session/new`.
         self._pending_prompt: list | None = None
-        #: Our own conversation id per live agent session. The agent's id
-        #: dies with its process; this one is what survives.
-        self._conversation_ids: dict[str, str] = {}
         #: Session ids already checked against `settings.config_options_by_
         #: agent` — see `_reapply_remembered_config`. Once per session: a
         #: later `config_option_update` reflects a live choice (the
@@ -1858,6 +1863,19 @@ class AgentPanel(QtWidgets.QWidget):
     def _pool(self) -> sessions.SessionPool:
         """THIS tab's own agent's session list — see `self._agent_id`."""
         return sessions.pool(self._agent_id)
+
+    @property
+    def _models(self) -> dict[str, TranscriptModel]:
+        """THIS agent's transcripts, process-wide — see `sessions.models`'s
+        own docstring for why this is shared the same way `self._pool` is,
+        not a plain dict local to this tab."""
+        return sessions.models(self._agent_id)
+
+    @property
+    def _conversation_ids(self) -> dict[str, str]:
+        """THIS agent's session-id -> stored-conversation-id map,
+        process-wide — see `sessions.conversation_ids`'s own docstring."""
+        return sessions.conversation_ids(self._agent_id)
 
     def _current_session(self) -> sessions.SessionState | None:
         """Whichever session THIS tab has open — see `_current_session_id`."""

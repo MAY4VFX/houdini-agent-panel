@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .transcript_model import Entry
+from .transcript_model import Entry, TranscriptModel
 from .ui.qt import QtCore, Signal
 
 
@@ -191,7 +191,48 @@ def pool(agent_id: str) -> SessionPool:
     return _pools[agent_id]
 
 
+#: Transcript content per session id, one dict per agent id — process-wide,
+#: same reasoning as `_pools` immediately above, and not a smaller thing:
+#: a session's transcript is a fact about the SESSION, exactly like the
+#: `SessionState` in `_pools` is. Living on `AgentPanel` instead (as
+#: `self._models`, before this) meant every tab attached to an agent built
+#: its OWN copy from the client's broadcast signals — `session_started`,
+#: `message_chunk`, ... reach every tab wired to that agent, not just
+#: whichever one happens to be showing a given session (`ui/panel.py::
+#: AgentPanel._wire_client`). A second, otherwise idle tab reacted to a
+#: session it never asked for exactly like the tab that opened it, so two
+#: tabs on one agent ended up with two different, incomplete transcripts
+#: for the one live session — and, once both persisted, two different
+#: `StoredConversation`s on disk for what was a single conversation.
+#: Reported for real: 6 of an owner's 49 saved conversations were exactly
+#: this, in three duplicate pairs.
+_model_pools: dict[str, dict[str, TranscriptModel]] = {}
+
+#: Which stored conversation id a session id belongs to, one dict per
+#: agent id — same reasoning as `_model_pools` immediately above: this is
+#: also a fact about the session, not the tab. Keeping it per-tab used to
+#: let a second tab mint its OWN, different conversation id for a session
+#: the first tab had already given one, which is the other half of the
+#: duplicate-conversation bug `_model_pools` describes: even a session
+#: whose transcript happened to end up identical in both tabs still got
+#: saved twice, under two different ids.
+_conversation_id_pools: dict[str, dict[str, str]] = {}
+
+
+def models(agent_id: str) -> dict[str, TranscriptModel]:
+    """This one agent id's transcripts, process-wide — see `_model_pools`."""
+    return _model_pools.setdefault(agent_id, {})
+
+
+def conversation_ids(agent_id: str) -> dict[str, str]:
+    """This one agent id's session-id -> stored-conversation-id map,
+    process-wide — see `_conversation_id_pools`."""
+    return _conversation_id_pools.setdefault(agent_id, {})
+
+
 def reset_pool_for_tests() -> None:
     """Tests only: the singletons would otherwise survive between tests."""
-    global _pools
+    global _pools, _model_pools, _conversation_id_pools
     _pools = {}
+    _model_pools = {}
+    _conversation_id_pools = {}
