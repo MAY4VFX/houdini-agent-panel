@@ -2159,6 +2159,17 @@ def test_an_unconfigured_agent_is_told_apart_from_a_stuck_one(qapp, monkeypatch)
     methods, so it had nothing to show and said "it may be busy or stuck, try
     switching agents" — a loop with no exit, since every other agent behaves
     the same way on that machine.
+
+    `claude-acp` specifically (not just any agent with no methods) — this
+    used to route through a second, un-corrected copy of "type /login",
+    the exact guess `_offer_login_command` was fixed elsewhere NOT to make
+    for claude-acp (measured: an empty `availableCommands` list). There is
+    no live session at the point `_report_stalled_new_session` runs
+    (`session/new` is what stalled), so it can never confirm a real
+    `/login` command either way — the honest answer is the SAME per-agent
+    advice `_offer_login_command`/`_no_methods_advice` already give
+    (`claude setup-token`), not a blind guess that a later measurement
+    showed was wrong for this exact agent.
     """
     from houdini_agent_panel import client as client_mod
     from houdini_agent_panel.ui import panel as panel_mod
@@ -2182,11 +2193,46 @@ def test_an_unconfigured_agent_is_told_apart_from_a_stuck_one(qapp, monkeypatch)
     widget._report_stalled_new_session(set())
 
     assert notes, "the artist was told nothing at all"
-    assert "/login" in notes[-1], f"the way out was not named: {notes[-1]!r}"
     assert "switching agents" not in notes[-1], "still sending them round the loop"
-    assert widget._composer._text_edit.toPlainText() == "/login", (
-        "the command should be ready to send, not merely mentioned"
+    assert "claude setup-token" in notes[-1], (
+        f"claude-acp's own measured advice was not given: {notes[-1]!r}"
     )
+    assert widget._composer._text_edit.toPlainText() == "", (
+        "no live session exists yet to have confirmed a /login command — "
+        "typing it in anyway is the exact guess this fix removes"
+    )
+    widget.shutdown()
+
+
+def test_a_stalled_session_offers_login_for_an_agent_whose_no_methods_advice_is_generic(
+    qapp, monkeypatch
+):
+    """The other side of the same fix: an agent NOT in `_NO_METHODS_ADVICE`
+    still gets the shared, generic no-methods advice — not the panel's
+    OWN blind "/login" guess and not silence."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("some-other-agent")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id),
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="Some Other Agent", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(),
+        ),
+        raising=False,
+    )
+
+    widget._report_stalled_new_session(set())
+
+    assert notes, "the artist was told nothing at all"
+    assert panel_mod.AgentPanel._GENERIC_NO_METHODS_ADVICE in notes[-1]
     widget.shutdown()
 
 

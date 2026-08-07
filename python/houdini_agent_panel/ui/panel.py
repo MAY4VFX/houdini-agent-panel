@@ -2056,8 +2056,16 @@ class AgentPanel(QtWidgets.QWidget):
 
         The agents all take the same way out, the one Zed's own docs give:
         run their `/login` inside the session. So offer that instead of a
-        diagnosis we know is wrong — and put the command in the composer, so
-        it costs a keystroke rather than knowing it exists.
+        diagnosis we know is wrong — routed through `_offer_login_command`,
+        not a second copy of its advice: this used to say "type /login"
+        unconditionally, the exact assumption that method itself was fixed
+        NOT to make (`claude-acp` measured reporting an empty command
+        list — see its own docstring). There is no live session yet at
+        this point (`session/new` is what stalled), so `_has_login_
+        command()` can never confirm one either way here — which is
+        exactly why deferring to the shared, measured `_no_methods_advice`
+        fallback is the honest answer, not a regression: a blanket "type
+        /login" was never more than a guess in this branch to begin with.
         """
         self._composer.cancel_boot()
         if self._closed:
@@ -2068,14 +2076,7 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client(self._agent_id)
         info = client.agent_info()
         if info is not None and not info.auth_methods:
-            label = self._pending_agent_label or info.name
-            self._note(
-                f"{label} connected but hasn't opened a conversation, and it "
-                f"offers no sign-in method — which usually means it isn't set "
-                f"up yet. Most agents are signed in with their own /login "
-                f"command; it's ready in the input box below."
-            )
-            self._composer.set_text("/login")
+            self._offer_login_command(info)
             return
         self._note(
             "The agent hasn't opened a new conversation. It may be busy or "
