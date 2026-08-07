@@ -862,3 +862,47 @@ def test_a_real_pty_run_reports_the_width_we_set(qapp, tmp_path):
     from houdini_agent_panel.ui import terminal_login as tl
 
     assert any(f"cols={tl._PTY_COLUMNS}" in line for line in lines), lines
+
+
+def test_shape_for_log_shows_escapes_and_hides_the_secret():
+    """The diagnostic that was missing all three times a token got
+    corrupted between the pty and settings.json.
+
+    The log only ever recorded text after `_strip_ansi` had run, so it
+    could never show which escape did the damage. This records the raw
+    bytes with every long run masked: escapes stay visible, the secret
+    does not survive.
+    """
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    # The exact corruption measured on Linux: a CSI whose final byte is
+    # the token's own "o" (sk-ant-oat01- arriving as sk-ant-at01-).
+    raw = "sk-ant-\x1b[oat01-" + "A" * 90
+    shape = tl._shape_for_log(raw)
+
+    assert "\\x1b[" in shape, shape
+    assert "sk-ant-" in shape, "the non-secret prefix must stay readable"
+    assert "<96>" in shape, "the long run must be replaced by its length"
+    assert "A" * 24 not in shape, "no long run of the secret may survive"
+
+    # And the damage it causes, so the test states the actual defect.
+    assert tl._strip_ansi(raw).startswith("sk-ant-at01-")
+
+
+def test_shape_for_log_keeps_the_secret_out_of_a_styled_line_too():
+    """A known limitation, asserted rather than glossed over: an SGR
+    sequence's own parameter bytes are token-shaped, so `\\x1b[2m` merges
+    into the run that follows it and is reported as part of its length.
+
+    That costs nothing for the job this exists to do — the position of
+    each `\\x1b` is what identifies the sequence that ate a character,
+    and that survives. What must never survive is the secret.
+    """
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    raw = "\x1b[2msk-ant-oat01-" + "B" * 90 + "\x1b[0m"
+    assert tl._strip_ansi(raw).startswith("sk-ant-oat01-")
+
+    shape = tl._shape_for_log(raw)
+    assert "B" * 24 not in shape, "the secret must not survive"
+    assert shape.count("\\x1b") == 2, f"both escapes must stay visible: {shape}"

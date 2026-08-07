@@ -290,6 +290,29 @@ def _is_spinner_noise(line: str) -> bool:
 _LOOKS_LIKE_A_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\.]{24,}")
 
 
+#: Long enough that a secret can't be reconstructed from what survives,
+#: short enough that `sk-ant-` — the part that turned out to matter — is
+#: still printed literally.
+_SHAPE_RUN_RE = re.compile(r"[A-Za-z0-9_\-\.]{8,}")
+
+
+def _shape_for_log(raw: str) -> str:
+    """The escape structure of a line, with every long run masked.
+
+    Twice now a token has been silently corrupted between the pty and
+    `settings.json` — once truncated by line wrapping (§25), once a
+    single character short — and both times the log could not say where,
+    because it only ever recorded text AFTER `_strip_ansi` had already
+    run. A stripped line cannot show which escape did the stripping.
+
+    This records the raw bytes instead, with every run of 8+ token-shaped
+    characters replaced by its length. Escape sequences survive intact
+    and visible; a secret does not survive at all. Emitted only during
+    the token flow, so it costs nothing on a normal run.
+    """
+    return repr(_SHAPE_RUN_RE.sub(lambda m: f"<{len(m.group(0))}>", raw))
+
+
 def _redact_for_log(line: str) -> str:
     def _mask(match: "re.Match[str]") -> str:
         return f"<{len(match.group(0))} chars redacted>"
@@ -700,8 +723,13 @@ class TerminalLoginWorker(Worker):
                 # output again — see `_FORCE_FLUSH_CHARS`.
                 if char not in ("\n", "\r"):
                     buffer += char
+                raw = buffer
                 line = _strip_ansi(buffer)
                 buffer = ""
+                if self._token_flow_active:
+                    # Raw, pre-strip structure — the one thing missing
+                    # every time this has gone wrong. See `_shape_for_log`.
+                    _log.info("terminal login raw shape: %s", _shape_for_log(raw))
                 if not line.strip() or _is_spinner_noise(line):
                     continue
                 if not self._token_flow_active and _marker_in(_OAUTH_TOKEN_LABEL, line):
@@ -714,7 +742,16 @@ class TerminalLoginWorker(Worker):
                 if token:
                     self._awaiting_token_value = False
                     self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token)
-                    _log.info("terminal login: OAuth token captured (%s)", _OAUTH_TOKEN_ENV_VAR)
+                    # The length is not a secret, and it is the single
+                    # cheapest tripwire there is: a token 79 characters
+                    # long (§25) or one character short is obvious here
+                    # and invisible everywhere else until the agent's
+                    # first prompt fails.
+                    _log.info(
+                        "terminal login: OAuth token captured (%s), %d characters",
+                        _OAUTH_TOKEN_ENV_VAR,
+                        len(token),
+                    )
                 self._emit_line(line)
                 if any(_marker_in(marker, line) for marker in _INPUT_PROMPT_MARKERS):
                     self.input_requested.emit()
