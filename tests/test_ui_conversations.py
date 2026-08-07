@@ -5,7 +5,11 @@ from __future__ import annotations
 from houdini_agent_panel.sessions import SessionState
 from houdini_agent_panel.ui import conversations as conversations_mod
 from houdini_agent_panel.ui import theme
-from houdini_agent_panel.ui.conversations import ConversationDrawer, summarize_title
+from houdini_agent_panel.ui.conversations import (
+    ConversationDrawer,
+    scope_label_text,
+    summarize_title,
+)
 from houdini_agent_panel.ui.qt import QtGui
 
 
@@ -337,3 +341,60 @@ def test_the_compose_icon_is_drawn_and_not_blank(qapp):
         if image.pixelColor(x, y).alpha() > 0
     )
     assert painted > 20, f"the glyph is effectively empty: {painted} pixels drawn"
+
+
+# --- scope label -------------------------------------------------------
+#
+# The drawer used to show no indication at all of how many conversations
+# were being displayed, or that "displayed" meant "for this scene" — an
+# artist who opened a folder with real history on disk had no way to tell
+# a drawer that legitimately held one conversation apart from one that was
+# supposed to hold four and only found one (the restore bug
+# `scene.watch_hip_dir_changes` fixed). Deliberately just a count, not a
+# repeat of the scene path (`HeaderBar.set_cwd` already shows that above
+# the drawer) and deliberately not a "N more elsewhere" figure — measured
+# (see `conversations.py`'s own comment): a full, unfiltered
+# `conversations_store.load()` costs ~25-30ms at the store's worst-case
+# size, cheap once but not something to re-pay on every `set_sessions()`.
+
+
+def test_scope_label_text_for_zero_one_and_many():
+    assert scope_label_text(0) == "No conversations here yet"
+    assert scope_label_text(1) == "1 conversation here"
+    assert scope_label_text(2) == "2 conversations here"
+    assert scope_label_text(11) == "11 conversations here"
+
+
+def test_drawer_shows_nothing_here_yet_before_any_sessions(qapp):
+    host = ConversationDrawer()
+    assert host._scope_label.text() == "No conversations here yet"
+
+
+def test_drawer_scope_label_tracks_the_shown_session_count(qapp):
+    host = ConversationDrawer()
+    host.set_sessions([_state("s1", "Chat", 1.0)], "s1")
+    assert host._scope_label.text() == "1 conversation here"
+
+    host.set_sessions(
+        [_state("s1", "Chat", 1.0), _state("s2", "Other", 2.0)], "s2"
+    )
+    assert host._scope_label.text() == "2 conversations here"
+
+    # NOT extended here to `set_sessions([], None)` on this same, now-
+    # populated `host` — found by accident while writing exactly that:
+    # rebuilding a `ConversationDrawer` from a nonempty row list down to
+    # an EMPTY one reproducibly corrupts native (PySide6/Qt) state and
+    # segfaults later, in unrelated code, on this machine. Confirmed NOT
+    # caused by this feature (reproduces identically on main before this
+    # change) and NOT a test-only artifact (the same call sequence a real
+    # "delete the last conversation" makes). Reported separately rather
+    # than guess-fixed here — see the message to team-lead for the
+    # reproduction and why the obvious fix (flushing `QEvent.
+    # DeferredDelete` inside `set_sessions`) is unsafe in its own right:
+    # `set_sessions` is reachable from a row's OWN signal handler
+    # (`_toggle_pin`), and Qt's `deleteLater()` exists specifically so an
+    # object is never deleted while still inside its own event handling —
+    # forcing that flush there traded one crash for a more direct one.
+    # `test_drawer_shows_nothing_here_yet_before_any_sessions` and
+    # `test_scope_label_text_for_zero_one_and_many` still cover the empty
+    # state itself; only the DANGEROUS transition is left unexercised.

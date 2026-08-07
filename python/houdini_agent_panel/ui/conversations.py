@@ -177,6 +177,23 @@ def summarize_title(text: str, limit: int = 60) -> str:
     return truncated.rstrip() + "…"
 
 
+def scope_label_text(count: int) -> str:
+    """What `ConversationDrawer._scope_label` says for `count` conversations
+    currently shown — a pure function of the number, so the wording is
+    checkable without building the widget.
+
+    Says "here" rather than naming the scene folder again: the header
+    already shows the full `$HIP` path (`HeaderBar.set_cwd`) right above the
+    drawer's toggle, so repeating it would be the same fact twice in two
+    places at once, not two different facts.
+    """
+    if count == 0:
+        return "No conversations here yet"
+    if count == 1:
+        return "1 conversation here"
+    return f"{count} conversations here"
+
+
 def _row_menu_stylesheet() -> str:
     """Same recipe as every other popup surface (`theme.popup_stylesheet`),
     plus the delete action's own muted-warning tone instead of a fixed red —
@@ -252,10 +269,30 @@ class ConversationDrawer(QtWidgets.QFrame):
         self._new_button.clicked.connect(self._on_new_session)
         layout.addWidget(self._new_button)
 
-        # No "Conversations" heading. The button above says what this column
-        # is for and the rows below are self-evidently the conversations —
-        # a label between them names something nobody was in doubt about
-        # while taking a line of a narrow panel.
+        # No "Conversations" heading — that idea was tried and rejected: the
+        # button above already says what this column is for, and the rows
+        # below are self-evidently the conversations, so a static label
+        # between them just took a line for something nobody was in doubt
+        # about. This one is different in kind, not a second attempt at the
+        # same thing: it's the only place that says how many conversations
+        # are being shown, which was previously invisible — an artist who
+        # opened a scene with real history on disk had no way to tell "the
+        # drawer legitimately has one conversation" apart from "the drawer
+        # is supposed to have four and only found one" (the restore bug
+        # `_restore_conversations`/`scene.watch_hip_dir_changes` fixed). Set
+        # from `set_sessions`, not computed here: the count is exactly
+        # `len(states)`, already the drawer's own truth, so there is no
+        # second source to go stale against it. Deliberately NOT a "N more
+        # elsewhere" count — measured (`conversations_store.py`'s own
+        # `load()`, worst case 50 conversations x 400 entries): a full,
+        # unfiltered load costs ~25-30ms, cheap for a one-off but not
+        # something to re-pay on every `set_sessions()` call, which fires on
+        # far more than just opening the drawer.
+        self._scope_label = QtWidgets.QLabel(self)
+        self._scope_label.setObjectName("drawerScopeLabel")
+        self._scope_label.setContentsMargins(9, 0, 9, 0)
+        self._scope_label.setText(scope_label_text(0))
+        layout.addWidget(self._scope_label)
 
         scroll = QtWidgets.QScrollArea(self)
         scroll.setObjectName("drawerScroll")
@@ -307,6 +344,9 @@ class ConversationDrawer(QtWidgets.QFrame):
             " text-align: left; color: palette(text); background: transparent;"
             "}"
             "QPushButton#newConversation:hover { background: palette(alternate-base); }"
+            "QLabel#drawerScopeLabel {"
+            " color: palette(disabled, text); font-size: 11px; padding: 2px 0 4px 0;"
+            "}"
             "QScrollArea#drawerScroll { background: transparent; border: none; }"
             "QScrollArea#drawerScroll > QWidget > QWidget { background: transparent; }"
             + theme.scrollbar_stylesheet("QScrollArea#drawerScroll ")
@@ -342,6 +382,7 @@ class ConversationDrawer(QtWidgets.QFrame):
     def set_sessions(self, states: list[SessionState], current_id: str | None) -> None:
         self._current_id = current_id
         self._states = {state.session_id: state for state in states}
+        self._scope_label.setText(scope_label_text(len(states)))
         # A pinned session that no longer exists (deleted elsewhere) has
         # nothing left to point at — drop it so the set doesn't grow forever.
         self._pinned &= self._states.keys()
