@@ -368,6 +368,75 @@ def test_group_summary_reports_a_result_once_the_run_finishes(qapp):
     assert "2" in row._summary.text()
 
 
+# --- group header status, given the children's own statuses -----------------
+#
+# Reported for real, with a screenshot: a collapsed group's header read
+# "✕ failed" while every single one of its 31 tools, expanded, read "✓ done"
+# — the summary contradicting its own contents. `_sync_summary` recomputes
+# the header from `self._step_rows[...]._tool.status` for every entry in the
+# group EVERY time it runs (`update_tool`/`add_tool` both call it
+# unconditionally, and it never caches a previous result) — these assert on
+# the header text directly, for the exact set of child statuses the report
+# describes and the ones either side of it.
+
+
+def test_group_summary_reads_completed_when_every_step_is_done(qapp):
+    """The exact case from the report: every child status is "completed" —
+    the header must read "done", never "failed"."""
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", status="completed"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", status="completed"))
+    view.refresh(e2.id)
+    e3 = model.apply_tool_call(_tool_call(tool_call_id="tc3", status="completed"))
+    view.refresh(e3.id)
+
+    row = view._rows[e1.id]
+    assert "done" in row._summary.text()
+    assert "failed" not in row._summary.text()
+
+
+def test_group_summary_reads_failed_when_a_step_genuinely_failed(qapp):
+    """The other half of the same contract: a real failure among the
+    children must still show as "failed" — this is not about hiding
+    failures, only about not reporting one that isn't there."""
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", status="completed"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", status="failed"))
+    view.refresh(e2.id)
+
+    row = view._rows[e1.id]
+    assert "failed" in row._summary.text()
+
+
+def test_group_summary_recovers_after_a_step_that_failed_then_succeeds(qapp):
+    """A step reporting "failed" and later "completed" for the SAME
+    tool_call_id (an agent retrying internally and succeeding, without
+    minting a new id) must leave the header reading "done" once every
+    child has settled — not frozen at whatever it read at the moment the
+    failure was still current."""
+    view, model = _view_and_model()
+    e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", status="completed"))
+    view.refresh(e1.id)
+    e2 = model.apply_tool_call(_tool_call(tool_call_id="tc2", status="in_progress"))
+    view.refresh(e2.id)
+
+    model.apply_tool_update(_tool_update(tool_call_id="tc2", status="failed"))
+    view.refresh(e2.id)
+    row = view._rows[e1.id]
+    assert "failed" in row._summary.text()
+
+    model.apply_tool_update(_tool_update(tool_call_id="tc2", status="completed"))
+    view.refresh(e2.id)
+
+    assert "done" in row._summary.text()
+    assert "failed" not in row._summary.text()
+    # And the child itself, expanded, must agree with the header.
+    row._summary.click()
+    assert "done" in row._step_rows[e2.id]._toggle.text()
+
+
 def test_expanding_the_group_reveals_every_step(qapp):
     view, model = _view_and_model()
     e1 = model.apply_tool_call(_tool_call(tool_call_id="tc1", title="Read a.py"))

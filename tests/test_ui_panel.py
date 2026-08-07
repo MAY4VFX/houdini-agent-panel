@@ -937,6 +937,58 @@ def test_turn_drives_activity_burst_tool_reset_and_completion(qapp, monkeypatch)
     widget.shutdown()
 
 
+def test_a_tool_finishing_in_a_background_conversation_is_correct_once_shown(qapp):
+    """Investigating a report where a collapsed group's header read
+    "failed" while every one of its (31, in his case) tools read "done" —
+    the summary contradicting its own contents. `_touch` only redraws the
+    conversation currently on screen (`_is_current`); a status change in a
+    conversation the artist switched away from via the drawer updates the
+    MODEL right away but never touches the stale widget until the
+    conversation is shown again, at which point `_show_session` rebuilds
+    it from scratch. This is the one gap traced in the code that could
+    leave a widget showing something older than the model actually has —
+    confirms it heals the instant the conversation is shown again, so any
+    reported mismatch actually seen ON SCREEN needs a different
+    explanation (see the accompanying report for what was and wasn't
+    established)."""
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client(widget._agent_id)
+    client.session_started.emit("a", _session("a"))
+    qapp.processEvents()
+    client.session_started.emit("b", _session("b"))
+    qapp.processEvents()
+    widget._set_current_session("a")  # "b" is now in the background
+
+    call = SimpleNamespace(
+        tool_call_id="tc1", title="Run something", kind="execute",
+        status="in_progress", content=None, locations=None,
+    )
+    client.tool_call.emit("b", call)
+    update_failed = SimpleNamespace(
+        tool_call_id="tc1", title=None, kind=None, status="failed", content=None, locations=None
+    )
+    client.tool_call_update.emit("b", update_failed)
+    update_completed = SimpleNamespace(
+        tool_call_id="tc1", title=None, kind=None, status="completed", content=None, locations=None
+    )
+    client.tool_call_update.emit("b", update_completed)
+    qapp.processEvents()
+
+    # The model already has the correct, final status — updating it never
+    # depended on anything being on screen.
+    entry = widget._model("b").entries()[-1]
+    assert entry.tool.status == "completed"
+
+    # Showing "b" rebuilds the transcript from the model as it stands now.
+    widget._set_current_session("b")
+    qapp.processEvents()
+    row = widget._transcript._rows[entry.id]
+    assert "done" in row._toggle.text()
+    assert "failed" not in row._toggle.text()
+
+    widget.shutdown()
+
+
 def test_auth_buttons_follow_the_client_across_a_restart(qapp, monkeypatch):
     """The sign-in buttons must not talk to a corpse.
 
