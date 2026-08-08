@@ -107,8 +107,45 @@ def _is_agent_signed_in(
     it keeps saying "Sign in…" regardless of what a completed turn alone
     might otherwise suggest (docs/facts/acp-sdk.md §11: claude-acp opens
     a session happily with zero auth methods advertised at all).
+
+    That "no methods → no account" rule is narrowed, not overridden, by
+    one exception: `settings_module.agent_owns_token` — an agent whose
+    credential the PANEL captured and stores itself (currently claude-acp
+    only, §21/§27). For that one case a completed turn is no longer the
+    only evidence available: the token sitting in `agent_oauth_tokens`
+    already IS the account, so "no advertised methods" no longer means
+    "nothing to be signed into." Reported live: a real, verified sign-in
+    (token captured whole, liveness check `valid`, the agent answering
+    prompts) still showed "Sign in…" on this row, because claude-acp's
+    empty `authMethods` made the rule above absolute where it should only
+    have applied to agents the panel has no OTHER way of knowing about.
     """
+    if settings_module.agent_owns_token(agent_id, current_settings):
+        return True
     return agent_id in current_settings.signed_in_agents and bool(auth_info and auth_info.methods)
+
+
+def _can_sign_out_agent(
+    agent_id: str,
+    auth_info: "settings_module.AgentAuthInfo | None",
+    current_settings: "settings_module.Settings",
+) -> bool:
+    """Whether a Settings row's "Sign out" would actually DO something for
+    `agent_id`.
+
+    Ordinarily this is exactly `auth_info.supports_logout` — a build
+    constant the agent's own `initialize` reported (mirrors `AgentPanel.
+    _can_sign_out`'s reasoning for the currently connected agent). Widened
+    by the same one exception as `_is_agent_signed_in` above: if the panel
+    itself holds the credential (`settings_module.agent_owns_token`), Sign
+    out has a real action to take regardless of what the agent's own build
+    supports — forgetting the stored token and restarting the process
+    (`AgentPanel._on_agent_row_sign_out`/`_forget_agent_oauth_token`), not
+    a protocol `logout()` call the agent was never going to answer.
+    """
+    if settings_module.agent_owns_token(agent_id, current_settings):
+        return True
+    return bool(auth_info and auth_info.supports_logout)
 
 
 def _state_text(installed, update: "Update | None") -> str:
@@ -222,10 +259,20 @@ class _AgentRow(QtWidgets.QWidget):
         checks for exactly that before calling out, since the alternative
         is a click that visibly does nothing forever).
     `is_signed_in` is never true for an agent with no methods at all
-    (claude-acp): there is no account to switch, so it keeps saying "Sign
-    in…" regardless of what a completed turn alone might otherwise
-    suggest (see `AgentsView`'s own call sites for that guard) — this
-    part of the shape did not change.
+    (claude-acp) on a completed turn alone: there is no account to switch
+    between, so a turn by itself keeps this row saying "Sign in…" (see
+    `_is_agent_signed_in`'s own docstring for that guard). Narrowed, not
+    reopened, by one exception: an agent whose credential the PANEL
+    captures and stores itself (`settings.agent_oauth_tokens`, currently
+    claude-acp only — docs/facts/acp-sdk.md §21/§27) has a second, stronger
+    kind of evidence available — the token sitting in settings already IS
+    the account, not a guess about one. For that case `is_signed_in` AND
+    `can_sign_out` both follow `settings_module.agent_owns_token` instead
+    (`_is_agent_signed_in`/`_can_sign_out_agent`), and clicking "Sign out"
+    does not go through `do_logout`/`auth_required` at all — there is no
+    protocol logout to call — it forgets the stored token and restarts the
+    process instead (`AgentPanel._on_agent_row_sign_out`/`_forget_agent_
+    oauth_token`).
     """
 
     install_requested = Signal()
@@ -559,7 +606,7 @@ class AgentsView(QtWidgets.QWidget):
                     and installed is not None
                     and is_newer(update.latest, installed.version)
                 ),
-                can_sign_out=bool(auth_info and auth_info.supports_logout),
+                can_sign_out=_can_sign_out_agent(entry.id, auth_info, current_settings),
                 is_signed_in=_is_agent_signed_in(entry.id, auth_info, current_settings),
                 auth_status=_auth_status_text(attempt),
                 parent=self,
@@ -684,7 +731,7 @@ class AgentsView(QtWidgets.QWidget):
                 version=agent.command,
                 state_text="custom agent",
                 is_custom=True,
-                can_sign_out=bool(auth_info and auth_info.supports_logout),
+                can_sign_out=_can_sign_out_agent(agent.id, auth_info, current),
                 is_signed_in=_is_agent_signed_in(agent.id, auth_info, current),
                 auth_status=_auth_status_text(attempt),
                 parent=self,

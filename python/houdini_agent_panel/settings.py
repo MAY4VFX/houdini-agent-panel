@@ -327,6 +327,29 @@ def save(settings: Settings, path: Path | None = None) -> None:
     os.replace(tmp, target)
 
 
+def agent_owns_token(agent_id: str, settings: Settings) -> bool:
+    """Does the panel itself hold a captured, working OAuth token for
+    `agent_id` — `settings.agent_oauth_tokens[agent_id]` non-empty?
+
+    This is a narrower, stronger question than `signed_in_agents`
+    (`ui/panel.py::AgentPanel._is_signed_in`'s own docstring: a completed
+    turn, which is itself only ever a guess — the protocol has no "am I
+    authenticated" query) or `agent_auth_info` (what the agent's BUILD
+    advertises, not what account is active). For an agent whose credential
+    the panel captured and verified itself (currently `claude-acp` only —
+    docs/facts/acp-sdk.md §21/§27: `claude setup-token` prints a token once
+    and this is the only place it is ever kept), owning that token IS being
+    signed in — a fact read off this settings file, not an inference from
+    indirect evidence. `ui/agents.py::_is_agent_signed_in`/`_can_sign_out_
+    agent` use this to let a Settings row draw "Sign out" for such an
+    agent even though it advertises no `authMethods` and implements no
+    protocol `logout` at all — see those functions' own docstrings for why
+    that does not contradict the reasoning `AgentPanel._can_sign_out`
+    still applies to the agent's own protocol capability.
+    """
+    return bool(settings.agent_oauth_tokens.get(agent_id))
+
+
 def diagnostics(settings: Settings) -> str:
     """Text for the "Copy diagnostics" button.
 

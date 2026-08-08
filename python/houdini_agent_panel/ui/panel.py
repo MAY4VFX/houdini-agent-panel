@@ -1280,9 +1280,12 @@ class AgentPanel(QtWidgets.QWidget):
             self._sync_agent_auth_row(info)
 
     def _can_sign_out(self, info: Any) -> bool:
-        """Whether Sign out is worth drawing at all: the agent has to
-        actually implement logout, and there has to be at least one method
-        to return to afterwards.
+        """Whether the SIGN-IN SCREEN'S OWN Sign out is worth drawing:
+        strictly the agent's own protocol capability — it has to actually
+        implement logout, and there has to be at least one method to
+        return to afterwards. Nothing here ever asks what the panel itself
+        might know about the account; see the next paragraph for why that
+        stays true even after claude-acp gained a real Sign out elsewhere.
 
         Used to also require `self._is_signed_in()` — reported on the Linux
         machine: a fresh Codex showed Sign out before anyone had signed in.
@@ -1292,6 +1295,23 @@ class AgentPanel(QtWidgets.QWidget):
         methods` are both constants of the BUILD, not the account
         (docs/facts/acp-sdk.md §11), so this now reflects only what the
         agent can do — never a guess about whether it's needed right now.
+
+        Deliberately NOT widened for a panel-owned token (`settings.
+        agent_oauth_tokens`, docs/facts/acp-sdk.md §21/§27) the way `ui/
+        agents.py::_is_agent_signed_in`/`_can_sign_out_agent` now are for
+        the SETTINGS ROW. Not an oversight: this method answers a question
+        about the AGENT'S PROTOCOL specifically, and claude-acp's is
+        unchanged — it still advertises no methods and no logout, so this
+        already returns `False` for it every time it's actually reached
+        (`_offer_sign_in`/`_on_auth_required` both route an agent with no
+        methods to `_offer_sign_in_with_no_methods`/`_offer_login_command`
+        before this is ever called). The Settings row's widened check is a
+        SEPARATE, additional route to a real Sign out
+        (`_on_agent_row_sign_out`/`_forget_agent_oauth_token`, which
+        forgets the panel's own stored token — never a `logout()` call
+        this method's answer would gate) — it narrows the old "no
+        methods → no logout" rule to "no methods and the panel doesn't
+        hold the credential either," it does not reopen or contradict it.
         """
         if not getattr(info, "auth_methods", ()):
             # The panel only manages authentication it can see. An agent
@@ -3879,18 +3899,76 @@ class AgentPanel(QtWidgets.QWidget):
         self._on_agent_chosen(agent_id)
 
     def _on_agent_row_sign_out(self, agent_id: str) -> None:
-        """"Sign out" clicked on a Settings row. For the currently connected
-        agent this logs out immediately — no need to detour through the
-        sign-in screen just to press the same button that lives there. For
-        any other agent, same detour as Sign in: switch to it and land on
-        its sign-in screen, rather than firing a logout at an agent nobody
-        is looking at yet.
+        """"Sign out" clicked on a Settings row.
+
+        First checks whether the panel itself holds `agent_id`'s
+        credential (`settings.agent_oauth_tokens`, `settings_mod.agent_
+        owns_token` — currently claude-acp only, docs/facts/acp-sdk.md
+        §21/§27): that agent advertises no auth methods and implements no
+        protocol `logout` at all (§11), so the ordinary paths below would
+        either do nothing or detour through a sign-in screen for an
+        account that is, as far as the panel's own settings file is
+        concerned, already provably signed in. `_forget_agent_oauth_token`
+        is the whole answer for that case, and it needs no live connection
+        to `agent_id` to act — see its own docstring.
+
+        Otherwise: for the currently connected agent this logs out
+        immediately — no need to detour through the sign-in screen just to
+        press the same button that lives there. For any other agent, same
+        detour as Sign in: switch to it and land on its sign-in screen,
+        rather than firing a logout at an agent nobody is looking at yet.
         """
+        self._settings = settings_mod.load()
+        if settings_mod.agent_owns_token(agent_id, self._settings):
+            self._forget_agent_oauth_token(agent_id)
+            return
         if agent_id == self._agent_id:
             self._on_logout_requested()
             return
         self._pending_auth_target = agent_id
         self._on_agent_chosen(agent_id)
+
+    def _forget_agent_oauth_token(self, agent_id: str) -> None:
+        """"Sign out" for an agent whose credential the panel stores
+        itself, rather than one the agent's own protocol can log out of.
+
+        There is no `logout()` to call: the agent process never knew it
+        had a token as far as ITS protocol is concerned — the panel handed
+        it one at spawn (`runtime.py::_with_oauth_tokens`) and is the only
+        party that remembers it exists (`_on_terminal_login_token_
+        captured`'s own docstring: `setup-token` writes nothing to disk,
+        docs/facts/acp-sdk.md §21). So signing out here means the panel
+        forgetting what it minted itself — the one honest action available
+        when the protocol offers none.
+
+        Clears BOTH halves of what makes `ui/agents.py::_is_agent_signed_
+        in` say "signed in" for this shape of agent: the stored token
+        (`agent_oauth_tokens`) and `signed_in_agents`, in case a completed
+        turn had also marked it — leaving either behind would let some
+        other code path still believe the sign-out never happened.
+
+        Restarts THIS tab's own process only if `agent_id` is the one it's
+        currently attached to, and only if it's actually running: a token
+        is injected into the environment at spawn, not live
+        (`_on_terminal_login_token_captured`'s own docstring), so an
+        already-running process keeps talking with it until restarted —
+        exactly the mechanism `_restart_agent` already exists for (a
+        Network setting change needs the same bounce to take effect),
+        reused rather than duplicated. An agent this tab isn't connected
+        to has nothing running here to bounce; forgetting the token is
+        still the whole point, so it happens regardless.
+        """
+        current = settings_mod.load()
+        current.agent_oauth_tokens.pop(agent_id, None)
+        known = list(current.signed_in_agents)
+        if agent_id in known:
+            known.remove(agent_id)
+        current.signed_in_agents = known
+        settings_mod.save(current)
+        self._settings = current
+        self._record_auth_attempt(agent_id, action="sign_out", ok=True, message="Signed out.")
+        if agent_id == self._agent_id and shared_client(agent_id).is_running():
+            self._restart_agent()
 
     def _complete_pending_auth_switch(self) -> None:
         """The agent `_on_agent_row_sign_in`/`_sign_out` switched this tab

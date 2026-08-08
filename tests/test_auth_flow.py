@@ -558,6 +558,115 @@ def test_sign_out_failure_from_settings_is_noted_not_lost(qapp, monkeypatch):
     widget.shutdown()
 
 
+def test_sign_out_of_a_panel_owned_token_forgets_it_and_restarts(qapp, monkeypatch):
+    """claude-acp advertises no auth methods and implements no protocol
+    `logout` (§11) — calling `client.logout()` for it, as the ordinary
+    Settings-row path used to, would be a click that does nothing. Once the
+    panel holds the credential itself (`settings.agent_oauth_tokens`,
+    §21/§27), Sign out has to mean the panel forgetting what it minted,
+    then restarting the process so the fresh spawn stops inheriting the
+    token (`runtime.py::_with_oauth_tokens` only injects it AT SPAWN —
+    `_restart_agent` is the existing mechanism for exactly this shape of
+    problem, reused rather than duplicated)."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    current = settings_mod.load()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    current.signed_in_agents = ["claude-acp"]
+    settings_mod.save(current)
+    widget._settings = current
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    restarted: list[bool] = []
+    monkeypatch.setattr(widget, "_restart_agent", lambda: restarted.append(True))
+
+    widget._on_agent_row_sign_out("claude-acp")
+
+    reloaded = settings_mod.load()
+    assert reloaded.agent_oauth_tokens.get("claude-acp", {}) == {}
+    assert "claude-acp" not in reloaded.signed_in_agents
+    assert restarted == [True]
+    attempt = reloaded.auth_attempts["claude-acp"]
+    assert attempt.action == "sign_out"
+    assert attempt.ok is True
+    widget.shutdown()
+
+
+def test_sign_out_of_a_panel_owned_token_skips_restart_when_not_running(qapp, monkeypatch):
+    """No live process to bounce — forgetting the token is still the whole
+    point, but there is nothing running that would otherwise keep using
+    it."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    current = settings_mod.load()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    settings_mod.save(current)
+    widget._settings = current
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "is_running", lambda: False)
+    restarted: list[bool] = []
+    monkeypatch.setattr(widget, "_restart_agent", lambda: restarted.append(True))
+
+    widget._on_agent_row_sign_out("claude-acp")
+
+    assert settings_mod.load().agent_oauth_tokens.get("claude-acp", {}) == {}
+    assert restarted == []
+    widget.shutdown()
+
+
+def test_sign_out_of_a_different_agents_owned_token_forgets_it_without_switching(qapp, monkeypatch):
+    """A Settings row for an agent that isn't the one this tab is connected
+    to right now (issue #33's own shape) still has to work — but unlike the
+    protocol-logout detour (switch onto it, land on its sign-in screen),
+    forgetting a token the panel already holds needs no live connection to
+    that agent at all, so there is nothing to switch onto."""
+    from houdini_agent_panel import settings as settings_mod
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    assert widget._agent_id != "claude-acp"
+    current = settings_mod.load()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    current.signed_in_agents = ["claude-acp"]
+    settings_mod.save(current)
+    widget._settings = current
+    switched: list[str] = []
+    monkeypatch.setattr(widget, "_on_agent_chosen", lambda aid: switched.append(aid))
+
+    widget._on_agent_row_sign_out("claude-acp")
+
+    reloaded = settings_mod.load()
+    assert reloaded.agent_oauth_tokens.get("claude-acp", {}) == {}
+    assert "claude-acp" not in reloaded.signed_in_agents
+    assert switched == []
+    widget.shutdown()
+
+
+def test_sign_out_of_an_agent_without_an_owned_token_is_unchanged(qapp, monkeypatch):
+    """The other five agents (Codex, Gemini, Grok, Kimi, OpenCode) — whose
+    credentials the panel does not store — must keep going through the
+    ordinary protocol `logout()` path exactly as before."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("codex-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    logged_out = []
+    monkeypatch.setattr(client, "logout", lambda: logged_out.append(True))
+    monkeypatch.setattr(client, "is_running", lambda: True)
+
+    widget._on_agent_row_sign_out(widget._agent_id)
+
+    assert logged_out == [True]
+    assert widget._pending_logout_agent == widget._agent_id
+    widget.shutdown()
+
+
 def test_a_terminal_auth_method_spawns_a_worker_instead_of_authenticating(qapp, monkeypatch):
     """Kimi's `login` never answers `authenticate()` at all (docs/facts/
     acp-sdk.md §13-14) — calling it anyway would just hang for no reason.

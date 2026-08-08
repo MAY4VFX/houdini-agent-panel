@@ -423,6 +423,45 @@ def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qa
     assert "Sign out" not in buttons
 
 
+def test_an_owned_oauth_token_shows_sign_out_despite_no_auth_methods(qapp, monkeypatch):
+    """claude-acp's own shape (§11) is exactly the case above — no auth
+    methods advertised at all — and until this fix that meant "Sign in…"
+    forever, even after a real, verified sign-in (owner report, 2026-08-08:
+    logged in, token captured whole, liveness check came back `valid`, the
+    agent was answering prompts — the row still said "Sign in…"). The
+    difference from the test above: the panel itself now holds a captured,
+    verified OAuth token for this agent (`settings.agent_oauth_tokens`,
+    docs/facts/acp-sdk.md §21/§27) — for that one case "signed in" is a
+    fact the panel can read off its own settings file, not a guess that
+    needs a completed turn or the agent's own cooperation. No `agent_auth_
+    info` cached at all here either, matching claude-acp exactly: `initialize`
+    never gave this panel a method or a `supports_logout` to remember."""
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="claude-acp",
+        name="Claude Agent",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./a", sha256="0" * 64)},
+    )
+    _mark_installed("claude-acp", "1.0.0")
+    current = settings_module.load()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    settings_module.save(current)
+
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_by_id["claude-acp"]
+
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert "Sign out" in buttons
+    assert "Sign in…" not in buttons
+
+    sign_outs: list[str] = []
+    view.sign_out_requested.connect(sign_outs.append)
+    next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Sign out").click()
+    assert sign_outs == ["claude-acp"]
+
+
 def test_last_auth_attempt_shown_beside_the_row(qapp, monkeypatch):
     """"Show the last attempt's result beside the method" (issue #33) — a
     failure visible where the retry button is, not only in a transcript the
@@ -519,6 +558,28 @@ def test_custom_agent_add_and_remove(qapp):
     current = settings_module.load()
     assert current.custom_agents == []
     assert changed == [True, True]
+
+
+def test_custom_agent_row_also_shows_sign_out_for_an_owned_token(qapp):
+    """The registry row and the custom-agent row are two separate rebuild
+    paths (`_rebuild_registry_rows`/`_load_custom_agents`) that used to
+    duplicate the same `can_sign_out`/`is_signed_in` computation — fixed in
+    one place only would leave a custom agent stuck on "Sign in…" the same
+    way claude-acp was."""
+    view = AgentsView()
+    view._custom_name.setText("My command")
+    view._custom_command.setText("/usr/bin/my-acp-agent")
+    view._on_add_custom()
+    agent_id = settings_module.load().custom_agents[0].id
+
+    current = settings_module.load()
+    current.agent_oauth_tokens[agent_id] = {"SOME_TOKEN": "fake-not-a-real-token"}
+    settings_module.save(current)
+    view._load_custom_agents()
+
+    row = view._custom_rows_layout.itemAt(0).widget()
+    buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
+    assert buttons == {"Remove", "Sign out"}
 
 
 def test_shutdown_releases_a_still_running_install_worker(qapp, monkeypatch):

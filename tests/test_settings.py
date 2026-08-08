@@ -102,6 +102,29 @@ def test_agent_oauth_tokens_ignores_malformed_entries(tmp_path):
     assert reloaded.agent_oauth_tokens == {"codex-acp": {"SOME_TOKEN": "5"}}
 
 
+def test_agent_owns_token_false_when_nothing_stored():
+    assert settings_module.agent_owns_token("claude-acp", Settings()) is False
+
+
+def test_agent_owns_token_true_once_a_token_is_stored():
+    """The fact this bug fix rests on: once the panel has captured and
+    verified a token for an agent (docs/facts/acp-sdk.md §21/§27), "signed
+    in" is no longer a guess about a completed turn — the credential is
+    right here in `agent_oauth_tokens`."""
+    current = Settings()
+    current.agent_oauth_tokens["claude-acp"] = {"CLAUDE_CODE_OAUTH_TOKEN": "fake-not-a-real-token"}
+    assert settings_module.agent_owns_token("claude-acp", current) is True
+
+
+def test_agent_owns_token_false_for_an_empty_entry():
+    """An agent id present with an empty mapping (e.g. after being forgotten
+    by popping individual env vars rather than the whole entry) must not
+    read as "owns a token" — only a non-empty mapping is a real credential."""
+    current = Settings()
+    current.agent_oauth_tokens["claude-acp"] = {}
+    assert settings_module.agent_owns_token("claude-acp", current) is False
+
+
 def test_auth_attempts_round_trip(tmp_path):
     """The last sign-in/out attempt per agent — shown beside the Settings
     row that started it (issue #33)."""
