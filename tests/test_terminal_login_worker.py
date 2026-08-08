@@ -1049,3 +1049,53 @@ def test_the_worker_recovers_the_full_token_from_a_frame_diffed_build(qapp, tmp_
 
     true_token = "sk-ant-oat01-" + "X" * 95
     assert captured == [("CLAUDE_CODE_OAUTH_TOKEN", true_token)]
+
+
+def test_a_pty_submit_sends_carriage_return_not_line_feed(qapp, tmp_path, monkeypatch):
+    """The paste that went nowhere.
+
+    The build puts the pty into raw mode at its input prompt (this
+    module's own docstring), and raw mode has no ICRNL translation — a
+    `\\n` written there is a line feed, never a submit. Measured on the
+    owner's machine the first time anyone used this path at all: the code
+    reached the child (it echoed one `*` per character) and the process
+    then waited forever.
+    """
+    from houdini_agent_panel.ui import terminal_login as tl
+
+    written: list[bytes] = []
+    ta = TerminalAuth(command=sys.executable, args=["-c", _LONG_RUNNING_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path), use_pty=True)
+    worker.start()
+
+    _wait_until(qapp, lambda: worker._pty_master_fd is not None)
+    monkeypatch.setattr(tl.os, "write", lambda fd, data: written.append(data) or len(data))
+    worker.send_line("THE-CODE-FROM-THE-BROWSER")
+
+    worker.stop()
+    worker.wait(3000)
+
+    assert written, "nothing was written to the pty at all"
+    payload = written[0].decode()
+    assert payload == "THE-CODE-FROM-THE-BROWSER\r", repr(payload)
+    assert not payload.endswith("\n"), "a line feed is not Enter on a terminal"
+
+
+def test_a_plain_pipe_submit_still_sends_a_line_feed(qapp, tmp_path):
+    """No pty means no line discipline: a reader there is waiting for
+    `\\n` and would never see a bare `\\r`."""
+    ta = TerminalAuth(command=sys.executable, args=["-c", _CLAUDE_LIKE_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))  # no pty
+
+    lines: list[str] = []
+    awaiting: list[bool] = []
+    worker.line_received.connect(lines.append)
+    worker.input_requested.connect(lambda: awaiting.append(True))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(awaiting))
+    worker.send_line("MY-CODE-123")
+
+    # The stand-in reads with `readline()`, which only returns on `\n`.
+    _wait_until(qapp, lambda: any("got:MY-CODE-123" in line for line in lines))
+    worker.wait(3000)

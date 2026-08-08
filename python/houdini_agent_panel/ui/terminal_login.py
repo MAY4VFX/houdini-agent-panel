@@ -325,6 +325,26 @@ _SHAPE_RUN_RE = re.compile(r"[A-Za-z0-9_\-\.]{8,}")
 _SHAPE_HEAD = 4
 
 
+#: What pressing Enter actually sends on a terminal: carriage return, not
+#: line feed. A keyboard has no LF key — the terminal transmits `\r`, and
+#: it is the receiving side that decides what to do with it.
+#:
+#: This module's own docstring already records that this build "puts the
+#: pty into raw mode itself once it reaches an actual input prompt". Raw
+#: mode is exactly the mode with no `ICRNL` translation, so a `\n` written
+#: there is a line feed and nothing else — never a submit. Measured on the
+#: owner's machine (2026-08-08, first time anyone ever used this path):
+#: the pasted code reached the child (it echoed the row of `*` that masks
+#: its own input, one per character) and the process then waited forever,
+#: because Enter never arrived.
+#:
+#: Safe for a cooperative reader too: a pty in canonical mode has `ICRNL`
+#: on by default and turns this into the `\n` such a reader expects. Only
+#: the plain-pipe path, which has no line discipline at all, still needs
+#: a literal `\n` — see `send_line`.
+_ENTER_ON_A_TERMINAL = "\r"
+
+
 def _shape_for_log(raw: str) -> str:
     """The escape structure of a line, with every long run masked.
 
@@ -1167,7 +1187,7 @@ class TerminalLoginWorker(Worker):
         process = self._process
         if process is None or process.poll() is not None:
             return
-        line = text.rstrip("\n") + "\n"
+        body = text.rstrip("\r\n")
         # The content itself is never logged — it's what the artist just
         # pasted from their browser, closer to a credential than a device
         # code is. Only the fact that something was sent.
@@ -1176,18 +1196,21 @@ class TerminalLoginWorker(Worker):
             if self._pty_master_fd is None:
                 return
             with contextlib.suppress(OSError):
-                os.write(self._pty_master_fd, line.encode("utf-8"))
+                os.write(self._pty_master_fd, (body + _ENTER_ON_A_TERMINAL).encode("utf-8"))
             return
         if self._use_conpty:
             if self._conpty_process is None:
                 return
             with contextlib.suppress(Exception):
-                self._conpty_process.write(line.encode("utf-8"))
+                self._conpty_process.write((body + _ENTER_ON_A_TERMINAL).encode("utf-8"))
             return
         if process.stdin is None:
             return
         with contextlib.suppress(OSError, ValueError):
-            process.stdin.write(line)
+            # Plain pipes have no line discipline to translate anything:
+            # a reader there is waiting for `\n` and would never see a
+            # bare `\r`. See `_ENTER_ON_A_TERMINAL`.
+            process.stdin.write(body + "\n")
             process.stdin.flush()
 
     def stop(self) -> None:

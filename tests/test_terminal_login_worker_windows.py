@@ -253,7 +253,10 @@ def test_conpty_branch_parses_the_url_and_detects_the_input_prompt(qapp, monkeyp
     worker.send_line("MY-WINDOWS-CODE")
     _wait_until(qapp, lambda: any("got:MY-WINDOWS-CODE" in line for line in lines))
 
-    assert process.written == b"MY-WINDOWS-CODE\n"
+    # Carriage return, not line feed: Enter on a console is CR, and this
+    # build reads its own keystrokes rather than lines. Same reasoning as
+    # the POSIX path — see `_ENTER_ON_A_TERMINAL`.
+    assert process.written == b"MY-WINDOWS-CODE\r"
     assert fake_module.spawn_calls == [("claude", ["setup-token"], str(tmp_path))]
     worker.wait(3000)
 

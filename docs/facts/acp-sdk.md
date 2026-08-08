@@ -2840,3 +2840,42 @@ A note on the test suite: `conftest`'s `no_real_network` guard could not
 see this, because `token_check.verify` builds its own request (it needs
 headers `urlopen_fetch` cannot carry). It is stubbed there too — without
 that, the next sign-in test written would quietly call the real API.
+
+## 28. Enter is a carriage return, and the panel had never sent one
+
+Measured on the owner's machine, 2026-08-08. He pasted a code into the
+sign-in field, the child echoed a row of `*` — one per character, its own
+input masking — and then nothing happened, ever. The process was still
+alive an hour later.
+
+The log makes the cause unmissable once you look for it:
+
+```
+$ grep -c "artist input submitted" panel.log
+1
+```
+
+**One.** In the entire history of that machine, across every successful
+sign-in, the artist had never typed anything into this field. Claude's
+`setup-token` completes through the browser on its own — the prompt it
+prints says "Paste code here **if** prompted", and until now the "if" had
+never been true. So the submit path had never once been exercised, and it
+was broken from the day it was written.
+
+`send_line` terminated the text with `\n`. A keyboard has no line-feed
+key: pressing Enter transmits `\r`, and this build — as this module's own
+docstring already recorded — "puts the pty into raw mode itself once it
+reaches an actual input prompt". Raw mode is precisely the mode with no
+`ICRNL` translation, so the `\n` arrived as a line feed and was never a
+submit. The characters landed (hence the echo); the Enter never did.
+
+Now `\r` on both terminal paths. A pty in canonical mode still has
+`ICRNL` on and turns it into the `\n` a cooperative reader expects, so
+nothing that worked before stops working. Only the plain-pipe path, which
+has no line discipline at all, still needs a literal `\n`.
+
+Worth naming the shape of this one: it is the fourth fault in this single
+flow that shipped because the code was measured against a stand-in rather
+than the real build. The stand-in read `sys.stdin.readline()`, which is
+canonical-mode and perfectly happy with `\n`. The test passed for months
+and proved nothing about the program it was standing in for.
