@@ -2694,7 +2694,7 @@ checks that a token EXISTS, never that it WORKS. A 401 from the agent is
 the one signal that distinguishes them, and nothing currently listens
 for it.
 
-## 26. The build emits an incomplete CSI, and it ate a character of the token
+## 26. Corrected: a frame-diffing screen, not an incomplete CSI — the first read of this measurement was wrong
 
 Measured on mayfx02, 2026-08-08, by the diagnostic added in 0.8.12 —
 after §25's wrapping fix had already made the token arrive on one line.
@@ -2709,39 +2709,81 @@ same token through the machine's own proxy settled what was wrong:
 | with one `o` re-inserted, 108 chars, `sk-ant-oat01-` | `rate_limit_error` |
 
 A rate-limit error is returned *after* authentication succeeds, so the
-token was correct and the panel was corrupting it.
+token was correct and the panel was corrupting it — that part still
+stands. What follows it originally did not.
 
-`_shape_for_log` recorded the raw line as:
+### What this section used to say, and why it was wrong
+
+The original version of this section read `_shape_for_log`'s output as
+`'\x1b[1C\x1b[<9>\x1b[<103>'` and, reasoning from the two masked lengths
+alone, concluded the build had emitted an incomplete `\x1b[10` (parameters,
+no final byte) immediately before the token, and that `_ANSI_RE`'s CSI
+final-byte class — the full standard `[@-~]` range — had terminated that
+incomplete sequence on the token's own `"o"` (`sk-ant-oat01-o…` read as
+`\x1b[10o`, syntactically a valid CSI) and discarded it. The fix shipped
+on that reasoning restricted `_ANSI_RE`'s final-byte class to a hand-picked
+set of "assigned" CSI finals (`_CSI_FINAL`, 0.8.12-0.8.13).
+
+The reasoning had a real gap: `_SHAPE_HEAD` (the run's first few
+characters, shown alongside its length) was added in a diagnostic commit
+that landed only AFTER the incomplete-CSI fix had already shipped on the
+strength of the two-integer reconstruction alone — the tool that could
+have told an incomplete CSI apart from a complete one by *content*, not
+just by arithmetic, did not exist yet when that conclusion was drawn.
+Re-measuring with the run heads in place, on a fresh capture, gives a
+different, unambiguous shape:
 
 ```
-'\x1b[1C\x1b[<9>\x1b[<103>'   →   107 characters captured
+'\x1b[1C\x1b[<9:2Bsk…>\x1b[<103:10Ga…>'
 ```
 
-Reconstruction pins the cause down exactly, by arithmetic rather than by
-argument. A well-formed `\x1b[10G` before the rest of the token would log
-a 104-character run and yield 108 characters. The incomplete `\x1b[10` —
-parameters, no final byte at all — logs 103 and yields 107. Only the
-second matches both numbers.
+Decoded: `\x1b[1C` (cursor forward 1), `\x1b[2B` (cursor DOWN 2 rows —
+not part of the original reconstruction at all), then `sk-ant-`, then a
+**complete, well-formed** `\x1b[10G` (move to column 10 — final byte `G`,
+present and correct), then text starting with `a` (`at01-…`). There is no
+incomplete CSI anywhere in the real capture. `o` is not eaten by a
+regex; it simply never appears in this particular frame's own bytes.
 
-`_ANSI_RE` allowed the whole standard `[@-~]` range as a CSI final byte,
-which is correct by the letter of ECMA-48: `\x1b[10o` *is* a syntactically
-valid CSI. But `o` is not an **assigned** final, and here it was the
-token's own first character of `oat01-`. The regex terminated the
-incomplete sequence on it and threw it away.
+### The real cause
 
-The fix restricts the final-byte class to assigned finals and adds an
-explicit branch for an incomplete CSI, which is stripped on its own and
-takes nothing after it. The unassigned finals now excluded are `j k o v
-w y z` and `N O Q U V W Y`; a sequence ending in one of those will no
-longer be stripped, and its bytes will show up in the line. That is
-deliberate — visible garbage beats a silently corrupted secret, the same
-rule §21 set for the placeholder and §25 for the truncation.
+The bundled binary is Ink-based and repaints its output as a **diff
+between frames**: each redraw sends only the runs of text that changed,
+moving the cursor between them with absolute/relative position escapes
+rather than resending everything. `\x1b[2B` then `\x1b[10G` after writing
+`sk-ant-` (7 characters, ending at column 9) jumps straight to column 10
+— column 9 is simply never touched by *this* frame's own bytes, because
+an **earlier** frame already painted the token's `"o"` there and this
+frame's diff had no reason to repeat a cell that didn't change.
+
+`TerminalLoginWorker.work`'s read loop only ever handed `_token_value_in`
+the text of one flush's own buffer (`_strip_ansi(buffer)`, reset to `""`
+after every `\r`/`\n`) — a plain concatenation of whatever characters
+arrived between two separators. That has no way to remember a character
+painted by a frame several flushes earlier. No regex over a single
+buffer, however carefully its final-byte class is tuned, can recover a
+character that was never in that buffer's own bytes at all — which is
+exactly why the 0.8.12-0.8.13 restriction changed nothing real: it
+fixed a bug that had never actually happened.
+
+### The fix
+
+`_TerminalScreen` (`python/houdini_agent_panel/ui/terminal_login.py`) is
+a small, persistent model of cursor position and screen cells, fed the
+same character stream the read loop already reads, in parallel with the
+existing buffer-based line detection — never reset between flushes. When
+a line is flushed, `_token_value_in` reads the token candidate from the
+screen model's row (the text of the row the cursor was on when the flush
+happened), not from that flush's own buffer. A character several frames
+old is still sitting in its cell, because the model never forgets it.
+`_ANSI_RE`'s final-byte class was reverted to the plain standard range —
+see its own comment for why the restriction bought nothing and the
+`_CSI_FINAL` class was removed entirely.
 
 Three different mechanisms have now corrupted this one secret in a day:
-the wrong anchor (§21), line wrapping (§25), and this. All three reported
-the failure as a *successful* sign-in, because the panel checks that a
-token EXISTS and never that it WORKS. That check is the one thing that
-would have caught all three in seconds, and it is still not written.
+the wrong anchor (§21), line wrapping (§25), and this one — a screen
+diff, not a regex. All three reported the failure as a *successful*
+sign-in, because the panel checks that a token EXISTS and never that it
+WORKS. §27 is that check.
 
 ## 27. Checking that a token WORKS, not just that one exists
 

@@ -176,37 +176,21 @@ _INPUT_PROMPT_MARKERS = ("paste code here", "paste the redirect url here")
 #: build sends on startup) uses a `>` prefix the CSI parameter class
 #: didn't include, and `\x1b7`/`\x1b8` aren't `\x1b[...` sequences at all,
 #: a different (2-byte, no bracket) escape family entirely.
-#: CSI final bytes that are actually ASSIGNED, not the whole `@-~` range
-#: the standard allows. The difference cost a real sign-in.
 #:
-#: Measured (mayfx02, 2026-08-08, via `_shape_for_log`): this build emits
-#: `\x1b[10` — parameters and no final byte at all — immediately before
-#: continuing to print a token. Syntactically `\x1b[10o` IS a well-formed
-#: CSI, so a final class of `[@-~]` happily consumed the token's own "o"
-#: as the terminator, turning `sk-ant-oat01-…` into `sk-ant-at01-…` and
-#: earning a `401 Invalid bearer token` from the API. Re-inserting that
-#: one character made the identical request authenticate, which is what
-#: proves it rather than suggests it.
-#:
-#: Reconstruction confirms the shape exactly: a well-formed `\x1b[10G`
-#: would have logged a 104-character run and produced 108 characters; the
-#: incomplete form logs 103 and produces 107, which is what was measured.
-#:
-#: `o` is not an assigned CSI final, and neither are `j k v w y z` or
-#: `N O Q U V W Y`. Excluding them means an unassigned sequence is no
-#: longer stripped and its bytes stay visible in the line. That is the
-#: deliberate trade: visible garbage beats a silently corrupted secret,
-#: the same rule §21 already set for the placeholder.
-_CSI_FINAL = r"[@A-MPRSTXZ`a-ilmnp-ux]"
-_ANSI_RE = re.compile(
-    # A complete sequence first — ordered alternation, so this always wins
-    # where it applies.
-    rf"\x1b\[[0-9;?>]*[ -/]*{_CSI_FINAL}"
-    # …then an INCOMPLETE one: parameters that no assigned final byte ever
-    # terminates. Stripped on its own, taking nothing after it with it.
-    r"|\x1b\[[0-9;?>]*[ -/]*"
-    r"|\x1b[78]"
-)
+#: Briefly (0.8.12-0.8.13) restricted to a hand-picked set of "assigned"
+#: CSI final bytes, on the theory that an incomplete `\x1b[10` was
+#: terminating on the token's own "o" and eating it. That theory was
+#: wrong — see docs/facts/acp-sdk.md §26 (rewritten): the real capture's
+#: `\x1b[10G` was a complete, well-formed sequence the whole time, and no
+#: incomplete CSI was ever involved. The missing character was one an
+#: EARLIER redraw frame had already painted at that screen position; this
+#: regex only ever sees one flush's own buffer, so it had no way to know
+#: that cell was occupied. Fixed at the right layer instead — see
+#: `_TerminalScreen`, which models cursor position across the whole
+#: stream rather than one buffer at a time. The restriction bought
+#: nothing real and cost a class of legitimate CSI sequences their
+#: stripping, so it's gone; this is the plain standard range again.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?>]*[ -/]*[@-~]|\x1b[78]")
 #: A run this long with no line break, no carriage return and no
 #: recognised marker is almost certainly not a human-paced prompt —
 #: flushed as a line anyway so raw output is never invisible for good
@@ -367,6 +351,211 @@ def _redact_for_log(line: str) -> str:
         return f"<{len(match.group(0))} chars redacted>"
 
     return _LOOKS_LIKE_A_TOKEN_RE.sub(_mask, line)
+
+
+class _TerminalScreen:
+    """A minimal, persistent model of what a real terminal screen would
+    show, fed the same character-at-a-time stream `TerminalLoginWorker.
+    work`'s read loop already reads (docs/facts/acp-sdk.md §26, rewritten).
+
+    An Ink-based build repaints the screen as a diff between frames: each
+    redraw sends only the runs that changed, moving the cursor between
+    them rather than reprinting the whole line every time. `_strip_ansi`
+    on one flush's own buffer — a plain concatenation of whatever text
+    arrived between two `\\r`/`\\n`s — throws that structure away: a
+    character an EARLIER frame already drew, which this frame's diff
+    doesn't touch, is simply invisible to anything reading only the
+    current buffer. That is what actually ate one character of a real
+    OAuth token: the real capture's `\\x1b[10G` was a complete, well-formed
+    move from column 9 to column 10 — over a cell an earlier frame had
+    already painted with the token's own "o". No incomplete escape was
+    ever involved; §26's first read of the same measurement got that
+    part wrong (see the corrected section for the full account).
+
+    This model does NOT replace `_strip_ansi` or the buffer-based line
+    detection the rest of the module already relies on for markers, URLs,
+    the spinner filter, and the force-flush — see the module docstring's
+    own warning against rewriting that. It is fed the same characters IN
+    PARALLEL, keeps every cell it has ever been told to write until
+    something overwrites or erases it, and `TerminalLoginWorker.work` only
+    ever asks it for one thing: the text of the row the cursor was on at
+    the moment a line was considered complete. Because it is never reset
+    between flushes, a character painted several frames ago and never
+    touched since is still exactly where it was.
+
+    Deliberately minimal — only what a real Ink-based build has actually
+    been measured to emit (§18, §20, §26): printable characters, `\\r`,
+    `\\n`, relative cursor moves (`\\x1b[NA/B/C/D`), absolute column
+    (`\\x1b[NG`), absolute position (`\\x1b[N;MH`/`f`), line/screen erase
+    (`\\x1b[NK`/`\\x1b[NJ`), and OSC sequences (recognised and consumed
+    without moving the cursor or writing a cell, so an OSC-8 hyperlink
+    wrapping a URL doesn't corrupt whatever row it sits on — only the
+    DISPLAY text outside the OSC body is ever written, exactly as a real
+    terminal renders one). Any other CSI is recognised as a complete
+    escape sequence and consumed — its bytes never reach a cell — but is
+    NOT interpreted, so it never moves the cursor either: an unhandled
+    sequence is a no-op here, never a guess.
+    """
+
+    #: 0x40-0x7E — the CSI final-byte range as ECMA-48 defines it. Whether
+    #: a byte in this range is an ASSIGNED final doesn't matter here the
+    #: way it briefly mattered for `_ANSI_RE`: this model only needs to
+    #: know where one escape sequence ENDS, not what a legacy final byte
+    #: historically meant, and an unassigned final still terminates a real
+    #: CSI on any real terminal.
+    _CSI_FINAL_RANGE = frozenset(chr(c) for c in range(0x40, 0x7F))
+
+    def __init__(self) -> None:
+        self._rows: list[list[str]] = [[]]
+        self._row = 0
+        self._col = 0
+        #: "ground" (plain text) | "esc" (saw a bare ESC) | "csi" (inside
+        #: `\x1b[...`) | "osc" (inside `\x1b]...`) | "osc_esc" (inside an
+        #: OSC body, just saw ESC — deciding whether it's the `\x1b\\`
+        #: string terminator or more OSC body).
+        self._state = "ground"
+        self._csi_buf = ""
+
+    @property
+    def cursor_row(self) -> int:
+        return self._row
+
+    def row_text(self, row: int) -> str:
+        """Every cell of `row`, unwritten cells rendered as the space they
+        visually are — a gap left by a cursor jump IS a space on a real
+        terminal. Trailing space trimmed (padding, not content); leading
+        space is left for the caller to strip, the same way
+        `_token_value_in` already strips whatever line it's handed.
+        """
+        if not (0 <= row < len(self._rows)):
+            return ""
+        return "".join(self._rows[row]).rstrip(" ")
+
+    def feed(self, ch: str) -> None:
+        if self._state == "ground":
+            self._feed_ground(ch)
+        elif self._state == "esc":
+            self._feed_esc(ch)
+        elif self._state == "csi":
+            self._feed_csi(ch)
+        else:  # "osc" / "osc_esc"
+            self._feed_osc(ch)
+
+    def _feed_ground(self, ch: str) -> None:
+        if ch == "\x1b":
+            self._state = "esc"
+        elif ch == "\r":
+            self._col = 0
+        elif ch == "\n":
+            self._row += 1
+            self._ensure_row(self._row)
+        else:
+            self._write(ch)
+
+    def _feed_esc(self, ch: str) -> None:
+        if ch == "[":
+            self._state = "csi"
+            self._csi_buf = ""
+        elif ch == "]":
+            self._state = "osc"
+        else:
+            # `\x1b7`/`\x1b8` (save/restore cursor, §20) and anything else
+            # single-byte — none of them are tracked here, the same as
+            # `_ANSI_RE` only ever recognised them well enough to strip,
+            # never to interpret.
+            self._state = "ground"
+
+    def _feed_csi(self, ch: str) -> None:
+        if ch in self._CSI_FINAL_RANGE:
+            self._apply_csi(self._csi_buf, ch)
+            self._state = "ground"
+            self._csi_buf = ""
+        else:
+            self._csi_buf += ch
+            if len(self._csi_buf) > 64:  # a runaway sequence, not a real one
+                self._state = "ground"
+                self._csi_buf = ""
+
+    def _feed_osc(self, ch: str) -> None:
+        if self._state == "osc_esc":
+            self._state = "ground" if ch == "\\" else "osc"
+            return
+        if ch == "\x07":
+            self._state = "ground"
+        elif ch == "\x1b":
+            self._state = "osc_esc"
+        # else: still inside the OSC body — ignored, never written to a
+        # cell and never moves the cursor.
+
+    def _apply_csi(self, params: str, final: str) -> None:
+        nums = [int(p) for p in re.findall(r"\d+", params)]
+
+        def n(default: int = 1, index: int = 0) -> int:
+            # A present-but-zero parameter means the same as absent for
+            # every one of these (ECMA-48) — `\x1b[0C` moves forward one
+            # column, same as `\x1b[C`.
+            return nums[index] if index < len(nums) and nums[index] else default
+
+        if final == "A":
+            self._row = max(0, self._row - n())
+        elif final == "B":
+            self._row += n()
+            self._ensure_row(self._row)
+        elif final == "C":
+            self._col += n()
+        elif final == "D":
+            self._col = max(0, self._col - n())
+        elif final == "G":
+            self._col = max(0, n() - 1)
+        elif final in ("H", "f"):
+            self._row = max(0, n(1, 0) - 1)
+            self._col = max(0, n(1, 1) - 1)
+            self._ensure_row(self._row)
+        elif final == "K":
+            self._erase_line(n(0))
+        elif final == "J":
+            self._erase_screen(n(0))
+        # Every other final byte: recognised as a complete CSI and
+        # consumed, but not interpreted — no cursor movement, no cell
+        # write. See the class docstring.
+
+    def _erase_line(self, mode: int) -> None:
+        self._ensure_row(self._row)
+        row = self._rows[self._row]
+        if mode == 0:  # cursor to end of line
+            del row[self._col :]
+        elif mode == 1:  # start of line to cursor
+            for i in range(min(self._col + 1, len(row))):
+                row[i] = " "
+        elif mode == 2:  # whole line
+            self._rows[self._row] = []
+
+    def _erase_screen(self, mode: int) -> None:
+        if mode == 2:  # whole screen
+            self._rows = [[] for _ in self._rows]
+        elif mode == 0:  # cursor to end of screen
+            self._erase_line(0)
+            for r in range(self._row + 1, len(self._rows)):
+                self._rows[r] = []
+        elif mode == 1:  # start of screen to cursor
+            for r in range(self._row):
+                self._rows[r] = []
+            self._erase_line(1)
+
+    def _ensure_row(self, row: int) -> None:
+        while len(self._rows) <= row:
+            self._rows.append([])
+
+    def _ensure_col(self, row: int, col: int) -> None:
+        r = self._rows[row]
+        while len(r) <= col:
+            r.append(" ")
+
+    def _write(self, ch: str) -> None:
+        self._ensure_row(self._row)
+        self._ensure_col(self._row, self._col)
+        self._rows[self._row][self._col] = ch
+        self._col += 1
 
 
 #: How wide the pty claims to be. `pty.openpty()` hands out a terminal
@@ -737,6 +926,12 @@ class TerminalLoginWorker(Worker):
         url_already_found = False
         buffer = ""
         exit_code = None
+        # Fed every character the read loop sees, never reset — see
+        # `_TerminalScreen`'s own docstring (§26, rewritten) for why a
+        # per-flush buffer alone corrupted a real token: a character an
+        # earlier redraw frame already painted survives here even after
+        # the buffer that carried it has long since been flushed away.
+        screen = _TerminalScreen()
         try:
             # Reading whole LINES (`for line in process.stdout`) was the
             # first cut here, and it deadlocks against Claude's own
@@ -765,6 +960,14 @@ class TerminalLoginWorker(Worker):
                 char = reader.read(1)
                 if not char:
                     break  # EOF — the child closed its output
+                # Captured BEFORE feeding this char to the screen model:
+                # if this char is the `\n`/`\r` that triggers a flush
+                # below, feeding it first would already have moved the
+                # cursor off the row the buffered text was actually drawn
+                # on. Harmless for the non-flush branch too — a plain
+                # printable char never changes the row on its own.
+                row_before = screen.cursor_row
+                screen.feed(char)
                 if char not in ("\n", "\r") and len(buffer) < _FORCE_FLUSH_CHARS:
                     buffer += char
                     stripped = _strip_ansi(buffer)
@@ -781,6 +984,11 @@ class TerminalLoginWorker(Worker):
                     buffer += char
                 raw = buffer
                 line = _strip_ansi(buffer)
+                # The screen model's own view of the row this buffer was
+                # drawn on — used ONLY for the token value itself (see
+                # `_token_value_in`); every other decision below still
+                # runs off `line`, unchanged.
+                screen_line = screen.row_text(row_before)
                 buffer = ""
                 if self._token_flow_active:
                     # Raw, pre-strip structure — the one thing missing
@@ -794,7 +1002,7 @@ class TerminalLoginWorker(Worker):
                     # ever puts the label and the token on the same line.
                     self._token_flow_active = True
                     self._awaiting_token_value = True
-                token = self._token_value_in(line)
+                token = self._token_value_in(line, screen_line)
                 if token:
                     self._awaiting_token_value = False
                     # Held, not emitted: verified once the child has
@@ -885,7 +1093,7 @@ class TerminalLoginWorker(Worker):
             return
         self.token_captured.emit(_OAUTH_TOKEN_ENV_VAR, token)
 
-    def _token_value_in(self, line: str) -> str:
+    def _token_value_in(self, line: str, screen_line: str) -> str:
         """The minted OAuth token if THIS line carries it, else `""`.
 
         Two shapes, in the order a real run produces them. The bare line
@@ -894,6 +1102,17 @@ class TerminalLoginWorker(Worker):
         real value and is kept only so a future build that starts doing
         it isn't missed.
 
+        `screen_line` — the `_TerminalScreen` row this buffer was drawn
+        on, not `line` (`_strip_ansi(buffer)`) — is what the bare-line
+        branch reads. A build that redraws its own token line across
+        several frames (docs/facts/acp-sdk.md §26, rewritten) can leave a
+        character painted by an earlier frame that this flush's own
+        buffer never re-sent; `line` cannot see it, `screen_line` can,
+        because the screen model is never reset between flushes. The
+        `VAR=value` branch still reads `line` — that shape has never been
+        observed carrying a real value at all (see below), so it isn't
+        worth the same treatment.
+
         Both are shape-checked. Without that check the instruction line
         `export CLAUDE_CODE_OAUTH_TOKEN=<token>` hands over the literal
         string `<token>`, which stores cleanly, reports "Signed in." and
@@ -901,7 +1120,7 @@ class TerminalLoginWorker(Worker):
         back here — strictly worse than capturing nothing at all.
         """
         if self._awaiting_token_value:
-            candidate = line.strip()
+            candidate = screen_line.strip()
             if _TOKEN_VALUE_RE.fullmatch(candidate):
                 return candidate
         match = _OAUTH_TOKEN_RE.search(line)

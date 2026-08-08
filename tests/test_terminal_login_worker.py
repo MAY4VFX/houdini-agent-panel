@@ -865,31 +865,29 @@ def test_a_real_pty_run_reports_the_width_we_set(qapp, tmp_path):
 
 
 def test_shape_for_log_shows_escapes_and_hides_the_secret():
-    """The diagnostic that was missing all three times a token got
-    corrupted between the pty and settings.json.
+    """The diagnostic that eventually pinned down a real token corruption
+    (docs/facts/acp-sdk.md §26, rewritten) — not by proving an ANSI-
+    stripping bug (an earlier read of the same measurement thought so and
+    was wrong), but by showing precisely which escapes surrounded the
+    captured text, letting the real cause (a character an earlier
+    terminal-diff frame drew, invisible to a single flush's own buffer —
+    see `_TerminalScreen`) be told apart from a stripping bug by
+    arithmetic instead of guessing.
 
     The log only ever recorded text after `_strip_ansi` had run, so it
-    could never show which escape did the damage. This records the raw
+    could never show what surrounded a captured run. This records the raw
     bytes with every long run masked: escapes stay visible, the secret
     does not survive.
     """
     from houdini_agent_panel.ui import terminal_login as tl
 
-    # The exact corruption measured on Linux: a CSI whose final byte is
-    # the token's own "o" (sk-ant-oat01- arriving as sk-ant-at01-).
-    raw = "sk-ant-\x1b[oat01-" + "A" * 90
+    raw = "sk-ant-" + "\x1b[2m" + "oat01-" + "A" * 90 + "\x1b[0m"
     shape = tl._shape_for_log(raw)
 
-    assert "\\x1b[" in shape, shape
+    assert shape.count("\\x1b[") == 2, f"both escapes must stay visible: {shape}"
+    assert "\\x1b[0m" in shape, shape
     assert "sk-ant-" in shape, "the non-secret prefix must stay readable"
-    assert "<96:" in shape, "the long run must be replaced by its length"
     assert "A" * 24 not in shape, "no long run of the secret may survive"
-
-    # This shape was what identified the defect. Now that `_ANSI_RE` no
-    # longer lets an incomplete CSI terminate on the next character, the
-    # same input survives intact — see
-    # `test_an_incomplete_csi_does_not_eat_the_next_character`.
-    assert tl._strip_ansi(raw).startswith("sk-ant-oat01-")
 
 
 def test_shape_for_log_keeps_the_secret_out_of_a_styled_line_too():
@@ -911,37 +909,6 @@ def test_shape_for_log_keeps_the_secret_out_of_a_styled_line_too():
     assert shape.count("\\x1b") == 2, f"both escapes must stay visible: {shape}"
 
 
-def test_an_incomplete_csi_does_not_eat_the_next_character():
-    """The `401 Invalid bearer token` regression, measured not guessed.
-
-    `_shape_for_log` on a real Linux sign-in (mayfx02, 2026-08-08)
-    recorded the token line as `'\\x1b[1C\\x1b[<9>\\x1b[<103>'` with 107
-    characters captured. This build emits `\\x1b[10` — parameters, no
-    final byte — and then keeps printing the token. Syntactically
-    `\\x1b[10o` is a valid CSI, so a final class of `[@-~]` swallowed the
-    token's own "o": sk-ant-oat01- became sk-ant-at01-, and the API said
-    the bearer was invalid. Re-inserting that character made the same
-    request authenticate.
-
-    The numbers pin the shape down: a well-formed `\\x1b[10G` would have
-    logged 104 and produced 108. 103 and 107 is the incomplete form.
-    """
-    from houdini_agent_panel.ui import terminal_login as tl
-
-    true_token = "sk-ant-oat01-" + "X" * 95
-    assert len(true_token) == 108
-
-    raw = "\x1b[1C" + "\x1b[2G" + "sk-ant-" + "\x1b[10" + true_token[7:]
-
-    # The masked form this reconstruction produces is the one that was
-    # logged — with the run heads that `_SHAPE_HEAD` now reveals, which
-    # is what tells this layout apart from the `\x1b[10G` one that
-    # produces an identical shape without them.
-    assert tl._shape_for_log(raw) == repr("\x1b[1C\x1b[<9:2Gsk…>\x1b[<103:10oa…>")
-
-    assert tl._strip_ansi(raw) == true_token, "the token must survive intact"
-
-
 def test_a_well_formed_csi_is_still_stripped_whole():
     """The fix must not cost the stripping that already worked — every
     one of these appeared in the same real capture."""
@@ -956,3 +923,129 @@ def test_a_well_formed_csi_is_still_stripped_whole():
         ("\x1b[>0qabc", "abc"),                         # the `>`-prefixed query (§20)
     ):
         assert tl._strip_ansi(raw) == expected, raw
+
+
+# --- §26 (corrected): a screen model, not a stricter regex ----------------
+#
+# The first read of the mayfx02 corruption (docs/facts/acp-sdk.md §26,
+# original) blamed an incomplete CSI eating the token's own "o". That was
+# wrong: `_shape_for_log`, with its run heads revealed, shows the real
+# capture's `\x1b[10G` was complete and well-formed the whole time —
+# `'\x1b[1C\x1b[<9:2Bsk…>\x1b[<103:10Ga…>'`. The actual cause is that an
+# Ink-based build repaints the screen as a diff between frames, and a
+# single flush's own buffer (what `_strip_ansi` has ever seen) has no way
+# to know a character was already painted by an earlier frame that this
+# one's cursor jump skips over. `_TerminalScreen` fixes it at that layer.
+
+
+def test_screen_model_recovers_a_character_drawn_by_an_earlier_frame():
+    """RED before the fix: concatenating just the LAST frame's own
+    printable characters (`_strip_ansi` on one flush's buffer — exactly
+    what `_token_value_in` used to read) gives 107 characters, the real
+    corruption. `_TerminalScreen`, fed both frames in sequence the same
+    way the read loop feeds every character it reads, is never reset
+    between them — the earlier frame's character is still sitting in its
+    cell when the later frame's row is read back, and the reconstruction
+    is the full 108-character token.
+    """
+    from houdini_agent_panel.ui.terminal_login import _TerminalScreen, _strip_ansi
+
+    true_token = "sk-ant-oat01-" + "X" * 95
+    assert len(true_token) == 108
+
+    # Never logged for real — only the LAST frame before a genuine line
+    # break is (`_shape_for_log` fires once per flush). Reconstructed here
+    # as the only way an "o" could have reached the screen at all:
+    # absolute positioning to row 3, column 9 (1-based) — the exact cell
+    # the later frame's relative moves, below, land on.
+    earlier_frame = "\x1b[3;9H" + "o"
+
+    # The measured bytes, byte for byte (docs/facts/acp-sdk.md §26,
+    # rewritten): `\x1b[1C` + `\x1b[2B` + "sk-ant-" + `\x1b[10G` +
+    # "at01-…" — repositioned onto the same row via one absolute move
+    # first (row 1, column 1) so the relative moves land on row 3, column
+    # 2, exactly where "sk-ant-" started in the real capture.
+    later_frame = "\x1b[1;1H" + "\x1b[1C" + "\x1b[2B" + "sk-ant-" + "\x1b[10G" + true_token[8:]
+
+    # What a single flush's own buffer produced — the 107-character
+    # corruption itself, byte for byte what `_token_value_in` used to see.
+    naive = _strip_ansi(later_frame)
+    assert naive == "sk-ant-" + true_token[8:]
+    assert len(naive) == 107
+
+    screen = _TerminalScreen()
+    for ch in earlier_frame:
+        screen.feed(ch)
+    for ch in later_frame:
+        screen.feed(ch)
+
+    assert screen.row_text(2).strip() == true_token  # row 3 is index 2, 0-based
+
+
+def test_screen_model_restores_spaces_lost_to_naive_ansi_stripping():
+    """A real captured line (mayfx02): text arrives as separate runs, each
+    positioned by an absolute column jump rather than a literal space
+    character — the same mechanism `_marker_in`'s own docstring already
+    established for a single prompt string (§20), here spanning a whole
+    sentence. Naive `_strip_ansi` on the raw buffer deletes the escapes
+    and concatenates what's left, throwing away every gap a jump left
+    behind — each one IS the space it renders as on a real terminal.
+    `_TerminalScreen` leaves that gap as unwritten cells, which `row_text`
+    renders back as the spaces they visually are.
+    """
+    from houdini_agent_panel.ui.terminal_login import _TerminalScreen, _strip_ansi
+
+    raw = (
+        "Browser didn't open?\x1b[23GUse the url\x1b[35Gbelow\x1b[41Gto"
+        "\x1b[44Gsign\x1b[49Gin\x1b[52G(c\x1b[55Gto\x1b[58Gcopy)"
+    )
+
+    glued = _strip_ansi(raw)
+    assert glued == "Browser didn't open?Use the urlbelowtosignin(ctocopy)"
+
+    screen = _TerminalScreen()
+    for ch in raw:
+        screen.feed(ch)
+
+    assert screen.row_text(0).strip() == (
+        "Browser didn't open?  Use the url below to sign in (c to copy)"
+    )
+
+
+_TOKEN_LABEL_LINE = "Your OAuth token (valid for 1 year):"
+
+#: An end-to-end reproduction through the real `TerminalLoginWorker`
+#: codepath, not just the `_TerminalScreen` unit — the label line, then
+#: the token split across two writes the same shape as the real capture:
+#: an earlier partial paint of "o" at the exact cell the later, measured
+#: bytes jump over. `\r` between them is a flush (not a real newline),
+#: matching a redraw frame rather than a completed line.
+_CLAUDE_SCREEN_DIFF_TOKEN_SCRIPT = (
+    "import sys\n"
+    f"print({_TOKEN_LABEL_LINE!r})\n"
+    "sys.stdout.write('\\x1b[3;9Ho\\r')\n"
+    "true_token = 'sk-ant-oat01-' + 'X' * 95\n"
+    "sys.stdout.write('\\x1b[1;1H' + '\\x1b[1C' + '\\x1b[2B' + 'sk-ant-' "
+    "+ '\\x1b[10G' + true_token[8:] + '\\n')\n"
+    "sys.stdout.flush()\n"
+)
+
+
+def test_the_worker_recovers_the_full_token_from_a_frame_diffed_build(qapp, tmp_path):
+    """The actual regression, end to end: a build that repaints its token
+    line across frames used to hand `token_captured` a 107-character
+    value with the token's own "o" missing — a token the API rejects.
+    Through the real worker, not just the model unit above.
+    """
+    ta = TerminalAuth(command=sys.executable, args=["-c", _CLAUDE_SCREEN_DIFF_TOKEN_SCRIPT], env={})
+    worker = TerminalLoginWorker("claude-acp", ta, cwd=str(tmp_path))
+
+    captured: list[tuple[str, str]] = []
+    worker.token_captured.connect(lambda env_var, token: captured.append((env_var, token)))
+    worker.start()
+
+    _wait_until(qapp, lambda: bool(captured))
+    worker.wait(3000)
+
+    true_token = "sk-ant-oat01-" + "X" * 95
+    assert captured == [("CLAUDE_CODE_OAUTH_TOKEN", true_token)]
