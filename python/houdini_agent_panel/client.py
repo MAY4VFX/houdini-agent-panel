@@ -313,6 +313,40 @@ def _chunk_text(content: Any) -> str:
     return content.text if getattr(content, "type", None) == "text" else ""
 
 
+def _agent_path(spec: "LaunchSpec", env: dict) -> str:
+    """The PATH the agent process actually runs with.
+
+    Two things have to be true at once, and only this function sees both.
+
+    The artist's login shell owns the PATH that matters: their `git`, their
+    `rg`, their version manager's Python all live on it, and Houdini — a GUI
+    process launched by the window server — never saw any of it
+    (`shellenv.py`). A binary agent already gets that PATH, because its spec
+    carries none of its own.
+
+    Our vendored Node has to come FIRST, because `npx-cli.js` spawns its
+    children with the bare `node` command (`node.path_with_node`). An npx
+    spec therefore arrives with a finished `env["PATH"]` — built by
+    `runtime._npx_launch_spec` out of the only PATH IT could see, Houdini's
+    — and merging it in the ordinary way replaced the shell's PATH wholesale,
+    so npx agents silently lost every tool a binary agent kept. Composing
+    from `spec.path_prepend` instead keeps both halves: our directories in
+    front, the artist's PATH behind them.
+    """
+    # `getattr`, not `spec.path_prepend`: what this function is handed is
+    # anything shaped like a launch spec — `runtime.LaunchSpec` in the
+    # panel, a two-line stand-in in the tests — and requiring a field that
+    # only one of them has would turn "no directories to put first", the
+    # ordinary case, into a crash at launch.
+    prepend = tuple(getattr(spec, "path_prepend", ()) or ())
+    if not prepend:
+        return env.get("PATH", "")
+    from . import node as node_module
+
+    shell_path = shellenv.capture().get("PATH")
+    return node_module.path_with_dirs(prepend, shell_path or env.get("PATH", ""))
+
+
 @dataclass(frozen=True)
 class ConfigChoice:
     value: str
@@ -612,6 +646,11 @@ class AcpWorker(QtCore.QThread):
             # project all live in that profile and nowhere else. See
             # `shellenv.py` for what this costs and why it is cached.
             env = shellenv.merged(dict(acp.default_environment()), spec.env)
+            # `spec.env` legitimately wins over the shell for everything the
+            # artist typed into Settings — but not for PATH, where it is not
+            # a preference at all, only the best guess `runtime` could make
+            # without a shell. See `_agent_path`.
+            env["PATH"] = _agent_path(spec, env)
 
             from . import proxy as _proxy_module
 

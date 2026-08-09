@@ -349,6 +349,24 @@ def _runs(binary: Path) -> bool:
     return result.returncode == 0
 
 
+def path_with_dirs(dirs: Sequence[str | Path], base: str | None = None) -> str:
+    """`base` with `dirs` in front of it, in order, each appearing once.
+
+    Split out of `path_with_node` because `client.py` has to redo this
+    against a DIFFERENT base than the one available here — see
+    `client._agent_path`: the PATH the agent should run with is the
+    artist's login-shell PATH, which this module has no business spawning a
+    shell to read.
+    """
+    existing = base if base is not None else os.environ.get("PATH", "")
+    wanted = [str(directory) for directory in dirs]
+    parts = list(wanted)
+    for part in existing.split(os.pathsep):
+        if part and part not in parts:
+            parts.append(part)
+    return os.pathsep.join(parts)
+
+
 def path_with_node(node_bin: Path, base: str | None = None) -> str:
     """A PATH with our `node`'s directory prepended.
 
@@ -362,7 +380,4 @@ def path_with_node(node_bin: Path, base: str | None = None) -> str:
     the agent may need other tools from the machine too, and we're not
     going to take them away from it.
     """
-    node_dir = str(node_bin.parent)
-    existing = base if base is not None else os.environ.get("PATH", "")
-    parts = [node_dir] + [part for part in existing.split(os.pathsep) if part and part != node_dir]
-    return os.pathsep.join(parts)
+    return path_with_dirs([node_bin.parent], base)

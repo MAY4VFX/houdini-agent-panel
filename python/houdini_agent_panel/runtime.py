@@ -38,6 +38,17 @@ class LaunchSpec:
     command: str
     args: list[str]
     env: dict[str, str]  # added to the process environment, not a replacement for it
+    #: Directories that must come FIRST on the agent's PATH, whatever the
+    #: rest of it ends up being. Only `env["PATH"]` would be simpler, and it
+    #: was that at first — but the value written here can only be built from
+    #: Houdini's own PATH, and the PATH the agent should actually run with is
+    #: the artist's login-shell one (`shellenv.py`), which is not known until
+    #: `client.do_start`. Handing over the directories instead of a finished
+    #: string lets that composition happen where both halves exist, without
+    #: this module spawning a shell of its own. `env["PATH"]` is still set as
+    #: well, so a spec spawned directly (a script, a diagnostic) remains
+    #: correct on its own.
+    path_prepend: tuple[str, ...] = ()
 
 
 class InstallError(RuntimeError):
@@ -321,7 +332,9 @@ def _npx_launch_spec(node_bin: Path, dist: NpxDistribution) -> LaunchSpec:
     args = node_module.npx_argv(node_bin, dist.package, dist.args)
     env = dict(dist.env)
     env["PATH"] = node_module.path_with_node(node_bin, env.get("PATH"))
-    return LaunchSpec(command=args[0], args=args[1:], env=env)
+    return LaunchSpec(
+        command=args[0], args=args[1:], env=env, path_prepend=(str(node_bin.parent),)
+    )
 
 
 def _binary_launch_spec(version_dir: Path, dist: BinaryDistribution) -> LaunchSpec:
@@ -364,7 +377,12 @@ def install_agent(
         node_bin = node_module.ensure_node(progress=progress, fetch=fetch)
         _write_manifest(entry, kind="npx")
         spec = _npx_launch_spec(node_bin, dist)
-        return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+        return LaunchSpec(
+            command=spec.command,
+            args=spec.args,
+            env=_with_proxy(spec.env, settings),
+            path_prepend=spec.path_prepend,
+        )
 
     if not dist.sha256:
         # Some registry entries have no sha256 (§ registry.py,
@@ -395,7 +413,12 @@ def install_agent(
     _make_executable(cmd_path)
     _write_manifest(entry, kind="binary")
     spec = _binary_launch_spec(version_dir, dist)
-    return LaunchSpec(command=spec.command, args=spec.args, env=_with_proxy(spec.env, settings))
+    return LaunchSpec(
+        command=spec.command,
+        args=spec.args,
+        env=_with_proxy(spec.env, settings),
+        path_prepend=spec.path_prepend,
+    )
 
 
 def uninstall_agent(agent_id: str) -> None:
@@ -480,7 +503,9 @@ def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
         spec = _binary_launch_spec(version_dir, dist)
 
     env = _with_oauth_tokens(_with_proxy(spec.env, settings), entry.id, settings)
-    return LaunchSpec(command=spec.command, args=spec.args, env=env)
+    return LaunchSpec(
+        command=spec.command, args=spec.args, env=env, path_prepend=spec.path_prepend
+    )
 
 
 def custom_launch_spec(agent: CustomAgent, *, settings=None) -> LaunchSpec:
