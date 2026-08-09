@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .. import settings as settings_module
 from . import theme
 from .chips import ChoiceButton, ModeChip
 from .boot_status import BootStatus
@@ -920,12 +921,22 @@ class Composer(QtWidgets.QWidget):
         `info=None` (the agent disconnected, or hasn't connected yet) hides
         both controls — except when a whisper endpoint alone is enough for
         the microphone, which `VoiceButton.configure` decides, not this.
+
+        `whisper` (the endpoint) arrives as a parameter because the caller
+        already keeps a live `Settings` around; `whisper_api_key` doesn't
+        have an equivalent path in, so it's read here instead, straight
+        from disk — the same `settings.load()` `SettingsView.reload()`
+        already does, and cheap for the same reason: a small local JSON
+        file, not a network call.
         """
         self._info = info
         can_attach = info is not None and (info.supports_image or info.supports_embedded_context)
         self._attach_button.setVisible(can_attach)
         supports_audio = info is not None and info.supports_audio
-        self._voice_button.configure(supports_audio=supports_audio, whisper_endpoint=whisper)
+        api_key = settings_module.load().whisper_api_key
+        self._voice_button.configure(
+            supports_audio=supports_audio, whisper_endpoint=whisper, whisper_api_key=api_key
+        )
 
     def shutdown(self) -> None:
         """Forwarded to `VoiceButton` — see its own `shutdown`. Called from

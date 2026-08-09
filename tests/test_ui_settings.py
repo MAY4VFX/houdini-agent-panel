@@ -83,6 +83,38 @@ def test_whisper_endpoint_persists(qapp):
     assert settings_module.load().whisper_endpoint == "http://127.0.0.1:9000"
 
 
+def test_whisper_api_key_field_defaults_to_empty(qapp):
+    view = SettingsView()
+    assert view._whisper_api_key_edit.text() == ""
+
+
+def test_whisper_api_key_field_is_masked(qapp):
+    """A secret typed here must not be readable off the screen — same
+    expectation the project already states in words for the proxy URL's
+    own password ("A password typed into the proxy URL is written to
+    settings.json as plain text"), but here there's an actual masked field
+    to hold it to."""
+    view = SettingsView()
+    assert view._whisper_api_key_edit.echoMode() == QtWidgets.QLineEdit.Password
+
+
+def test_whisper_api_key_persists(qapp):
+    view = SettingsView()
+    view._whisper_api_key_edit.setText("sk-whisper-secret")
+    assert settings_module.load().whisper_api_key == "sk-whisper-secret"
+
+
+def test_whisper_api_key_reload_reflects_disk(qapp):
+    current = settings_module.load()
+    current.whisper_api_key = "sk-whisper-secret"
+    settings_module.save(current)
+
+    view = SettingsView()
+    view.reload()
+
+    assert view._whisper_api_key_edit.text() == "sk-whisper-secret"
+
+
 # --- Network section (issue #26) ------------------------------------------
 
 

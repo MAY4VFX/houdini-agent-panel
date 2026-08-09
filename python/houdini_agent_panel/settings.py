@@ -108,6 +108,11 @@ class Settings:
     telemetry: bool = False
     telemetry_consent_asked: bool = False
     whisper_endpoint: str = ""
+    #: API key for `whisper_endpoint`, sent as `X-API-Key` by `ui/voice.py::
+    #: default_uploader`. Blank means "no auth header" — a local, unauthenticated
+    #: whisper (the common case this field was added alongside) must keep
+    #: working with nothing filled in here.
+    whisper_api_key: str = ""
     buddy: str = "crag"
     #: Studio proxy, e.g. "http://proxy.studio.local:8080". Empty means
     #: "whatever the machine already exports" — see `proxy.effective_proxy`.

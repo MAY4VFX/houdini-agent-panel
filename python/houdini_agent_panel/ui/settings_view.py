@@ -61,8 +61,8 @@ _MIN_RAIL_WIDTH = 180
 # day someone runs Houdini with a larger UI font scale, which is exactly
 # the kind of drift this rewrite exists to stop.
 _ROW_LABELS = (
-    "Whisper endpoint", "Data folder", "Proxy", "No proxy", "CA bundle", "Bug report endpoint",
-    "Panel", "fxhoudinimcp",
+    "Whisper endpoint", "Whisper API key", "Data folder", "Proxy", "No proxy", "CA bundle",
+    "Bug report endpoint", "Panel", "fxhoudinimcp",
 )
 
 
@@ -516,6 +516,15 @@ class SettingsView(QtWidgets.QWidget):
         self._whisper_edit.setPlaceholderText("http://127.0.0.1:9000 (local whisper)")
         self._whisper_edit.textChanged.connect(self._on_field_changed)
 
+        # Masked like any other secret field — sent as `X-API-Key` by
+        # `ui/voice.py::default_uploader`. Blank is a real, supported value:
+        # a local whisper with no auth in front of it must keep working
+        # with nothing typed here.
+        self._whisper_api_key_edit = QtWidgets.QLineEdit(self)
+        self._whisper_api_key_edit.setPlaceholderText("blank = no auth header (local whisper)")
+        self._whisper_api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self._whisper_api_key_edit.textChanged.connect(self._on_field_changed)
+
         self._data_dir_label = QtWidgets.QLabel(self)
         self._data_dir_label.setWordWrap(True)
         self._open_data_dir_button = QtWidgets.QPushButton("Open", self)
@@ -650,6 +659,7 @@ class SettingsView(QtWidgets.QWidget):
 
         voice_section = _Section("Voice", self, expanded=True, grid=grid_metrics)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
+        voice_section.add_row("Whisper API key", self._whisper_api_key_edit)
 
         privacy_section = _Section("Privacy", self, expanded=False, grid=grid_metrics)
         privacy_section.add_checkbox(self._telemetry_checkbox)
@@ -834,6 +844,7 @@ class SettingsView(QtWidgets.QWidget):
             self._show_announcements_checkbox.setChecked(current.show_announcements)
             self._telemetry_checkbox.setChecked(current.telemetry)
             self._whisper_edit.setText(current.whisper_endpoint)
+            self._whisper_api_key_edit.setText(current.whisper_api_key)
             self._bugreport_endpoint_edit.setText(current.bugreport_endpoint)
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
@@ -865,6 +876,7 @@ class SettingsView(QtWidgets.QWidget):
         current.show_announcements = self._show_announcements_checkbox.isChecked()
         current.telemetry = self._telemetry_checkbox.isChecked()
         current.whisper_endpoint = self._whisper_edit.text().strip()
+        current.whisper_api_key = self._whisper_api_key_edit.text().strip()
         current.bugreport_endpoint = self._bugreport_endpoint_edit.text().strip()
         current.proxy_url = self._proxy_edit.text().strip()
         current.no_proxy = self._no_proxy_edit.text().strip()
