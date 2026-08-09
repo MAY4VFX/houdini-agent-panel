@@ -108,8 +108,9 @@ class TranscriptModel:
         self._entries: list[Entry] = []
         # Indexes by id — so streaming stitches together and updates find
         # their entry in O(1), instead of scanning the whole feed on every
-        # chunk.
-        self._by_message_id: dict[str, Entry] = {}
+        # chunk. The message index is keyed by `(kind, message_id)`: see
+        # `apply_chunk` for the agent that reuses one id for both streams.
+        self._by_message_id: dict[tuple[str, str], Entry] = {}
         self._by_tool_call_id: dict[str, Entry] = {}
         self._by_request_key: dict[str, Entry] = {}
         self._plan_entry: Entry | None = None
@@ -177,12 +178,23 @@ class TranscriptModel:
         kind: EntryKind = "thought" if thought else "agent"
 
         if message_id:
-            existing = self._by_message_id.get(message_id)
-            if existing is not None and existing.kind == kind:
+            # Keyed by KIND AND id, and the entry's own id carries the kind
+            # too. `messageId` identifies the agent's message, not one
+            # stream within it: opencode sends its reasoning and its answer
+            # under the SAME id (measured — the reasoning arrived, the
+            # answer never appeared on screen). Two entries then shared one
+            # id, and `TranscriptView._refresh_one` resolves an id by taking
+            # the FIRST entry that carries it — so every chunk of the answer
+            # was rendered into the thought's row and the answer itself
+            # stayed invisible until the feed happened to be rebuilt from
+            # scratch.
+            key = (kind, message_id)
+            existing = self._by_message_id.get(key)
+            if existing is not None:
                 existing.text += text
                 return existing
-            entry = Entry(kind=kind, id=message_id, text=text)
-            self._by_message_id[message_id] = entry
+            entry = Entry(kind=kind, id=f"{kind}:{message_id}", text=text)
+            self._by_message_id[key] = entry
         else:
             # No message_id at all. `messageId` is optional in ACP, and Grok
             # omits it on every chunk — which used to mean one entry per
