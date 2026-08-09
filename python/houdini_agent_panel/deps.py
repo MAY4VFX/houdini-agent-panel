@@ -91,8 +91,16 @@ def _mentions_version(path: Path, houdini_version: str) -> bool:
     return re.search(pattern, path.as_posix()) is not None
 
 
-def find_hython(houdini_version: str) -> Path | None:
+def find_hython(houdini_version: str | None) -> Path | None:
     """Find `hython` for a given Houdini version (e.g. "20.5").
+
+    `None` means "any Houdini on this machine, newest wins". That is not a
+    convenience: `--houdini-dir /studio/hsite/packages` names a destination
+    whose parent says nothing about a version (`houdini_version_of` returns
+    None for it), and the operator who typed it still expects an install.
+    Before, that case reached `re.escape(None)` and took the installer down
+    with a TypeError the moment `$HFS` happened to be set — which it always
+    is under the documented `hython -m houdini_agent_panel install`.
 
     `$HFS` is consulted first, but only when it is an install of the version
     being asked about — which is not how this started, and the difference
@@ -117,7 +125,10 @@ def find_hython(houdini_version: str) -> Path | None:
         candidate = _hfs_hython(Path(hfs))
         if candidate.is_file():
             hfs_hython = candidate
-            if _mentions_version(Path(hfs), houdini_version):
+            # With no version to agree about, `$HFS` is the best answer
+            # there is — it is the operator's own statement of which
+            # Houdini this is.
+            if houdini_version is None or _mentions_version(Path(hfs), houdini_version):
                 return candidate
 
     candidates = _candidate_hythons(houdini_version)
@@ -126,21 +137,29 @@ def find_hython(houdini_version: str) -> Path | None:
     return max(candidates, key=_version_key)
 
 
-def _candidate_hythons(houdini_version: str) -> list[Path]:
+def _candidate_hythons(houdini_version: str | None) -> list[Path]:
+    """Every `hython` on disk for `houdini_version` — or for any version,
+    when it is None (see `find_hython`). The wildcard patterns are the
+    versioned ones with the version replaced by `*`, not a separate idea of
+    where Houdini lives."""
     system = _system()
 
     if system == "darwin":
         root = _MAC_APPLICATIONS_ROOT
         pattern = (
-            f"Houdini{houdini_version}.*/Frameworks/Houdini.framework/"
-            f"Versions/{houdini_version}/Resources/bin/hython"
+            "Houdini*/Frameworks/Houdini.framework/Versions/*/Resources/bin/hython"
+            if houdini_version is None
+            else (
+                f"Houdini{houdini_version}.*/Frameworks/Houdini.framework/"
+                f"Versions/{houdini_version}/Resources/bin/hython"
+            )
         )
     elif system == "windows":
         root = _WINDOWS_PROGRAM_FILES
-        pattern = f"Houdini {houdini_version}*/bin/hython.exe"
+        pattern = f"Houdini {houdini_version or ''}*/bin/hython.exe"
     else:
         root = _LINUX_OPT_ROOT
-        pattern = f"hfs{houdini_version}*/bin/hython"
+        pattern = f"hfs{houdini_version or ''}*/bin/hython"
 
     if not root.is_dir():
         return []
