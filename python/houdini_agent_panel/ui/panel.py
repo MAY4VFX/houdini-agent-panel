@@ -3116,7 +3116,7 @@ class AgentPanel(QtWidgets.QWidget):
         if claude_on_path:
             command, args = claude_on_path, ["setup-token"]
         else:
-            command, args = "npx", ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+            command, args = self._npx_setup_token_argv()
         return acp_client.AuthMethod(
             id="claude-setup-token",
             name="Sign in with browser",
@@ -3134,6 +3134,50 @@ class AgentPanel(QtWidgets.QWidget):
             ),
             terminal_auth=acp_client.TerminalAuth(command=command, args=args, env={}),
         )
+
+    @staticmethod
+    def _npx_setup_token_argv() -> tuple[str, list[str]]:
+        """`claude setup-token` through npx, run the same way the AGENT is.
+
+        A bare `"npx"` was the first version of this and it is wrong twice
+        over. On a machine with no system Node — the case this panel
+        vendors Node for, and the same case where `claude` is not on PATH
+        either, so exactly the case this branch exists to serve — there is
+        no `npx` to find and the sign-in button dies with
+        `FileNotFoundError`. And on Windows `npx` is `npx.cmd`, which
+        `CreateProcess` will not locate from the bare name at all.
+
+        `node.npx_argv` is what `runtime._npx_launch_spec` already uses for
+        the agent itself: our Node, `npx-cli.js` called directly, no shim.
+        `existing_node`, not `ensure_node`, because this runs on the main
+        thread — if there is somehow no Node at all we fall back to the
+        bare name rather than freezing Houdini on a download.
+        """
+        package_args = ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+        from .. import node as node_module
+
+        node_bin = node_module.existing_node()
+        if node_bin is None:
+            return "npx", package_args
+        try:
+            argv = node_module.npx_argv(node_bin, "@anthropic-ai/claude-code", ["setup-token"])
+        except node_module.NpxNotFoundError:
+            return "npx", package_args
+        return argv[0], argv[1:]
+
+    @staticmethod
+    def _is_npx_setup_token_placeholder(ta: Any) -> bool:
+        """Is this `terminal_auth` the npx recipe rather than a real
+        `claude` already on the machine?
+
+        Asked by `_start_terminal_login` to decide whether the cheap look
+        in npx's own cache (`_resolve_claude_terminal_command`) is worth
+        doing first. It used to be `ta.command == "npx"`, which
+        `_npx_setup_token_argv` made wrong: the command is now our `node`,
+        with `npx-cli.js` as its first argument. The package name is what
+        actually distinguishes the two, and it survives either spelling.
+        """
+        return "@anthropic-ai/claude-code" in tuple(getattr(ta, "args", ()) or ())
 
     def _find_auth_method(self, method_id: str) -> Any:
         """Wire methods first (`agent_info().auth_methods`), then the
@@ -3351,7 +3395,7 @@ class AgentPanel(QtWidgets.QWidget):
         # for `claude` already found on PATH or for another agent's own
         # `terminal_auth` (Kimi's `kimi login` needs no such thing).
         resolve_command = None
-        if method.id == "claude-setup-token" and ta.command == "npx":
+        if method.id == "claude-setup-token" and self._is_npx_setup_token_placeholder(ta):
             resolve_command = self._resolve_claude_terminal_command
 
         # `claude-setup-token`'s own binary (bundled or npx-resolved, either

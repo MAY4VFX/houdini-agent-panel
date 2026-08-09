@@ -194,6 +194,21 @@ def ensure_node(*, progress: Progress | None = None, fetch: Fetcher | None = Non
     return install_node(progress=progress, fetch=fetch)
 
 
+def existing_node() -> Path | None:
+    """The Node this machine already has, or None. NEVER downloads.
+
+    `ensure_node()` is the wrong call anywhere a download would be a
+    surprise — on the main thread above all, where fetching Node means a
+    frozen Houdini. This answers the narrower question: is there a usable
+    `node` right now, either the system's or the one we installed earlier?
+    """
+    system_node = find_system_node()
+    if system_node is not None:
+        return system_node
+    ours = _node_bin_path(paths.node_dir() / NODE_VERSION)
+    return ours if ours.exists() else None
+
+
 def npx_argv(node_bin: Path, package: str, args: Sequence[str]) -> list[str]:
     """`[<node>, <npx-cli.js>, "--yes", package, *args]`.
 

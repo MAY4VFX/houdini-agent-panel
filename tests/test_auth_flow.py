@@ -1163,10 +1163,46 @@ def test_claudes_built_in_recipe_prefers_claude_on_path(qapp, monkeypatch):
     assert method.terminal_auth.command == "/usr/local/bin/claude"
     assert method.terminal_auth.args == ["setup-token"]
 
+    from houdini_agent_panel import node as node_mod
+
     monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+    # No `claude` AND no Node anywhere: the bare name is all that is left.
+    # It will probably fail — that is the honest state of the machine, and
+    # the error says so — but it is not this function's call to make.
+    monkeypatch.setattr(node_mod, "existing_node", lambda: None)
     method = widget._builtin_terminal_auth_method("claude-acp")
     assert method.terminal_auth.command == "npx"
     assert method.terminal_auth.args == ["--yes", "@anthropic-ai/claude-code", "setup-token"]
+    widget.shutdown()
+
+
+def test_claudes_built_in_recipe_uses_our_own_node(qapp, monkeypatch, tmp_path):
+    """The case this fallback exists for is a machine with no system Node —
+    which is also a machine with no `npx` on PATH, so the bare name it used
+    to fall back to could only ever fail with FileNotFoundError (and on
+    Windows `npx` is `npx.cmd`, which `CreateProcess` never finds from the
+    bare name at all). Our vendored Node runs `npx-cli.js` directly, exactly
+    as the agent itself is launched."""
+    from houdini_agent_panel import node as node_mod
+
+    node_bin = tmp_path / "node" / "bin" / "node"
+    node_bin.parent.mkdir(parents=True)
+    node_bin.write_text("#!/bin/sh\n")
+    npx_cli = tmp_path / "node" / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js"
+    npx_cli.parent.mkdir(parents=True)
+    npx_cli.write_text("// npx\n")
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    monkeypatch.setattr(panel_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(node_mod, "existing_node", lambda: node_bin)
+
+    method = widget._builtin_terminal_auth_method("claude-acp")
+
+    assert method.terminal_auth.command == str(node_bin)
+    assert method.terminal_auth.args == [
+        str(npx_cli), "--yes", "@anthropic-ai/claude-code", "setup-token"
+    ]
     widget.shutdown()
 
 
@@ -1697,3 +1733,29 @@ def test_terminal_login_with_output_reads_as_a_login_failure_not_a_proxy_one(qap
     assert "proxy" not in text.lower()
     assert "npx --yes @anthropic-ai/claude-code setup-token" in text
     widget.shutdown()
+
+
+def test_the_npx_placeholder_is_recognised_however_npx_is_spelled():
+    """`_start_terminal_login` attaches `_resolve_claude_terminal_command`
+    only to the npx PLACEHOLDER, never to a real `claude` already on PATH.
+    It used to recognise that placeholder by `command == "npx"` — which
+    stopped being true the moment the recipe started invoking `npx-cli.js`
+    through our own Node, silently costing every such machine the cheap
+    look in npx's cache before a ~282 MB download."""
+    from types import SimpleNamespace
+
+    is_placeholder = panel_mod.AgentPanel._is_npx_setup_token_placeholder
+
+    assert is_placeholder(
+        SimpleNamespace(command="npx", args=["--yes", "@anthropic-ai/claude-code", "setup-token"])
+    )
+    assert is_placeholder(
+        SimpleNamespace(
+            command="/data/node/bin/node",
+            args=["/data/npx-cli.js", "--yes", "@anthropic-ai/claude-code", "setup-token"],
+        )
+    )
+    # A real `claude` on PATH resolves nothing — it IS the answer.
+    assert not is_placeholder(
+        SimpleNamespace(command="/usr/local/bin/claude", args=["setup-token"])
+    )
