@@ -132,10 +132,25 @@ def _candidate_prefs_dirs() -> list[Path]:
         return [p for p in root.iterdir() if p.is_dir()]
 
     if system == "Windows":
-        root = home / "Documents"
-        if not root.is_dir():
-            return []
-        return [p for p in root.glob("houdini*") if p.is_dir()]
+        # Three roots, not one, and the second is the reason: OneDrive's
+        # "Back up your Documents folder" moves the real Documents to
+        # `~/OneDrive/Documents` and leaves `~/Documents` either absent or a
+        # redirect Houdini does not use. It is on by default on a
+        # consumer/managed Windows 11, so `~/Documents` alone means the
+        # installer reports "no Houdini preferences directory found" on a
+        # machine that plainly has one. fxhoudinimcp's own
+        # `candidate_package_dirs` already looks in all three (see
+        # docs/facts/fxhoudinimcp.md §2) — this matches it rather than
+        # inventing a fourth answer. `home` itself is there for the
+        # `$HOUDINI_USER_PREF_DIR`-style layout some studios keep.
+        found: list[Path] = []
+        for root in (home / "Documents", home / "OneDrive" / "Documents", home):
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.glob("houdini*")):
+                if entry.is_dir() and entry not in found:
+                    found.append(entry)
+        return found
 
     # Linux, and anything that isn't Darwin/Windows.
     if not home.is_dir():

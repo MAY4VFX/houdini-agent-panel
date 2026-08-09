@@ -131,3 +131,36 @@ def test_candidate_package_dirs_windows_documents(tmp_path, monkeypatch):
 
 def test_package_name_constant():
     assert houdini_package.PACKAGE_NAME == "houdini_agent_panel.json"
+
+
+def test_candidate_package_dirs_windows_onedrive_documents(tmp_path, monkeypatch):
+    """OneDrive's "back up your Documents" moves the real Documents folder
+    to `~/OneDrive/Documents` — on by default on a managed Windows 11. With
+    only `~/Documents` looked at, the installer reported "no Houdini
+    preferences directory found" on a machine that plainly had one."""
+    monkeypatch.setattr(houdini_package.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(houdini_package.Path, "home", staticmethod(lambda: tmp_path))
+
+    onedrive = tmp_path / "OneDrive" / "Documents"
+    (onedrive / "houdini20.5").mkdir(parents=True)
+
+    found = houdini_package.candidate_package_dirs()
+
+    assert [p.parent for p in found] == [onedrive / "houdini20.5"]
+
+
+def test_candidate_package_dirs_windows_reports_every_root(tmp_path, monkeypatch):
+    """Both places can exist at once, and which one a given Houdini reads
+    cannot be told from here — so both are candidates, the same answer
+    fxhoudinimcp's own installer gives (docs/facts/fxhoudinimcp.md §2)."""
+    monkeypatch.setattr(houdini_package.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(houdini_package.Path, "home", staticmethod(lambda: tmp_path))
+
+    documents = tmp_path / "Documents" / "houdini20.5"
+    onedrive = tmp_path / "OneDrive" / "Documents" / "houdini22.0"
+    documents.mkdir(parents=True)
+    onedrive.mkdir(parents=True)
+
+    found = {p.parent for p in houdini_package.candidate_package_dirs()}
+
+    assert found == {documents, onedrive}
