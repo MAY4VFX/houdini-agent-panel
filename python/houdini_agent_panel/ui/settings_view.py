@@ -512,8 +512,17 @@ class SettingsView(QtWidgets.QWidget):
         )
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
+        # A bare scheme+host (no path) gets `/v1/audio/transcriptions`
+        # appended by `ui/voice.py::_normalize_whisper_endpoint` — the
+        # documented service (and most OpenAI-compatible self-hosted
+        # whisper servers) answer `GET /health` at the bare host but serve
+        # transcription only at that path. An address that already names a
+        # path is left untouched. Spelled out in the placeholder so this
+        # isn't magic to whoever's typing an endpoint in here.
         self._whisper_edit = QtWidgets.QLineEdit(self)
-        self._whisper_edit.setPlaceholderText("http://127.0.0.1:9000 (local whisper)")
+        self._whisper_edit.setPlaceholderText(
+            "http://127.0.0.1:9000 (bare host → /v1/audio/transcriptions is added)"
+        )
         self._whisper_edit.textChanged.connect(self._on_field_changed)
 
         # Masked like any other secret field — sent as `X-API-Key` by

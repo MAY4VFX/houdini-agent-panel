@@ -171,15 +171,103 @@ def test_a_non_401_http_error_still_propagates(audio_path):
         )
 
 
+def test_a_404_raises_a_clear_error_naming_the_endpoint(audio_path):
+    """The classic misconfiguration this exists for: a base address with
+    no path, before `_normalize_whisper_endpoint` covered it."""
+    error = urllib.error.HTTPError(
+        "https://whi.example.com/wrong-path", 404, "Not Found", {}, None
+    )
+    director = _FakeDirector(error)
+
+    with pytest.raises(RuntimeError, match="404"):
+        voice.default_uploader(
+            "https://whi.example.com/wrong-path",
+            audio_path,
+            "audio/wav",
+            "",
+            opener=director,
+        )
+
+
+# --- _normalize_whisper_endpoint --------------------------------------------
+
+
+def test_bare_host_gets_the_transcription_path_appended():
+    assert (
+        voice._normalize_whisper_endpoint("https://whi.ai-vfx.com")
+        == "https://whi.ai-vfx.com/v1/audio/transcriptions"
+    )
+
+
+def test_bare_host_with_trailing_slash_also_gets_the_path_appended():
+    assert (
+        voice._normalize_whisper_endpoint("https://whi.ai-vfx.com/")
+        == "https://whi.ai-vfx.com/v1/audio/transcriptions"
+    )
+
+
+def test_an_endpoint_that_already_names_a_path_is_left_untouched():
+    assert (
+        voice._normalize_whisper_endpoint("http://127.0.0.1:9000/custom/route")
+        == "http://127.0.0.1:9000/custom/route"
+    )
+
+
+def test_blank_endpoint_stays_blank():
+    """`configure()` runs every endpoint through this unconditionally — a
+    blank endpoint (no whisper configured at all) must not turn into a
+    bogus URL, since `VoiceButton` also uses blank-vs-not to decide `_mode`."""
+    assert voice._normalize_whisper_endpoint("") == ""
+
+
+# --- _looks_like_real_audio / _empty_recording_message ---------------------
+
+
+def test_a_16_byte_header_only_file_does_not_look_like_real_audio(tmp_path):
+    path = tmp_path / "empty.wav"
+    path.write_bytes(b"RIFF....WAVEfmt ")  # the exact bytes the real bug produced
+    assert voice._looks_like_real_audio(path) is False
+
+
+def test_a_missing_file_does_not_look_like_real_audio(tmp_path):
+    assert voice._looks_like_real_audio(tmp_path / "missing.wav") is False
+
+
+def test_a_file_past_the_wav_header_looks_like_real_audio(tmp_path):
+    path = tmp_path / "real.wav"
+    path.write_bytes(b"RIFF" + b"\x00" * 40 + b"some audio bytes")
+    assert voice._looks_like_real_audio(path) is True
+
+
+def test_empty_recording_message_on_macos_names_the_likely_cause():
+    """The artist would not guess this on their own — Houdini's own app
+    bundle doesn't declare microphone use, so macOS may never even list
+    it under Privacy & Security for the artist to grant."""
+    assert "System Settings" in voice._empty_recording_message(platform="darwin")
+
+
+def test_empty_recording_message_elsewhere_is_the_generic_one():
+    message = voice._empty_recording_message(platform="linux")
+    assert message == voice._EMPTY_RECORDING_GENERIC
+    assert "System Settings" not in message
+
+
 # --- VoiceButton: the key travels from configure() to the uploader call ---
 
 
 class _FakeBackend:
-    def start(self, destination: Path) -> None:
-        destination.write_bytes(b"RIFF....WAVEfmt ")
+    """A synchronous stand-in for the real, asynchronous Qt backends —
+    `stop()` calls `on_finished` immediately, and the file it writes is
+    past the 44-byte WAV header so it reads as real audio. (16 bytes,
+    header-only, is exactly the shape of the real bug — see
+    `_EmptyBackend`-flavoured tests below for that case specifically.)
+    """
 
-    def stop(self) -> None:
-        pass
+    def start(self, destination: Path) -> None:
+        destination.write_bytes(b"RIFF" + b"\x00" * 40 + b"fake audio payload")
+
+    def stop(self, on_finished) -> None:
+        on_finished("")
 
 
 def _button(qapp, uploader) -> voice.VoiceButton:
@@ -206,6 +294,15 @@ def _wait_until(app, condition, *, timeout_ms: int = 5000) -> None:
         QtTest.QTest.qWait(step)
         elapsed += step
     assert condition(), "condition did not become true in time"
+    # `done`/`failed` (what `condition` usually watches) and the worker
+    # thread's own `finished` are separate queued cross-thread signals —
+    # the first becoming true is no guarantee the second has been
+    # delivered yet. Drain once more so a caller that immediately tears
+    # the widget down right after this call (as every test here does)
+    # doesn't destroy the still-un-discarded `_UploadWorker` out from
+    # under `worker.py`'s own `_live` bookkeeping.
+    app.processEvents()
+    QtTest.QTest.qWait(step)
 
 
 def test_configure_carries_the_api_key_to_the_uploader(qapp):
@@ -224,7 +321,10 @@ def test_configure_carries_the_api_key_to_the_uploader(qapp):
 
     _wait_until(qapp, lambda: transcribed)
 
-    assert seen == [("http://127.0.0.1:9000", "the-key")]
+    # The bare host `_button()` configures with has no path — `configure()`
+    # normalizes it to the real transcription endpoint before it ever
+    # reaches the uploader (see the `_normalize_whisper_endpoint` tests).
+    assert seen == [("http://127.0.0.1:9000/v1/audio/transcriptions", "the-key")]
     assert transcribed == ["transcribed"]
     button.shutdown()
 
@@ -299,4 +399,203 @@ def test_a_successful_recording_clears_a_stale_error_tooltip(qapp):
     button._stop_recording()
     _wait_until(qapp, lambda: transcribed)
 
+    button.shutdown()
+
+
+# --- VoiceButton: waiting for the backend to actually finish stopping ------
+#
+# `QMediaRecorder.stop()`/`QAudioRecorder.stop()` are asynchronous — reading
+# the file the instant `stop()` returns is the real bug (docs the owner
+# measured: 25 files, all exactly the 16-byte RIFF/WAVE preamble, no audio).
+# `_DeferredBackend` below stands in for that asynchrony: `stop()` doesn't
+# resolve until the test explicitly calls `finish_stop()`.
+
+
+class _DeferredBackend:
+    def __init__(self, wav_bytes: bytes = b"RIFF" + b"\x00" * 40 + b"real audio data") -> None:
+        self._wav_bytes = wav_bytes
+        self._destination: Path | None = None
+        self._on_finished = None
+        self.stop_called = False
+
+    def start(self, destination: Path) -> None:
+        self._destination = destination
+        # Deliberately does NOT write anything yet — nothing valid exists
+        # until `finish_stop()` "closes" the container, same as the real
+        # backends between `record()` and the state actually reaching
+        # `StoppedState`.
+
+    def stop(self, on_finished) -> None:
+        self.stop_called = True
+        self._on_finished = on_finished
+
+    def finish_stop(self, error: str = "") -> None:
+        assert self._destination is not None
+        self._destination.write_bytes(self._wav_bytes)
+        callback, self._on_finished = self._on_finished, None
+        callback(error)
+
+
+def test_does_not_read_the_file_until_the_backend_reports_it_finished(qapp):
+    backend = _DeferredBackend()
+    seen: list[bytes] = []
+
+    def fake_uploader(endpoint, audio_path, mime_type, api_key=""):
+        seen.append(audio_path.read_bytes())
+        return "transcribed"
+
+    button = voice.VoiceButton(backend_factory=lambda: (backend, ""), uploader=fake_uploader)
+    button.configure(supports_audio=False, whisper_endpoint="http://127.0.0.1:9000")
+    transcribed: list[str] = []
+    button.transcribed_text.connect(transcribed.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    # stop() was called, but the backend hasn't said it actually finished —
+    # nothing must have been read or uploaded yet.
+    qapp.processEvents()
+    assert backend.stop_called
+    assert seen == []
+    assert not transcribed
+
+    backend.finish_stop()
+    _wait_until(qapp, lambda: transcribed)
+
+    assert transcribed == ["transcribed"]
+    button.shutdown()
+
+
+def test_a_backend_that_never_finishes_times_out_with_a_clear_error(qapp, monkeypatch):
+    monkeypatch.setattr(voice, "_STOP_TIMEOUT_MS", 50)
+    backend = _DeferredBackend()  # finish_stop() deliberately never called
+
+    button = voice.VoiceButton(
+        backend_factory=lambda: (backend, ""), uploader=lambda *a, **k: "unreachable"
+    )
+    button.configure(supports_audio=False, whisper_endpoint="http://127.0.0.1:9000")
+    failures: list[str] = []
+    button.failed.connect(failures.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    _wait_until(qapp, lambda: failures)
+
+    assert "time" in failures[0].lower()
+    assert failures[0] in button.toolTip()
+    button.shutdown()
+
+
+class _EmptyBackend:
+    """Backend that reports success but hands back the real bug's exact
+    16-byte, header-only file."""
+
+    def start(self, destination: Path) -> None:
+        destination.write_bytes(b"RIFF....WAVEfmt ")
+
+    def stop(self, on_finished) -> None:
+        on_finished("")
+
+
+class _NoFileBackend:
+    """Backend that reports success but never wrote anything at all —
+    the other half of the real bug (`Errno 2: No such file or directory`)."""
+
+    def start(self, destination: Path) -> None:
+        pass
+
+    def stop(self, on_finished) -> None:
+        on_finished("")
+
+
+def test_a_16_byte_recording_is_not_uploaded_and_gives_a_clear_error(qapp):
+    seen: list[Path] = []
+
+    def fake_uploader(endpoint, audio_path, mime_type, api_key=""):
+        seen.append(audio_path)
+        return "unreachable"
+
+    button = voice.VoiceButton(
+        backend_factory=lambda: (_EmptyBackend(), ""), uploader=fake_uploader
+    )
+    button.configure(supports_audio=False, whisper_endpoint="http://127.0.0.1:9000")
+    failures: list[str] = []
+    button.failed.connect(failures.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    _wait_until(qapp, lambda: failures)
+
+    assert seen == []  # the uploader was never even called
+    assert failures[0] == voice._empty_recording_message()
+    button.shutdown()
+
+
+def test_a_missing_output_file_is_treated_as_an_empty_recording(qapp):
+    button = voice.VoiceButton(
+        backend_factory=lambda: (_NoFileBackend(), ""), uploader=lambda *a, **k: "unreachable"
+    )
+    button.configure(supports_audio=False, whisper_endpoint="http://127.0.0.1:9000")
+    failures: list[str] = []
+    button.failed.connect(failures.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    _wait_until(qapp, lambda: failures)
+
+    assert failures[0] == voice._empty_recording_message()
+    button.shutdown()
+
+
+def test_an_empty_recording_is_also_rejected_in_native_audio_mode(qapp):
+    """The empty-file guard isn't whisper-specific — an empty attachment
+    handed straight to an agent with the `audio` capability is exactly as
+    useless as an empty whisper upload."""
+    recorded: list[dict] = []
+    failures: list[str] = []
+
+    button = voice.VoiceButton(
+        backend_factory=lambda: (_EmptyBackend(), ""), uploader=lambda *a, **k: "unreachable"
+    )
+    button.configure(supports_audio=True, whisper_endpoint="")
+    button.recorded_audio.connect(recorded.append)
+    button.failed.connect(failures.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    _wait_until(qapp, lambda: failures)
+
+    assert recorded == []
+    button.shutdown()
+
+
+def test_a_backend_reported_error_surfaces_as_itself_not_the_empty_message(qapp):
+    """When the backend's own error signal fired (a real `errorOccurred`/
+    `error` from Qt), that message is more specific than the generic empty-
+    recording guess and must win."""
+
+    class _FailingBackend:
+        def start(self, destination: Path) -> None:
+            destination.write_bytes(b"RIFF....WAVEfmt ")
+
+        def stop(self, on_finished) -> None:
+            on_finished("Recording failed: ResourceError")
+
+    button = voice.VoiceButton(
+        backend_factory=lambda: (_FailingBackend(), ""), uploader=lambda *a, **k: "unreachable"
+    )
+    button.configure(supports_audio=False, whisper_endpoint="http://127.0.0.1:9000")
+    failures: list[str] = []
+    button.failed.connect(failures.append)
+
+    button._start_recording()
+    button._stop_recording()
+
+    _wait_until(qapp, lambda: failures)
+
+    assert failures[0] == "Recording failed: ResourceError"
     button.shutdown()

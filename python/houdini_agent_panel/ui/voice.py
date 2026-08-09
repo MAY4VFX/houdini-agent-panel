@@ -19,8 +19,10 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -34,6 +36,32 @@ from .qt import QtCore, QtGui, QtWidgets, Signal
 #: succeeds, so a stale "key rejected" message from three uploads ago never
 #: lingers over an otherwise-working button.
 _DEFAULT_TOOLTIP = "Voice input"
+
+#: How long `_stop_recording` waits for the backend to actually report the
+#: file is finalized before giving up. `QMediaRecorder.stop()`/
+#: `QAudioRecorder.stop()` are asynchronous — a wedged driver or a Qt bug
+#: withholding the state-changed signal must not leave the button looking
+#: stuck forever.
+_STOP_TIMEOUT_MS = 5000
+
+#: A PCM WAV's fixed header is 44 bytes; a file at or below that has no
+#: audio samples in it at all — just the RIFF/WAVE preamble, or nothing.
+_MIN_VALID_WAV_BYTES = 44
+
+#: The OpenAI-compatible path the documented whisper service (project's
+#: `whisper` skill / `whi.ai-vfx.com`) actually serves transcriptions at.
+_WHISPER_TRANSCRIPTION_PATH = "/v1/audio/transcriptions"
+
+_EMPTY_RECORDING_MACOS = (
+    "The recording captured no audio. Houdini's own app bundle doesn't "
+    "declare microphone use to macOS, so it may not even be listed under "
+    "System Settings → Privacy & Security → Microphone — add it "
+    "there (or remove and re-add the entry) and try again."
+)
+_EMPTY_RECORDING_GENERIC = (
+    "The recording captured no audio — check that a microphone is "
+    "connected and try again."
+)
 
 
 def _import_qtmultimedia():
@@ -55,6 +83,58 @@ def _import_qtmultimedia():
 
 class Uploader(Protocol):
     def __call__(self, endpoint: str, audio_path: Path, mime_type: str, api_key: str = "") -> str: ...
+
+
+def _normalize_whisper_endpoint(url: str) -> str:
+    """Fill in the transcription path when the artist typed a bare host.
+
+    Settings → Voice only asks for a base address — `GET /health` on the
+    documented service answers at the bare host, but transcription itself
+    lives at `/v1/audio/transcriptions`, so a POST straight to a bare host
+    is a 404. A URL with no path (or just `/`) gets that path appended
+    here; a URL that already names one is trusted as-is and left
+    untouched, so a self-hosted whisper mounted somewhere else keeps
+    working exactly as configured.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        # Not a parseable absolute URL (or empty) — nothing sensible to
+        # append; let it fail downstream exactly as it does today.
+        return url
+    if parts.path in ("", "/"):
+        return urllib.parse.urlunsplit((
+            parts.scheme,
+            parts.netloc,
+            _WHISPER_TRANSCRIPTION_PATH,
+            parts.query,
+            parts.fragment,
+        ))
+    return url
+
+
+def _looks_like_real_audio(path: Path) -> bool:
+    """`False` for a missing file or one that is only the RIFF/WAVE
+    preamble with no audio samples — the exact shape of the bug this
+    module guards against (see `VoiceButton._await_stop`)."""
+    try:
+        return path.stat().st_size > _MIN_VALID_WAV_BYTES
+    except OSError:
+        return False
+
+
+def _empty_recording_message(*, platform: str = sys.platform) -> str:
+    """The message for a recording that produced no usable audio.
+
+    On macOS this is very likely microphone access Houdini never got:
+    Houdini's own `Info.plist` (checked across 20.5, 21.0 and 22.0) has no
+    `NSMicrophoneUsageDescription` key, so the OS never shows the usual
+    permission prompt and QtMultimedia just receives no audio — no error,
+    just silence, which is indistinguishable from "no mic present" through
+    the Qt5/Qt6 recorder APIs. `platform` is a parameter (not a `sys`
+    import at the call site) purely so tests can exercise both branches
+    without needing to monkeypatch `sys.platform`.
+    """
+    return _EMPTY_RECORDING_MACOS if platform == "darwin" else _EMPTY_RECORDING_GENERIC
 
 
 def default_uploader(
@@ -114,6 +194,14 @@ def default_uploader(
             raise RuntimeError(
                 "Whisper rejected the API key (401) — check Settings → Voice."
             ) from exc
+        if exc.code == 404:
+            # The common misconfiguration this message exists for: a bare
+            # `https://host` typed into Settings → Voice with no path.
+            # `_normalize_whisper_endpoint` already fixes that case before
+            # it gets here, but an explicit, wrong path still lands here.
+            raise RuntimeError(
+                f"No transcription endpoint at {endpoint} (404) — check Settings → Voice."
+            ) from exc
         raise
     parsed = json.loads(payload.decode("utf-8"))
     text = parsed.get("text") if isinstance(parsed, dict) else None
@@ -122,42 +210,112 @@ def default_uploader(
 
 class RecordBackend(Protocol):
     """Platform recording adapter — the only place PySide2 and PySide6 part
-    ways. `start`/`stop` write WAV/PCM into `destination`."""
+    ways. `start` writes WAV/PCM into `destination`.
+
+    `stop` is asynchronous: both `QMediaRecorder.stop()` (Qt6) and
+    `QAudioRecorder.stop()` (Qt5) return immediately while the container is
+    still being flushed and closed in the background, so the backend
+    reports completion through `on_finished` instead of `stop` itself
+    returning. `on_finished` is called with `""` on a clean stop, or a
+    human-readable error if the backend's own error signal fired during
+    the recording — either way exactly once, and always on the Qt event
+    loop the backend already lives on (never a worker thread), so a
+    fake/synchronous backend in tests may call it directly from inside
+    `stop`.
+    """
 
     def start(self, destination: Path) -> None: ...
-    def stop(self) -> None: ...
+    def stop(self, on_finished: Callable[[str], None]) -> None: ...
+
+
+class _OneShotCallback:
+    """Fires a stored callback exactly once.
+
+    Both Qt backends below race the same two triggers: a state-changed
+    signal arriving after `stop()` returns, and the recorder already being
+    in `StoppedState` by the time `stop()` is called (it can end a
+    recording on its own, e.g. on a resource error, before the artist
+    ever clicks the button). Either can plausibly fire first; this just
+    makes sure only the first one counts.
+    """
+
+    def __init__(self) -> None:
+        self._callback: Callable[[str], None] | None = None
+
+    def arm(self, callback: Callable[[str], None]) -> None:
+        self._callback = callback
+
+    def fire(self, error: str) -> None:
+        if self._callback is None:
+            return
+        callback, self._callback = self._callback, None
+        callback(error)
 
 
 class _Qt6RecordBackend:
     """PySide6/Qt6: `QMediaCaptureSession` + `QAudioInput` + `QMediaRecorder`."""
 
     def __init__(self, qtmultimedia) -> None:
+        self._qtmultimedia = qtmultimedia
         self._session = qtmultimedia.QMediaCaptureSession()
         self._input = qtmultimedia.QAudioInput()
         self._session.setAudioInput(self._input)
         self._recorder = qtmultimedia.QMediaRecorder()
         self._session.setRecorder(self._recorder)
+        self._done = _OneShotCallback()
+        self._error_text = ""
+        self._recorder.recorderStateChanged.connect(self._on_state_changed)
+        self._recorder.errorOccurred.connect(self._on_error)
 
     def start(self, destination: Path) -> None:
+        self._error_text = ""
         self._recorder.setOutputLocation(QtCore.QUrl.fromLocalFile(str(destination)))
         self._recorder.record()
 
-    def stop(self) -> None:
+    def stop(self, on_finished: Callable[[str], None]) -> None:
+        self._done.arm(on_finished)
         self._recorder.stop()
+        if self._recorder.recorderState() == self._qtmultimedia.QMediaRecorder.StoppedState:
+            # Already stopped (e.g. an error ended it earlier) — the state
+            # isn't changing, so recorderStateChanged won't fire again.
+            self._done.fire(self._error_text)
+
+    def _on_state_changed(self, state) -> None:
+        if state == self._qtmultimedia.QMediaRecorder.StoppedState:
+            self._done.fire(self._error_text)
+
+    def _on_error(self, error, error_string) -> None:
+        self._error_text = error_string or "Recording failed."
 
 
 class _Qt5RecordBackend:
     """PySide2/Qt5: `QAudioRecorder` — a simple single-class API."""
 
     def __init__(self, qtmultimedia) -> None:
+        self._qtmultimedia = qtmultimedia
         self._recorder = qtmultimedia.QAudioRecorder()
+        self._done = _OneShotCallback()
+        self._error_text = ""
+        self._recorder.stateChanged.connect(self._on_state_changed)
+        self._recorder.error.connect(self._on_error)
 
     def start(self, destination: Path) -> None:
+        self._error_text = ""
         self._recorder.setOutputLocation(QtCore.QUrl.fromLocalFile(str(destination)))
         self._recorder.record()
 
-    def stop(self) -> None:
+    def stop(self, on_finished: Callable[[str], None]) -> None:
+        self._done.arm(on_finished)
         self._recorder.stop()
+        if self._recorder.state() == self._qtmultimedia.QMediaRecorder.StoppedState:
+            self._done.fire(self._error_text)
+
+    def _on_state_changed(self, state) -> None:
+        if state == self._qtmultimedia.QMediaRecorder.StoppedState:
+            self._done.fire(self._error_text)
+
+    def _on_error(self, error) -> None:
+        self._error_text = self._recorder.errorString() or "Recording failed."
 
 
 def build_default_backend() -> tuple[RecordBackend | None, str]:
@@ -286,7 +444,7 @@ class VoiceButton(QtWidgets.QToolButton):
         `configure` is a public contract) still gets the old, unauthenticated
         behaviour rather than a `TypeError`.
         """
-        self._whisper_endpoint = whisper_endpoint or ""
+        self._whisper_endpoint = _normalize_whisper_endpoint(whisper_endpoint or "")
         self._whisper_api_key = whisper_api_key or ""
         if supports_audio:
             self._mode = "audio"
@@ -337,12 +495,47 @@ class VoiceButton(QtWidgets.QToolButton):
     def _stop_recording(self) -> None:
         if self._backend is None:
             return
-        self._backend.stop()
         self._recording = False
         self.setChecked(False)
-        if self._tmp_path is None:
-            return
         path, self._tmp_path = self._tmp_path, None
+        if path is None:
+            self._backend.stop(lambda error: None)
+            return
+        self._await_stop(path)
+
+    def _await_stop(self, path: Path) -> None:
+        """Wait for the backend to actually report the file is finalized
+        before reading it — see `RecordBackend`'s own docstring for why
+        `stop()` alone isn't enough. Bounded by `_STOP_TIMEOUT_MS` so a
+        backend that never reports completion leaves a clear error rather
+        than a button that looks stuck forever. No busy loop: both the
+        timer and the backend's own signal resolve on the Qt event loop
+        Houdini is already running, same as every other async thing in
+        this widget.
+        """
+        resolved = _OneShotCallback()
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+
+        def finish(error: str) -> None:
+            timer.stop()
+            timer.deleteLater()
+            self._handle_stopped(path, error)
+
+        resolved.arm(finish)
+        timer.timeout.connect(
+            lambda: resolved.fire("Recording did not finish saving in time — try again.")
+        )
+        timer.start(_STOP_TIMEOUT_MS)
+        self._backend.stop(resolved.fire)
+
+    def _handle_stopped(self, path: Path, error: str) -> None:
+        if error:
+            self._on_upload_failed(error)
+            return
+        if not _looks_like_real_audio(path):
+            self._on_upload_failed(_empty_recording_message())
+            return
         if self._mode == "audio":
             self._emit_audio_block(path)
         elif self._mode == "whisper":
