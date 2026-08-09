@@ -599,3 +599,89 @@ def test_a_backend_reported_error_surfaces_as_itself_not_the_empty_message(qapp)
 
     assert failures[0] == "Recording failed: ResourceError"
     button.shutdown()
+
+
+def test_the_recording_size_reaches_the_log(qapp, tmp_path, caplog):
+    """The one line that would have named this bug in seconds.
+
+    Every failed recording produced 16 bytes — a RIFF/WAVE preamble and no
+    samples — and the panel's own log said nothing at all, so the size had
+    to be read off the owner's machine by hand. §25-§28 record the same
+    blind spot costing three wrong releases on the OAuth token.
+    """
+    import logging
+
+    from houdini_agent_panel.ui import voice as voice_mod
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.voice")
+
+    button = voice_mod.VoiceButton(backend_factory=lambda: (_FakeBackend(), ""))
+    broken = tmp_path / "hap-voice-broken.wav"
+    broken.write_bytes(b"RIFF....WAVEfmt ")  # the measured 16 bytes, exactly
+
+    button._handle_stopped(broken, "")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("16 bytes" in m for m in messages), messages
+
+
+def test_a_missing_recording_is_logged_rather_than_silently_dropped(qapp, tmp_path, caplog):
+    import logging
+
+    from houdini_agent_panel.ui import voice as voice_mod
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.voice")
+
+    button = voice_mod.VoiceButton(backend_factory=lambda: (_FakeBackend(), ""))
+    button._handle_stopped(tmp_path / "never-created.wav", "")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("recording finished" in m for m in messages), messages
+
+
+def test_neither_the_api_key_nor_the_transcript_reaches_the_log(qapp, caplog, monkeypatch):
+    """Two different reasons, both absolute. The key is a credential; the
+    transcript is the artist speaking in their own room, and only its
+    length is ever diagnostic."""
+    import logging
+
+    from houdini_agent_panel.ui import voice as voice_mod
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.voice")
+
+    secret = "NOT-A-REAL-KEY-0123456789abcdef"
+    spoken = "delete the pyro solver and start again"
+
+    button = voice_mod.VoiceButton(
+        backend_factory=lambda: (_FakeBackend(), ""), uploader=lambda *a, **k: ""
+    )
+    button.configure(
+        supports_audio=False,
+        whisper_endpoint="https://whisper.example/v1/audio/transcriptions",
+        whisper_api_key=secret,
+    )
+    # A stub instead of the real `_UploadWorker`: this test is about what
+    # reaches the log, and starting a genuine QThread here leaves Qt tearing
+    # down a live C++ object at interpreter exit.
+    class _NoThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self.done = _Sig()
+            self.failed = _Sig()
+
+        def start(self) -> None:
+            pass
+
+    class _Sig:
+        def connect(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setattr(voice_mod, "_UploadWorker", _NoThread)
+    button._start_upload(Path("/nonexistent/hap-voice.wav"))
+    button._on_upload_done(spoken)
+
+    messages = [r.getMessage() for r in caplog.records]
+    blob = "\n".join(messages)
+    assert secret not in blob, "the API key reached the log"
+    assert spoken not in blob, "the artist's own words reached the log"
+    assert any(str(len(spoken)) in m for m in messages), "the length is the diagnostic part"
+    assert any("whisper.example" in m for m in messages), "the endpoint is not a secret"

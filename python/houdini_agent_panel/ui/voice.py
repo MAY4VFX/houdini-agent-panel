@@ -21,6 +21,7 @@ import json
 import mimetypes
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,8 +30,26 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .. import network
+from ..logbook import logger as _logbook_logger
 from .worker import Worker
 from .qt import QtCore, QtGui, QtWidgets, Signal
+
+#: This module logged NOTHING until a real failure had to be diagnosed
+#: over ssh by running `xxd` on the owner's own temporary files. Every
+#: recording had produced 16 bytes — `RIFF....WAVEfmt ` and no samples —
+#: and the panel's own log had not a single line to say so.
+#:
+#: The same blind spot cost three consecutive wrong releases on the OAuth
+#: token (docs/facts/acp-sdk.md §25-§28): the code recorded its result and
+#: never the path it took to get there, so each cause had to be guessed.
+#: What goes in here is chosen to make that impossible a second time —
+#: above all the size of the file that was produced, which names this
+#: entire class of failure at a glance.
+#:
+#: Never logged: the API key, and the transcribed text. That text is the
+#: artist speaking, in their own room; its LENGTH is diagnostic, its
+#: content is theirs. The endpoint is not a secret and is logged.
+_log = _logbook_logger("houdini_agent_panel.ui.voice")
 
 #: The button's tooltip outside of an error — restored once a recording
 #: succeeds, so a stale "key rejected" message from three uploads ago never
@@ -185,8 +204,13 @@ def default_uploader(
     director = opener if opener is not None else network._opener_director()
     try:
         with director.open(request, timeout=60.0) as response:
+            # `.status` is the real `http.client.HTTPResponse` attribute;
+            # tests hand in bare doubles that only implement `read()`, so
+            # this stays best-effort rather than a hard requirement.
+            status = getattr(response, "status", None)
             payload = response.read()
     except urllib.error.HTTPError as exc:
+        _log.warning("voice: whisper POST %s -> HTTP %s", endpoint, exc.code)
         if exc.code == 401:
             # The one failure mode a silent empty result would hide
             # completely — see the module docstring on `VoiceButton._on_
@@ -203,6 +227,7 @@ def default_uploader(
                 f"No transcription endpoint at {endpoint} (404) — check Settings → Voice."
             ) from exc
         raise
+    _log.info("voice: whisper POST %s -> HTTP %s", endpoint, status)
     parsed = json.loads(payload.decode("utf-8"))
     text = parsed.get("text") if isinstance(parsed, dict) else None
     return text if isinstance(text, str) else ""
@@ -286,6 +311,7 @@ class _Qt6RecordBackend:
 
     def _on_error(self, error, error_string) -> None:
         self._error_text = error_string or "Recording failed."
+        _log.warning("voice: Qt6 recorder error: %s", self._error_text)
 
 
 class _Qt5RecordBackend:
@@ -316,6 +342,7 @@ class _Qt5RecordBackend:
 
     def _on_error(self, error) -> None:
         self._error_text = self._recorder.errorString() or "Recording failed."
+        _log.warning("voice: Qt5 recorder error: %s", self._error_text)
 
 
 def build_default_backend() -> tuple[RecordBackend | None, str]:
@@ -327,16 +354,23 @@ def build_default_backend() -> tuple[RecordBackend | None, str]:
     """
     qtmultimedia = _import_qtmultimedia()
     if qtmultimedia is None:
+        _log.info("voice: no recording backend — QtMultimedia is unavailable")
         return None, "QtMultimedia is unavailable in this environment"
     if hasattr(qtmultimedia, "QMediaCaptureSession") and hasattr(qtmultimedia, "QAudioInput"):
         try:
-            return _Qt6RecordBackend(qtmultimedia), ""
+            backend = _Qt6RecordBackend(qtmultimedia)
+            _log.info("voice: recording backend is Qt6 (QMediaCaptureSession)")
+            return backend, ""
         except Exception as exc:  # noqa: BLE001 - degrade, don't crash
+            _log.info("voice: Qt6 recording backend unavailable: %r", exc)
             return None, f"QtMultimedia (Qt6): {exc!r}"
     if hasattr(qtmultimedia, "QAudioRecorder"):
         try:
-            return _Qt5RecordBackend(qtmultimedia), ""
+            backend = _Qt5RecordBackend(qtmultimedia)
+            _log.info("voice: recording backend is Qt5 (QAudioRecorder)")
+            return backend, ""
         except Exception as exc:  # noqa: BLE001
+            _log.info("voice: Qt5 recording backend unavailable: %r", exc)
             return None, f"QtMultimedia (Qt5): {exc!r}"
     return None, "QtMultimedia offers no recording API we know"
 
@@ -488,6 +522,7 @@ class VoiceButton(QtWidgets.QToolButton):
         # failed upload must not keep reading as the current state.
         self.setToolTip(_DEFAULT_TOOLTIP)
         self._tmp_path = Path(tempfile.gettempdir()) / f"hap-voice-{uuid.uuid4().hex}.wav"
+        _log.info("voice: recording to %s", self._tmp_path)
         self._backend.start(self._tmp_path)
         self._recording = True
         self.setChecked(True)
@@ -516,20 +551,42 @@ class VoiceButton(QtWidgets.QToolButton):
         resolved = _OneShotCallback()
         timer = QtCore.QTimer(self)
         timer.setSingleShot(True)
+        started = time.monotonic()
+        timed_out = False
 
         def finish(error: str) -> None:
             timer.stop()
             timer.deleteLater()
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if timed_out:
+                _log.warning("voice: stop timed out after %dms", elapsed_ms)
+            else:
+                _log.info("voice: stop signal received after %dms", elapsed_ms)
             self._handle_stopped(path, error)
 
+        def on_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+            resolved.fire("Recording did not finish saving in time — try again.")
+
         resolved.arm(finish)
-        timer.timeout.connect(
-            lambda: resolved.fire("Recording did not finish saving in time — try again.")
-        )
+        timer.timeout.connect(on_timeout)
         timer.start(_STOP_TIMEOUT_MS)
         self._backend.stop(resolved.fire)
 
     def _handle_stopped(self, path: Path, error: str) -> None:
+        # The size is the whole diagnosis for the failure this module was
+        # rebuilt around: 16 bytes is a header and no audio, and that was
+        # invisible everywhere until someone read the file by hand.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = -1
+        _log.info(
+            "voice: recording finished, %s bytes%s",
+            size if size >= 0 else "no file, 0",
+            f", backend error: {error}" if error else "",
+        )
         if error:
             self._on_upload_failed(error)
             return
@@ -553,6 +610,14 @@ class VoiceButton(QtWidgets.QToolButton):
 
     def _start_upload(self, path: Path) -> None:
         mime_type = mimetypes.guess_type(str(path))[0] or "audio/wav"
+        # The endpoint is not a secret, and getting it wrong — a base URL
+        # with no path — was one of the two faults here. The key is never
+        # logged; only whether one is set at all.
+        _log.info(
+            "voice: uploading to %s (api key: %s)",
+            self._whisper_endpoint,
+            "set" if self._whisper_api_key else "none",
+        )
         self._upload_thread = _UploadWorker(
             self._whisper_endpoint, path, mime_type, self._whisper_api_key, self._uploader, self
         )
@@ -561,6 +626,10 @@ class VoiceButton(QtWidgets.QToolButton):
         self._upload_thread.start()
 
     def _on_upload_done(self, text: str) -> None:
+        # Length only. The content is the artist speaking in their own
+        # room — diagnostic value lives entirely in "did anything come
+        # back", and none of it in what was said.
+        _log.info("voice: transcribed %d characters", len(text))
         if text:
             self.transcribed_text.emit(text)
 
@@ -573,6 +642,7 @@ class VoiceButton(QtWidgets.QToolButton):
         a rejected API key; anything else (timeout, DNS, a malformed
         response) still lands here as whatever `str(exc)` gave.
         """
+        _log.info("voice: failed — %s", reason)
         self.setToolTip(reason or _DEFAULT_TOOLTIP)
         self.failed.emit(reason)
 
