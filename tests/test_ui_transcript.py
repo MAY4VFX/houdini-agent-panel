@@ -566,3 +566,26 @@ def test_no_autoscroll_when_scrolled_up_reading(qapp):
     view.refresh(entry.id)
 
     assert bar.value() == 20
+
+
+def test_huge_tool_output_is_clamped_before_it_reaches_a_label(qapp):
+    """A `read` of a big file comes back unbounded; a wrapping QLabel lays
+    out every character of it on Houdini's UI thread. Ported forward from
+    `4671322` (a fix that landed on a branch that never reached `main` — see
+    `tests/test_stream_render_load.py`'s own module docstring for the same
+    story about its sibling perf fix)."""
+    view, model = _view_and_model()
+    entry = model.apply_tool_call(
+        _tool_call(
+            content=[{"type": "content", "content": {"type": "text", "text": "x" * 500_000}}]
+        )
+    )
+    view.refresh(entry.id)
+    row = view._rows[entry.id]
+
+    row._toggle.setChecked(True)
+    row._on_toggled(True)
+
+    shown = row._details.text()
+    assert len(shown) < 21_000
+    assert "more characters not shown" in shown
