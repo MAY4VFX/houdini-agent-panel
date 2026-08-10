@@ -644,13 +644,30 @@ def test_a_second_click_while_checking_is_a_noop(qapp, fetcher, monkeypatch):
     _wait_until(lambda: view._check_now_worker is None)
 
 
-# --- Voice section: shown only when this machine can actually record -------
+# --- Voice section: currently hidden unconditionally, on every platform ---
 #
 # `recording_available()` (`ui/voice.py`) is computed once, at construction —
 # the same check `VoiceButton` uses for the composer's mic button, so the two
-# can never disagree about whether voice input works here. design.md's own
-# rule ("the agent doesn't support it — the control doesn't get drawn")
-# applies to a hardware/OS reason exactly as it does to an agent one.
+# can never disagree. It's currently pinned off everywhere by
+# `ui/voice.py::_VOICE_INPUT_AVAILABLE` (macOS is the only platform actually
+# measured; Linux/Windows were never tried, so showing voice input there was
+# a guess, not a verification — the owner's own call). design.md's own rule
+# ("the agent doesn't support it — the control doesn't get drawn") applies
+# to an unverified-platform reason exactly as it does to an agent one.
+#
+# `SettingsView` only calls `recording_available()` — it has no idea WHY the
+# answer is what it is, so these tests drive that function directly rather
+# than reaching into `ui/voice.py`'s own flag.
+
+
+def test_voice_section_is_hidden_by_default_right_now(qapp):
+    """No monkeypatching — this is the real, current, unconditional
+    default: `recording_available()` says no on every platform."""
+    view = SettingsView()
+    view.show()  # isVisible() follows the ancestor chain — see the probe test above.
+
+    assert view._voice_section.isVisible() is False
+    assert view._voice_unavailable_caption.isVisible() is True
 
 
 def test_voice_section_hidden_when_recording_is_unavailable(qapp, monkeypatch):
@@ -658,33 +675,34 @@ def test_voice_section_hidden_when_recording_is_unavailable(qapp, monkeypatch):
         settings_view_mod, "recording_available", lambda: (False, "no entitlement")
     )
     view = SettingsView()
-    view.show()  # isVisible() follows the ancestor chain — see the probe test above.
+    view.show()
 
     assert view._voice_section.isVisible() is False
 
 
-def test_voice_caption_names_the_real_reason_when_hidden(qapp, monkeypatch):
-    """The artist isn't left to guess where the section went, or to go
-    looking in System Settings for a Houdini entry that (per the owner's
-    own measurement) likely isn't even listed there."""
+def test_voice_caption_names_the_reason_when_hidden(qapp, monkeypatch):
+    """The artist isn't left to guess where the section went — whatever
+    `recording_available()` says shows up verbatim in its place."""
     monkeypatch.setattr(
         settings_view_mod,
         "recording_available",
-        lambda: (False, "Houdini's own app bundle doesn't declare microphone use"),
+        lambda: (False, "Voice input is temporarily turned off while it's verified on every platform."),
     )
     view = SettingsView()
     view.show()
 
     assert view._voice_unavailable_caption.isVisible() is True
-    assert "Houdini's own app bundle doesn't declare microphone use" in (
-        view._voice_unavailable_caption.text()
-    )
+    assert "temporarily turned off" in view._voice_unavailable_caption.text()
 
 
 def test_voice_section_shown_when_recording_is_available(qapp, monkeypatch):
+    """Not the current default (see the "hidden by default" test above) —
+    this only proves `SettingsView` still honours a `True` answer, i.e. the
+    section isn't hardcoded hidden, just gated on `recording_available()`."""
     monkeypatch.setattr(settings_view_mod, "recording_available", lambda: (True, ""))
     view = SettingsView()
     view.show()
 
     assert view._voice_section.isVisible() is True
+    assert view._voice_unavailable_caption.isVisible() is False
     assert view._voice_unavailable_caption.isVisible() is False

@@ -88,18 +88,23 @@ def test_voice_button_hidden_without_audio_and_whisper(qapp):
     assert not composer._voice_button.isVisible()
 
 
-def test_voice_button_visible_with_whisper_endpoint_even_without_audio_capability(qapp, monkeypatch):
+def test_voice_button_stays_hidden_even_with_a_working_backend_and_whisper_endpoint(qapp, monkeypatch):
+    """Voice input is currently off everywhere, unconditionally (see
+    `ui/voice.py::_VOICE_INPUT_AVAILABLE`) — a working backend and a
+    configured whisper endpoint are no longer enough to show the button.
+    """
     composer = Composer()
     composer.show()
-    # The recording backend is faked — this is about the button's visibility,
-    # not about a real microphone.
+    # The recording backend is faked and would otherwise be perfectly
+    # usable — proving the kill switch, not a missing backend, is what
+    # keeps the button hidden.
     monkeypatch.setattr(
         composer._voice_button,
         "_backend_factory",
         lambda: (object(), ""),
     )
     composer.set_capabilities(_info(), "http://127.0.0.1:9000")
-    assert composer._voice_button.isVisible()
+    assert not composer._voice_button.isVisible()
 
 
 def test_mode_chip_hidden_until_agent_sends_modes(qapp):

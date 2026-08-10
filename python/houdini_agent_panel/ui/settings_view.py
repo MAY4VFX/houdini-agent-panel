@@ -13,10 +13,12 @@ centered rail — the same 736 px column the feed and composer use — instead
 of one long form stretched edge to edge.
 
 Voice is the one section that can be entirely absent: `recording_available()`
-(`ui/voice.py`) decides once, at construction, whether this machine can
-record at all, and a "no" hides the section outright rather than offering
-fields for a microphone button that can never appear — see where
-`voice_section`/`_voice_unavailable_caption` are built, below.
+(`ui/voice.py`) is checked once, at construction, and currently always says
+no — voice input is pinned off on every platform pending per-platform
+verification (see `ui/voice.py::_VOICE_INPUT_AVAILABLE`) — which hides the
+section outright rather than offering fields for a microphone button that
+can never appear. See where `voice_section`/`_voice_unavailable_caption`
+are built, below.
 
 Reads and writes `settings.json` directly (`settings.load`/`settings.save`) —
 the same one-way layering as `ui/agents.py`: the settings screen is allowed
@@ -673,23 +675,20 @@ class SettingsView(QtWidgets.QWidget):
         updates_section.add_row("fxhoudinimcp", fx_version_row)
         updates_section.add_action_row(self._check_updates_now_button)
 
-        # Voice — drawn only when recording can actually work on this
-        # machine (design.md's own rule: "the agent doesn't support it —
-        # the control doesn't get drawn", applied here to a hardware/OS
-        # reason instead of an agent one). `recording_available()` is the
-        # same cheap, side-effect-free check `VoiceButton`/`build_default_
-        # backend` use, so this section and the composer's mic button can
-        # never disagree about whether voice input works here — see
-        # `ui/voice.py`'s module docstring for what actually blocks it on
-        # macOS (Houdini's own bundle never declares microphone use).
+        # Voice — currently hidden unconditionally, on every platform:
+        # `recording_available()` (`ui/voice.py`) is pinned off by
+        # `_VOICE_INPUT_AVAILABLE` until each target platform has actually
+        # been verified to record real audio, not assumed to. design.md's
+        # own rule ("the agent doesn't support it — the control doesn't get
+        # drawn") applies here too, just for an unverified-platform reason
+        # instead of an agent one. `VoiceButton.configure` reads the same
+        # flag, so this section and the composer's mic button can never
+        # disagree.
         #
         # The section is hidden outright, not disabled — an artist isn't
         # meant to configure a whisper endpoint for a button that can never
         # appear. `_voice_unavailable_caption` takes its place instead of
-        # letting it vanish without a trace, and names the real cause
-        # rather than leaving the artist to guess or to go looking in
-        # System Settings for a Houdini entry that likely isn't even
-        # listed there.
+        # letting it vanish without a trace.
         recording_ok, recording_reason = recording_available()
         voice_section = _Section("Voice", self, expanded=True, grid=grid_metrics)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
@@ -699,7 +698,7 @@ class SettingsView(QtWidgets.QWidget):
         self._voice_unavailable_caption = QtWidgets.QLabel(self)
         self._voice_unavailable_caption.setWordWrap(True)
         self._voice_unavailable_caption.setStyleSheet("color: palette(disabled, text);")
-        self._voice_unavailable_caption.setText(f"Voice input: {recording_reason}")
+        self._voice_unavailable_caption.setText(recording_reason)
         self._voice_unavailable_caption.setVisible(not recording_ok)
 
         privacy_section = _Section("Privacy", self, expanded=False, grid=grid_metrics)

@@ -8,15 +8,18 @@ and PySide6 (``QMediaCaptureSession``/``QAudioInput``/``QMediaRecorder``,
 Qt6), so there is no single path — the module tries both and honestly hides
 the button if neither came together, rather than pretending recording works.
 
-On macOS, "came together" also means the OS will actually let it record.
+Voice input is currently OFF EVERYWHERE, unconditionally, regardless of
+platform — see ``_VOICE_INPUT_AVAILABLE``. Not a platform check: on macOS,
 Houdini's own bundle (checked across 20.5/21.0/22.0, every edition) never
-declares ``NSMicrophoneUsageDescription``, so Qt6 flatly refuses to even ask
-for microphone access — not a crash, just a permission stuck forever at
-``Undetermined`` and a recording that starts, runs, and produces silence.
-``build_default_backend``/``recording_available`` check for exactly this
-(via ``QMicrophonePermission``, Qt6 only) and report "unavailable" rather
-than let the button or the Settings → Voice section promise something that
-can only fail; see ``_qt6_permission_block_reason``.
+declares ``NSMicrophoneUsageDescription``, so Qt6 refuses to even ask for
+microphone access and a recording silently produces a WAV header with zero
+samples — but that's the ONE platform anyone actually measured. Linux and
+Windows have not been tried even once, and an earlier version of this file
+showed the button there on the unverified assumption that they'd be fine —
+exactly the guess-instead-of-measurement this project has already paid for
+once, on the OAuth token capture. So the flag is a single, unconditional
+kill switch until each platform is actually verified, not a per-platform
+guess.
 
 Neither recording nor the network runs on the main thread: recording itself
 goes through `QMediaRecorder` (asynchronous and event-driven, so it doesn't
@@ -29,7 +32,6 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-import plistlib
 import sys
 import tempfile
 import time
@@ -62,6 +64,35 @@ from .qt import QtCore, QtGui, QtWidgets, Signal
 #: content is theirs. The endpoint is not a secret and is logged.
 _log = _logbook_logger("houdini_agent_panel.ui.voice")
 
+#: THE single switch for whether voice input (composer mic button, Settings
+#: → Voice) is offered at all. `False` unconditionally, on every platform,
+#: until each one has actually been VERIFIED — a real Houdini install
+#: recording real audio end to end, not "should work" reasoning.
+#:
+#: What's measured so far (macOS only, one evening's work by the owner):
+#: none of Houdini's ten installed bundles (20.5/21.0/22.0, every edition)
+#: declare `NSMicrophoneUsageDescription` in their `Info.plist`, so macOS's
+#: TCC never lists Houdini under Privacy & Security at all, and Qt6
+#: (`QMicrophonePermission`) refuses to even request access — a recording
+#: still "succeeds", with no error, and produces a WAV header with zero
+#: audio samples.
+#:
+#: Linux and Windows have NOT been tried even once — no install, no real
+#: microphone, nothing. An earlier version of this fix showed the button
+#: there anyway, on the assumption that "no known TCC-equivalent" meant "it
+#: works" — that's a guess standing in for a measurement, the same mistake
+#: that already cost several wrong releases this week on the OAuth token
+#: capture (docs/facts/acp-sdk.md §25-§28). So: off everywhere, regardless
+#: of `sys.platform`, until proven otherwise.
+#:
+#: To bring it back: on each target platform, install the panel the way an
+#: artist would and confirm — not assume — that a real recording produces a
+#: playable audio file. Then flip this flag (per platform if they turn out
+#: to differ, or drop it entirely if all of them check out) in this one
+#: place; `recording_available()`, right below, is the only thing that
+#: reads it.
+_VOICE_INPUT_AVAILABLE = False
+
 #: The button's tooltip outside of an error — restored once a recording
 #: succeeds, so a stale "key rejected" message from three uploads ago never
 #: lingers over an otherwise-working button.
@@ -93,24 +124,15 @@ _EMPTY_RECORDING_GENERIC = (
     "connected and try again."
 )
 
-#: Why recording is refused outright (button/section hidden) rather than
-#: offered and left to fail the way `_EMPTY_RECORDING_MACOS` describes —
-#: see `_qt6_permission_block_reason`. `Denied` is the ordinary case: the
-#: artist (or a studio image) turned it off, and System Settings can turn
-#: it back on. `NO_ENTITLEMENT` is the one this whole module was rebuilt
-#: around: Houdini's own bundle (checked across 20.5/21.0/22.0, every
-#: edition) has never declared `NSMicrophoneUsageDescription`, so macOS
-#: never shows Houdini in Privacy & Security at all, and Qt itself refuses
-#: to even ask — no amount of clicking in System Settings fixes this one.
-_MIC_BLOCKED_DENIED = (
-    "Microphone access for Houdini is turned off in macOS Privacy & "
-    "Security settings."
-)
-_MIC_BLOCKED_NO_ENTITLEMENT = (
-    "Houdini's own app bundle doesn't declare microphone use to macOS (no "
-    "NSMicrophoneUsageDescription in its Info.plist), so macOS will never "
-    "prompt for access and the panel can't request it either — this isn't "
-    "something the artist can fix from System Settings."
+#: What `recording_available()` reports while `_VOICE_INPUT_AVAILABLE` is
+#: `False` — deliberately generic (no platform names, no Qt/TCC jargon):
+#: this is the one string an artist might actually see, in the Settings
+#: caption that replaces the whole Voice section. The technical account
+#: lives in `_VOICE_INPUT_AVAILABLE`'s own comment, for whoever returns to
+#: flip it back.
+_VOICE_INPUT_DISABLED_REASON = (
+    "Voice input is temporarily turned off while it's verified on every "
+    "platform."
 )
 
 
@@ -376,142 +398,20 @@ class _Qt5RecordBackend:
         _log.warning("voice: Qt5 recorder error: %s", self._error_text)
 
 
-def _main_bundle_info_plist_path(*, executable: str = "") -> Path | None:
-    """The `Contents/Info.plist` of whatever `.app` bundle launched the
-    current process — the exact bundle Qt itself reads
-    `NSMicrophoneUsageDescription` from (its own refusal names this file
-    explicitly: `qt.permissions: Requesting QMicrophonePermission requires
-    "NSMicrophoneUsageDescription" in Info.plist`).
-
-    Found by walking up from the interpreter binary rather than any
-    hardcoded Houdini path — Houdini alone ships ten different bundles
-    across 20.5/21.0/22.0 (every edition), and whichever one is actually
-    running has to resolve here the same way, with no special-casing.
-    `executable` is a parameter purely so a test can point this at a fake
-    bundle tree instead of `sys.executable`.
-    """
-    for parent in Path(executable or sys.executable).resolve().parents:
-        if parent.suffix == ".app":
-            plist = parent / "Contents" / "Info.plist"
-            return plist if plist.is_file() else None
-    return None
-
-
-def _bundle_declares_microphone_usage(*, executable: str = "") -> bool:
-    """Whether the running process's own bundle names
-    `NSMicrophoneUsageDescription` — read from the real Info.plist, not
-    assumed: Houdini's bundle has never had this key in any of the ten
-    installs checked (20.5/21.0/22.0, every edition), but a future SideFX
-    build — or a studio's own re-signed copy — might, and this must notice
-    the day that changes rather than keep hiding voice input forever.
-    """
-    plist_path = _main_bundle_info_plist_path(executable=executable)
-    if plist_path is None:
-        return False
-    try:
-        with plist_path.open("rb") as fh:
-            info = plistlib.load(fh)
-    except (OSError, plistlib.InvalidFileException):
-        return False
-    return "NSMicrophoneUsageDescription" in info
-
-
-def _qt6_permission_status(*, app=None):
-    """`QCoreApplication.checkPermission` for the microphone, or `None` if
-    there's no `QMicrophonePermission` API at all (PySide2/Qt5, Houdini
-    20.5) or no live `QApplication` yet to ask. Split out from
-    `_qt6_permission_block_reason` purely so a test can hand in a stand-in
-    `app` instead of monkeypatching the real, process-wide `QApplication`
-    singleton's own method.
-    """
-    permission_cls = getattr(QtCore, "QMicrophonePermission", None)
-    if permission_cls is None:
-        return None
-    app = app if app is not None else QtWidgets.QApplication.instance()
-    if app is None:
-        return None
-    return app.checkPermission(permission_cls())
-
-
-def _qt6_permission_block_reason(
-    *, platform: str = "", app=None, bundle_declares_microphone: bool | None = None
-) -> str:
-    """"" if Qt6 recording may proceed on this machine, else the reason it
-    can never work right now.
-
-    Only macOS has TCC (and therefore anything to check here) — Qt5
-    (PySide2, Houdini 20.5) has no `QMicrophonePermission` at all, which
-    `_qt6_permission_status` already turns into "nothing to report" on its
-    own, so callers on that binding get "" here regardless of platform.
-    `Denied` is unconditional. `Undetermined` — Qt has never been asked —
-    only blocks when the bundle's own Info.plist can't back up that ask
-    (see `_bundle_declares_microphone_usage`); a `Granted` app, or an
-    `Undetermined` one with the key present, is left to actually try.
-
-    `platform`/`app`/`bundle_declares_microphone` are injectable purely
-    for tests, the same idiom `_empty_recording_message`'s own `platform`
-    parameter already uses — production callers (`_blocked_reason`) pass
-    none of them and get the real `sys.platform`/`QApplication`/bundle
-    read.
-    """
-    if (platform or sys.platform) != "darwin":
-        return ""
-    status = _qt6_permission_status(app=app)
-    if status is None:
-        return ""
-    permission_status = QtCore.Qt.PermissionStatus
-    if status == permission_status.Denied:
-        _log.info("voice: microphone permission is Denied")
-        return _MIC_BLOCKED_DENIED
-    if status == permission_status.Undetermined:
-        declares = (
-            bundle_declares_microphone
-            if bundle_declares_microphone is not None
-            else _bundle_declares_microphone_usage()
-        )
-        if not declares:
-            _log.info(
-                "voice: microphone permission is Undetermined and the app "
-                "bundle has no NSMicrophoneUsageDescription — access can "
-                "never be requested"
-            )
-            return _MIC_BLOCKED_NO_ENTITLEMENT
-    return ""
-
-
-def _blocked_reason(qtmultimedia) -> str:
-    """"" if recording may work on this machine, else why it can't.
-
-    Never constructs a session/recorder/input object — only inspects what
-    QtMultimedia offers and, on macOS + Qt6, what TCC would even let the
-    panel do with it. This is the one function `build_default_backend`
-    (below) and `recording_available` both defer to, so a button and a
-    settings section can never disagree about whether recording works
-    here.
-    """
-    if qtmultimedia is None:
-        return "QtMultimedia is unavailable in this environment"
-    if hasattr(qtmultimedia, "QMediaCaptureSession") and hasattr(qtmultimedia, "QAudioInput"):
-        return _qt6_permission_block_reason()
-    if hasattr(qtmultimedia, "QAudioRecorder"):
-        return ""
-    return "QtMultimedia offers no recording API we know"
-
-
 def recording_available() -> tuple[bool, str]:
-    """`(True, "")` or `(False, reason)` — cheap, side-effect-free read of
-    "can this machine record audio at all", with no backend/session/
-    recorder construction and no network or `hou` access.
+    """`(True, "")` or `(False, reason)` — whether voice input should be
+    offered on this machine at all, right now.
 
-    Shared by `SettingsView` (whether to draw the Voice section at all —
-    design.md's "the agent doesn't support it — the control doesn't get
-    drawn" applies just as much to a hardware/OS reason as an agent one)
-    and `build_default_backend` (whether to even try). The two must never
-    disagree, on pain of a Voice section with fields for a button that can
-    never appear.
+    Currently just `_VOICE_INPUT_AVAILABLE` (`False`, unconditionally) —
+    see that flag's own comment for the full account of why and what would
+    flip it. No backend construction, no platform check, no network, no
+    `hou` — this is meant to be the one place both `SettingsView` (the
+    Voice section) and `VoiceButton.configure` (the composer's mic button)
+    ask, so the two can never disagree about whether voice input is on.
     """
-    reason = _blocked_reason(_import_qtmultimedia())
-    return (not reason, reason)
+    if _VOICE_INPUT_AVAILABLE:
+        return True, ""
+    return False, _VOICE_INPUT_DISABLED_REASON
 
 
 def build_default_backend() -> tuple[RecordBackend | None, str]:
@@ -519,34 +419,29 @@ def build_default_backend() -> tuple[RecordBackend | None, str]:
 
     Tries the Qt6 path, then the Qt5 path; any exception while constructing
     (no audio device, the platform backend unavailable and so on) also counts
-    as "unavailable" rather than a reason to take the panel down. Layered on
-    `_blocked_reason`: a machine that can never grant microphone access
-    (macOS Qt6 with the permission Denied, or Undetermined with no
-    `NSMicrophoneUsageDescription` in Houdini's own bundle — see
-    `_qt6_permission_block_reason`) is unavailable here too, without ever
-    constructing a `QMediaRecorder` that would only fail silently the
-    moment `start()` is actually called.
+    as "unavailable" rather than a reason to take the panel down.
     """
     qtmultimedia = _import_qtmultimedia()
-    reason = _blocked_reason(qtmultimedia)
-    if reason:
-        _log.info("voice: no recording backend — %s", reason)
-        return None, reason
+    if qtmultimedia is None:
+        _log.info("voice: no recording backend — QtMultimedia is unavailable")
+        return None, "QtMultimedia is unavailable in this environment"
     if hasattr(qtmultimedia, "QMediaCaptureSession") and hasattr(qtmultimedia, "QAudioInput"):
         try:
             backend = _Qt6RecordBackend(qtmultimedia)
+            _log.info("voice: recording backend is Qt6 (QMediaCaptureSession)")
+            return backend, ""
         except Exception as exc:  # noqa: BLE001 - degrade, don't crash
             _log.info("voice: Qt6 recording backend unavailable: %r", exc)
             return None, f"QtMultimedia (Qt6): {exc!r}"
-        _log.info("voice: recording backend is Qt6 (QMediaCaptureSession)")
-        return backend, ""
-    try:
-        backend = _Qt5RecordBackend(qtmultimedia)
-    except Exception as exc:  # noqa: BLE001
-        _log.info("voice: Qt5 recording backend unavailable: %r", exc)
-        return None, f"QtMultimedia (Qt5): {exc!r}"
-    _log.info("voice: recording backend is Qt5 (QAudioRecorder)")
-    return backend, ""
+    if hasattr(qtmultimedia, "QAudioRecorder"):
+        try:
+            backend = _Qt5RecordBackend(qtmultimedia)
+            _log.info("voice: recording backend is Qt5 (QAudioRecorder)")
+            return backend, ""
+        except Exception as exc:  # noqa: BLE001
+            _log.info("voice: Qt5 recording backend unavailable: %r", exc)
+            return None, f"QtMultimedia (Qt5): {exc!r}"
+    return None, "QtMultimedia offers no recording API we know"
 
 
 class _UploadWorker(Worker):
@@ -651,6 +546,14 @@ class VoiceButton(QtWidgets.QToolButton):
         hasn't been updated to pass it (there is none in this codebase, but
         `configure` is a public contract) still gets the old, unauthenticated
         behaviour rather than a `TypeError`.
+
+        The backend still gets constructed and checked below even while
+        `recording_available()` says no (see its own docstring /
+        `_VOICE_INPUT_AVAILABLE`) — only the final visibility decision is
+        overridden. That keeps `_start_recording`/`_stop_recording` (and
+        everything downstream of them: upload, logging, the empty-recording
+        guard) fully wired and testable independent of whether the button
+        is ever shown to an artist.
         """
         self._whisper_endpoint = _normalize_whisper_endpoint(whisper_endpoint or "")
         self._whisper_api_key = whisper_api_key or ""
@@ -672,6 +575,13 @@ class VoiceButton(QtWidgets.QToolButton):
         if self._backend is None:
             self.setVisible(False)
             self.failed.emit(self._unavailable_reason)
+            return
+
+        available, reason = recording_available()
+        if not available:
+            self.setVisible(False)
+            _log.info("voice: hidden — %s", reason)
+            self.failed.emit(reason)
             return
         self.setVisible(True)
 
