@@ -83,6 +83,39 @@ def test_fx_port_scan_exhausted_returns_none(monkeypatch):
     assert scene.fx_port() is None
 
 
+def test_fx_port_scan_finds_a_server_that_comes_up_after_a_failed_scan(monkeypatch):
+    """The real incident: fxhoudinimcp's own auto-start is asynchronous
+    (`uiready.py` polls readiness on a worker thread, up to ~15s) and the
+    panel's very first scan can easily land before that poll finishes. A
+    "no port" answer from that first scan must not be remembered for the
+    rest of the Houdini session — the very next call has to notice the
+    server came up in the meantime, not repeat the stale "no port" forever.
+    """
+    monkeypatch.setattr(scene, "_probe_health", lambda port: False)
+    assert scene.fx_port() is None
+
+    monkeypatch.setattr(scene, "_probe_health", lambda port: port == 8107)
+    assert scene.fx_port() == 8107
+
+
+def test_fx_port_scan_does_not_rescan_once_a_port_is_found(monkeypatch):
+    """The flip side of the fix above: a POSITIVE scan is still cached for
+    the life of the process — otherwise every call to `fx_port()` (a diagnostics
+    click, a new conversation, the boot log) would re-pay the up-to-1s scan
+    cost even once the answer is already known, on Houdini's main thread."""
+    calls: list[int] = []
+
+    def fake_scan() -> int | None:
+        calls.append(1)
+        return 8103
+
+    monkeypatch.setattr(scene, "_scan_for_any_fx_port", fake_scan)
+
+    assert scene.fx_port() == 8103
+    assert scene.fx_port() == 8103
+    assert len(calls) == 1
+
+
 # --- mcp_servers ---------------------------------------------------------
 
 
@@ -119,6 +152,23 @@ def test_mcp_servers_without_port_degrades_without_pin(monkeypatch):
     names = [item["name"] for item in entry["env"]]
     assert "HOUDINI_PORT" not in names
     assert "HOUDINI_HOST" in names
+
+
+def test_mcp_servers_logs_the_port_it_actually_pinned(monkeypatch, caplog):
+    """What port (or its absence) went into THIS session's mcpServers must be
+    visible in the log — the previous single boot-time "fx port None" line
+    gave no way to tell a one-off race from a permanently dead server."""
+    monkeypatch.setattr(scene, "fx_port", lambda: 8104)
+    with caplog.at_level("INFO", logger="houdini_agent_panel.scene"):
+        scene.mcp_servers()
+    assert "8104" in caplog.text
+
+
+def test_mcp_servers_logs_the_missing_port(monkeypatch, caplog):
+    monkeypatch.setattr(scene, "fx_port", lambda: None)
+    with caplog.at_level("WARNING", logger="houdini_agent_panel.scene"):
+        scene.mcp_servers()
+    assert "fx server" in caplog.text.lower()
 
 
 # --- fx_python -------------------------------------------------------------

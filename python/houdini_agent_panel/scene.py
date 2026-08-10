@@ -36,19 +36,33 @@ _PORT_SCAN_TIMEOUT = 1.0
 
 _log = logging.getLogger(__name__)
 
-#: Remembered answer of the HTTP scan (`(scanned?, port)`). The scan costs up
-#: to `_PORT_SCAN_COUNT * _PORT_SCAN_TIMEOUT` = 16 seconds, and `fx_port()` is
-#: called from the MAIN thread on every "new conversation". Sixteen seconds of
-#: frozen Houdini per click is indistinguishable from a button that does
-#: nothing. Caching is safe because the scan is only reached when
-#: `fxhoudinimcp_server` can't be imported at all, and an import that failed
-#: once in a process will keep failing.
-_scanned_port: tuple[bool, int | None] = (False, None)
+#: Remembered POSITIVE answer of the HTTP scan — `None` means "not cached",
+#: never "cached as absent". The scan costs up to `_PORT_SCAN_COUNT *
+#: _PORT_SCAN_TIMEOUT` = 16 seconds sequentially, ~1 second in practice since
+#: `_scan_for_any_fx_port` probes concurrently, and `fx_port()` runs on the
+#: MAIN thread on every "new conversation" — so a positive answer is worth
+#: keeping, to not re-pay that cost on every call once the port is known.
+#:
+#: A NEGATIVE answer must NOT be cached, on pain of exactly the incident this
+#: fixed: fxhoudinimcp's own auto-start is asynchronous (its `uiready.py`
+#: polls readiness on a worker thread for up to ~15s — see
+#: docs/facts/fxhoudinimcp.md §6), so the panel's first scan, which can run
+#: within milliseconds of Houdini's own boot (`autostart_agent` fires a
+#: session on the very first Qt event-loop tick), routinely lands before that
+#: poll finishes. The old code cached that miss as a permanent verdict for
+#: the rest of the process — every later call, including the one that builds
+#: `mcpServers` for a brand new conversation started minutes later with the
+#: fx server fully up (confirmed via `lsof` on the reported machine), kept
+#: returning the same stale "no port". A positive result, by contrast, stays
+#: true: `_pick_free_port` in fxhoudinimcp's `startup.py` returns the SAME
+#: port to the same pid on every subsequent `start()`, so nothing in a normal
+#: Houdini session reassigns it once found.
+_scanned_port: int | None = None
 
 
 def reset_port_cache_for_tests() -> None:
     global _scanned_port
-    _scanned_port = (False, None)
+    _scanned_port = None
 
 
 def fx_port() -> int | None:
@@ -56,20 +70,38 @@ def fx_port() -> int | None:
     try:
         import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - see the module docstring
     except ImportError:
+        _log.info(
+            "fx_port: fxhoudinimcp_server is not importable in this process "
+            "(plugin not loaded, out of date, or not on sys.path yet) — "
+            "falling back to an HTTP scan"
+        )
         return _cached_scan_for_any_fx_port()
 
     if not startup.is_running():
+        # Not cached, unlike the scan branch below: this asks the plugin's
+        # own live state on every call, so it self-corrects the moment
+        # `uiready.py`'s async readiness poll (fxhoudinimcp's own, not
+        # ours) confirms the server — no cache of ours could go stale here
+        # because nothing here is remembered between calls.
+        _log.info(
+            "fx_port: fxhoudinimcp_server is loaded but hasn't confirmed "
+            "its server is ready yet (auto-start polls asynchronously on "
+            "its own worker thread) — no port for this call"
+        )
         return None
-    return startup.get_port()
+    port = startup.get_port()
+    _log.debug("fx_port: fxhoudinimcp_server reports port %s", port)
+    return port
 
 
 def _cached_scan_for_any_fx_port() -> int | None:
     global _scanned_port
-    scanned, port = _scanned_port
-    if scanned:
-        return port
+    if _scanned_port is not None:
+        _log.debug("fx port scan: reusing cached port %s", _scanned_port)
+        return _scanned_port
     port = _scan_for_any_fx_port()
-    _scanned_port = (True, port)
+    if port is not None:
+        _scanned_port = port
     return port
 
 
@@ -133,15 +165,20 @@ def mcp_servers() -> list[dict]:
     port = fx_port()
     if port is not None:
         env.append({"name": "HOUDINI_PORT", "value": str(port)})
+        _log.info("mcp_servers: pinning the fx server on port %s for this session", port)
     else:
         # The server hasn't come up in this process yet — nothing to pin.
         # Without a pin the agent will scan the range itself; it's the same
         # "someone else's Houdini" risk, but the degradation is unavoidable
-        # here since there simply is no real port.
+        # here since there simply is no real port. This is also a one-shot
+        # decision: fxhoudinimcp's own client does its unpinned scan once,
+        # at THIS session's MCP server startup, and never retries — a
+        # session created in this state stays toolless for its whole life,
+        # even once the fx server comes up moments later.
         _log.warning(
-            "the fx server isn't up in this Houdini process — mcpServers "
-            "will go out without HOUDINI_PORT, the agent will scan the "
-            "range itself"
+            "mcp_servers: the fx server isn't up in this Houdini process yet — "
+            "mcpServers will go out without HOUDINI_PORT, the agent will scan "
+            "the range itself, once, at its own MCP server's startup"
         )
     # Houdini's plain CPython carries no packages of its own, so it is told
     # where the panel's tree is. Set by the installer only when it chose
@@ -290,7 +327,16 @@ def _scan_for_any_fx_port() -> int | None:
     ports = range(_PORT_SCAN_BASE, _PORT_SCAN_BASE + _PORT_SCAN_COUNT)
     with concurrent.futures.ThreadPoolExecutor(max_workers=_PORT_SCAN_COUNT) as pool:
         alive = [port for port, ok in zip(ports, pool.map(_probe_health, ports)) if ok]
-    return min(alive) if alive else None
+    port = min(alive) if alive else None
+    if port is None:
+        _log.warning(
+            "fx port scan: nothing answered mcp.health in %s..%s",
+            _PORT_SCAN_BASE,
+            _PORT_SCAN_BASE + _PORT_SCAN_COUNT - 1,
+        )
+    else:
+        _log.info("fx port scan: found a server on port %s", port)
+    return port
 
 
 def _probe_health(port: int) -> bool:
