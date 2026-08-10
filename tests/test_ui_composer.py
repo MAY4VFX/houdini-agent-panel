@@ -628,48 +628,67 @@ def test_pasted_image_over_the_cap_is_rejected_with_a_clear_reason(qapp, monkeyp
     assert rejected and "too large" in rejected[0].lower()
 
 
-def test_a_pasted_line_far_over_the_cap_gets_trimmed_not_left_to_freeze_the_field(
-    qapp, monkeypatch
-):
+def test_a_large_paste_becomes_an_attachment_instead_of_text(qapp, monkeypatch):
     """Reported for real: a terminal-output paste that lost its wrapping
     newlines (a table's padding collapsed into one line of thousands of
     characters) left the artist unable to type OR erase — measured
-    directly (not assumed): a bare `QPlainTextEdit` with no code of ours
-    attached at all backspaces through one 2,000-character unbroken line in
-    ~5 SECONDS, 8,000 characters in ~45 — `QPlainTextEdit`'s own word-wrap
-    relayout runs on every edit that touches the block, and its cost scales
-    with the block's length, so erasing the whole thing character by
-    character is quadratic in the paste's size. Nothing on our side adds to
-    that (measured: `_adjust_text_height`'s own per-keystroke walk costs
-    under a millisecond extra on top of Qt's own ~12ms for a 20k-char
-    line) — the only lever available is not letting a paste create a block
-    this long in the first place.
+    directly: a bare `QPlainTextEdit` with no code of ours attached
+    backspaces through one 2,000-character unbroken line in ~5 SECONDS,
+    8,000 characters in ~45 (`QPlainTextEdit`'s own word-wrap relayout
+    runs on every edit that touches the block, cost scaling with the
+    block's length). A first fix capped and cut the line — simple, but it
+    silently threw away whatever the artist pasted past the cut. This is
+    the non-destructive fix instead: the paste never enters the field at
+    all, so the cost never applies, and every character still goes out —
+    just as an attachment, not as live-edited text.
     """
-    monkeypatch.setattr(composer_mod, "_MAX_PASTE_LINE_CHARS", 100)
+    monkeypatch.setattr(composer_mod, "_LARGE_PASTE_LINE_CHARS", 100)
     composer = Composer()
     composer.show()
-    trimmed = []
-    composer.paste_trimmed.connect(trimmed.append)
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
+    original = "word " * 400  # one unbroken 2000-char line
     mime = QtCore.QMimeData()
-    mime.setText("word " * 400)  # one unbroken 2000-char line
+    mime.setText(original)
 
     composer._text_edit.insertFromMimeData(mime)
 
-    lines = composer._text_edit.toPlainText().split("\n")
-    assert max(len(line) for line in lines) <= 100
-    assert trimmed, "the artist must be told something was trimmed, not left guessing"
+    assert composer._text_edit.toPlainText() == "", "the field itself must stay empty"
+    assert composer._text_edit.height() < 100, "no oversized block ever entered the field"
+    assert len(composer._attachments) == 1
+    block = composer._attachments[0]
+    assert block["type"] == "resource"
+    assert block["resource"]["text"] == original, "not a single character was dropped"
+    assert block["resource"]["uri"].startswith(composer_mod.PASTED_TEXT_URI_SCHEME)
 
 
-def test_an_ordinary_multiline_paste_is_left_untouched(qapp, monkeypatch):
+def test_a_large_paste_falls_back_to_plain_text_without_the_capability(qapp, monkeypatch):
+    """An agent without `supports_embedded_context` has no way to receive
+    a `resource` block at all — the paste falls back to the field's own
+    ordinary behavior (inserted as text, same as before this feature
+    existed) rather than being silently dropped."""
+    monkeypatch.setattr(composer_mod, "_LARGE_PASTE_LINE_CHARS", 100)
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_embedded_context=False), "")
+    original = "word " * 400
+    mime = QtCore.QMimeData()
+    mime.setText(original)
+
+    composer._text_edit.insertFromMimeData(mime)
+
+    assert composer._attachments == []
+    assert composer._text_edit.toPlainText() == original
+
+
+def test_a_small_paste_still_becomes_plain_text(qapp, monkeypatch):
     """The cap is about one absurdly long UNBROKEN line, never about total
     length — a real multi-line log or code paste (short lines, real
     newlines) is cheap to edit (measured: 2,000 short lines backspaced at
-    ~2ms each) and must go in verbatim."""
-    monkeypatch.setattr(composer_mod, "_MAX_PASTE_LINE_CHARS", 2000)
+    ~2ms each) and goes into the field exactly as it always did, no chip."""
+    monkeypatch.setattr(composer_mod, "_LARGE_PASTE_LINE_CHARS", 2000)
     composer = Composer()
     composer.show()
-    trimmed = []
-    composer.paste_trimmed.connect(trimmed.append)
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
     text = "\n".join(f"line {i}: some ordinary short text" for i in range(50))
     mime = QtCore.QMimeData()
     mime.setText(text)
@@ -677,23 +696,78 @@ def test_an_ordinary_multiline_paste_is_left_untouched(qapp, monkeypatch):
     composer._text_edit.insertFromMimeData(mime)
 
     assert composer._text_edit.toPlainText() == text
-    assert not trimmed
+    assert composer._attachments == []
 
 
-def test_erasing_a_realistic_terminal_paste_is_no_longer_unacceptably_slow(qapp):
+def test_a_single_short_line_paste_is_never_turned_into_a_chip(qapp):
+    """The overwhelming common case — a path, a URL, a short command — must
+    not grow a chip just because it has no newline in it."""
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
+    mime = QtCore.QMimeData()
+    mime.setText("/Users/artist/scenes/ship_uv_v14.hip")
+
+    composer._text_edit.insertFromMimeData(mime)
+
+    assert composer._text_edit.toPlainText() == "/Users/artist/scenes/ship_uv_v14.hip"
+    assert composer._attachments == []
+
+
+def test_large_pasted_text_reaches_the_submitted_blocks_in_full(qapp, monkeypatch):
+    """Nothing is lost on the way out — the attachment rides along in
+    `blocks` exactly like an image or a file already does."""
+    monkeypatch.setattr(composer_mod, "_LARGE_PASTE_LINE_CHARS", 50)
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
+    pasted = "x" * 500
+    mime = QtCore.QMimeData()
+    mime.setText(pasted)
+    composer._text_edit.insertFromMimeData(mime)
+    _type_text(composer._text_edit, "what does this mean?")
+
+    submitted = []
+    composer.submitted.connect(submitted.append)
+    composer._on_send_clicked()
+
+    assert submitted
+    blocks = submitted[0]
+    assert {"type": "text", "text": "what does this mean?"} in blocks
+    resource_blocks = [b for b in blocks if b.get("type") == "resource"]
+    assert len(resource_blocks) == 1
+    assert resource_blocks[0]["resource"]["text"] == pasted
+
+
+def test_the_pasted_text_chip_can_be_removed_like_any_attachment(qapp, monkeypatch):
+    monkeypatch.setattr(composer_mod, "_LARGE_PASTE_LINE_CHARS", 50)
+    composer = Composer()
+    composer.show()
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
+    mime = QtCore.QMimeData()
+    mime.setText("y" * 500)
+    composer._text_edit.insertFromMimeData(mime)
+    assert len(composer._attachments) == 1
+
+    composer._remove_attachment(0)
+
+    assert composer._attachments == []
+
+
+def test_typing_after_a_large_paste_stays_fast(qapp, monkeypatch):
     """The owner's own described scenario, verbatim: a couple of lines
     copied out of a terminal, its padding spaces collapsed onto one line
     with no wrapping newline left, an emoji from the output riding along
-    (one outside the BMP — a surrogate pair). Before the cap, a line this
-    long backspaced through in tens of SECONDS (measured: an 8,000-
-    character unbroken line took ~45s on a bare `QPlainTextEdit`, no code
-    of ours involved). 5s is a generous ceiling — comfortably clear of that
-    old number, not a tight budget — chosen so this catches a regression
-    that reintroduces the quadratic cost without being flaky on a loaded
-    CI box.
+    (one outside the BMP — a surrogate pair). Before this fix, a line this
+    long cost tens of SECONDS just to erase (measured: an 8,000-character
+    unbroken line took ~45s on a bare `QPlainTextEdit`, no code of ours
+    involved). Now the paste never reaches the field, so there's nothing
+    large left to be slow: typing afterward has to be as fast as it always
+    was on an otherwise-empty field.
     """
     composer = Composer()
     composer.show()
+    composer.set_capabilities(_info(supports_embedded_context=True), "")
     text = "word " * 4000 + "✅" + ("\U0001F9CA" * 5) + (" " * 2000)
     composer._text_edit.setFocus()
     mime = QtCore.QMimeData()
@@ -703,16 +777,12 @@ def test_erasing_a_realistic_terminal_paste_is_no_longer_unacceptably_slow(qapp)
     import time
 
     start = time.perf_counter()
-    for _ in range(len(composer._text_edit.toPlainText())):
-        QtTest.QTest.keyClick(composer._text_edit, QtCore.Qt.Key_Backspace)
+    QtTest.QTest.keyClicks(composer._text_edit, "still fast")
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 5.0, f"erasing a trimmed paste took {elapsed:.1f}s — the cap regressed"
-    assert composer._text_edit.toPlainText() == ""
-    assert composer._text_edit.isEnabled()
-    cursor = composer._text_edit.textCursor()
-    cursor.insertText("still works")
-    assert composer._text_edit.toPlainText() == "still works"
+    assert elapsed < 1.0, f"typing after a large paste took {elapsed:.2f}s"
+    assert composer._text_edit.toPlainText() == "still fast"
+    assert composer._text_edit.height() < 100
 
 
 def test_attachment_rejection_reason_distinguishes_too_large_from_unsupported(tmp_path, monkeypatch):

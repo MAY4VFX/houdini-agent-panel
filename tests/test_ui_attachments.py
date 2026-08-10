@@ -16,6 +16,7 @@ from houdini_agent_panel import conversations_store as store
 from houdini_agent_panel import sessions
 from houdini_agent_panel.transcript_model import TranscriptModel
 from houdini_agent_panel.ui import attachments
+from houdini_agent_panel.ui import composer as composer_mod
 from houdini_agent_panel.ui import panel as panel_mod
 from houdini_agent_panel.ui.qt import QtCore, QtGui
 from houdini_agent_panel.ui.transcript import TranscriptView, _MessageRow
@@ -231,3 +232,176 @@ def test_queued_messages_sent_together_stay_separate_bubbles(qapp):
     for row in unique_rows:
         assert isinstance(row, _MessageRow)
         assert row._attachments is not None
+
+
+# --- a large paste, turned into a `resource` attachment with a synthetic
+# uri (`ui/composer.py::_pasted_text_block`, `_LARGE_PASTE_LINE_CHARS`) —
+# the non-destructive replacement for cutting the line: nothing is dropped,
+# the whole thing rides along as its own block, same as an image or a real
+# file attachment already does. `resource`, not `text`: a plain `type:
+# "text"` block was tried first and dropped — `ui/panel.py::_on_submitted`
+# reads `type == "text"` to mean "the artist's own typed words," so a
+# second one merged into the plain message and the chip was lost the
+# moment it left the composer. -----------------------------------------
+
+
+def _text_block(text: str, uri: str = "pasted-text:///test") -> dict:
+    """The LIVE shape `composer._pasted_text_block` builds — nested under
+    `resource`, same as any other embedded resource. `uri` defaults to
+    something `attachments.is_pasted_text` recognises; override it only to
+    prove that check actually looks at the uri, not just the block's type.
+    """
+    return {"type": "resource", "resource": {"uri": uri, "text": text, "mimeType": "text/plain"}}
+
+
+def _stored_text_record(text: str, uri: str = "pasted-text:///test", **extra) -> dict:
+    """The shape `transcript_model._attachment_record` writes to disk —
+    flat, same as `uri`/`mimeType` already are for any other `resource`."""
+    record = {"type": "resource", "uri": uri, "mimeType": "text/plain", "text": text}
+    record.update(extra)
+    return record
+
+
+def test_pasted_text_is_told_apart_from_a_real_file_resource(qapp):
+    assert attachments.is_pasted_text(_text_block("hi")) is True
+    assert attachments.is_pasted_text(_resource_block()) is False, (
+        "a real text FILE (a genuine file:// uri) must not be mistaken for a paste"
+    )
+
+
+def test_pasted_text_label_counts_lines(qapp):
+    assert attachments.label(_text_block("one line")) == "Pasted text, 1 line"
+    assert attachments.label(_text_block("a\nb\nc")) == "Pasted text, 3 lines"
+    # A trailing newline isn't an extra empty line.
+    assert attachments.label(_text_block("a\nb\n")) == "Pasted text, 2 lines"
+    assert attachments.label(_text_block("")) == "Pasted text"
+    # A restored record is flat, not nested under "resource" — same answer.
+    assert attachments.label(_stored_text_record("a\nb\nc")) == "Pasted text, 3 lines"
+
+
+def test_pasted_text_tooltip_shows_the_full_text(qapp):
+    block = _text_block("the whole pasted paragraph, in full")
+    assert attachments.tooltip(block) == "the whole pasted paragraph, in full"
+
+
+def test_pasted_text_tooltip_says_how_much_was_trimmed_on_save(qapp):
+    record = _stored_text_record("kept part", truncated_chars=4000)
+    tip = attachments.tooltip(record)
+    assert tip.startswith("kept part")
+    assert "4000" in tip
+
+
+def test_a_user_entry_carries_pasted_text_as_an_attachment():
+    model = TranscriptModel()
+    block = _text_block("x" * 5000)
+    entry = model.append_user("what does this mean?", [block])
+    assert entry.attachments == [block]
+
+
+def test_the_feed_draws_a_chip_not_an_image_for_pasted_text(qapp):
+    model = TranscriptModel()
+    view = TranscriptView()
+    view.set_model(model)
+
+    entry = model.append_user("check this output", [_text_block("line one\nline two")])
+    view.refresh(entry.id)
+
+    row = view._rows[entry.id]
+    assert row._attachments is not None
+    labels = [
+        child.text()
+        for child in row._attachments.findChildren(object)
+        if hasattr(child, "text") and callable(child.text)
+    ]
+    assert "Pasted text, 2 lines" in labels
+
+
+def test_attachment_record_keeps_a_moderate_pasted_text_in_full():
+    from houdini_agent_panel.transcript_model import _attachment_record
+
+    block = _text_block("a modest paste, easily kept whole", uri="pasted-text:///abc")
+    record = _attachment_record(block)
+    assert record == {
+        "type": "resource",
+        "uri": "pasted-text:///abc",
+        "mimeType": "text/plain",
+        "text": "a modest paste, easily kept whole",
+    }
+    assert "truncated_chars" not in record
+
+
+def test_attachment_record_caps_a_huge_pasted_text_and_says_how_much_was_cut(monkeypatch):
+    """Unlike an image's base64 payload, a pasted text's payload IS the
+    artist's own words — worth keeping on disk, not stripped outright, but
+    still bounded: `conversations.json` autosaves on every prompt and turn,
+    and nothing should be able to make that grow without limit."""
+    import houdini_agent_panel.transcript_model as tm
+
+    monkeypatch.setattr(tm, "_MAX_STORED_PASTE_CHARS", 10)
+    record = tm._attachment_record(_text_block("0123456789ABCDEF"))
+    assert record["text"] == "0123456789"
+    assert record["truncated_chars"] == 6
+
+
+def test_attachment_record_leaves_a_real_file_resource_alone(monkeypatch):
+    """The cap and `truncated_chars` are a `pasted-text:` thing only — a
+    real text FILE attachment (`build_attachment_block`, embedded via
+    `supports_embedded_context`) keeps whatever `_attachment_record`
+    already did for it before this feature existed: no `text` field at
+    all, uri and mimeType only."""
+    import houdini_agent_panel.transcript_model as tm
+
+    monkeypatch.setattr(tm, "_MAX_STORED_PASTE_CHARS", 10)
+    record = tm._attachment_record(_resource_block())
+    assert "text" not in record
+    assert "truncated_chars" not in record
+
+
+def test_a_restored_pasted_text_chip_shows_what_was_actually_kept():
+    """A conversation read back from disk only ever has what `_attachment_
+    record` kept — `load_records` must carry it straight through, same as
+    any other attachment field."""
+    model = TranscriptModel()
+    model.append_user("", [_text_block("kept")])
+    restored = TranscriptModel()
+    restored.load_records(model.to_records())
+
+    entries = restored.entries()
+    assert entries[0].attachments == [_stored_text_record("kept")]
+    assert attachments.label(entries[0].attachments[0]) == "Pasted text, 1 line"
+
+
+def test_a_large_pasted_text_survives_persist_and_reload_from_disk(qapp, monkeypatch):
+    """The full chain, not just the model in isolation — `ui/panel.py::
+    _on_submitted` through `conversations_store`, the same round trip
+    `test_a_sent_attachment_survives_persist_and_reload_from_disk` already
+    proves for an image."""
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: "/tmp")
+    monkeypatch.setattr(
+        panel_mod.scene, "mcp_servers",
+        lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": []}],
+    )
+    monkeypatch.setattr(panel_mod._RefreshWorker, "start", lambda self: None)
+    panel_mod.reset_shared_state_for_tests()
+    try:
+        widget = panel_mod.AgentPanel()
+        qapp.processEvents()
+        client = panel_mod.shared_client(widget._agent_id)
+        state = sessions.SessionState(
+            session_id="s1", title="New conversation", cwd="/tmp", created_at=0.0
+        )
+        client.session_started.emit(state.session_id, state)
+        qapp.processEvents()
+        monkeypatch.setattr(client, "prompt", lambda sid, blocks: None)
+
+        pasted = "the pasted paragraph\nspanning a couple of lines"
+        widget._on_submitted([{"type": "text", "text": "look at this"}, _text_block(pasted)])
+        widget._persist_conversations()
+
+        conversation_id = widget._conversation_ids[state.session_id]
+        reloaded = next(c for c in store.load() if c.id == conversation_id)
+        user_entries = [e for e in reloaded.entries if e.get("kind") == "user"]
+        assert user_entries[-1].get("attachments") == [_stored_text_record(pasted)]
+        widget.shutdown()
+    finally:
+        panel_mod.reset_shared_state_for_tests()

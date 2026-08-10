@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import re
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,27 +65,41 @@ _LINK_MIN_SURFACE_WIDTH = 260
 _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 #: Above this many characters, one UNBROKEN line (no `\n` in it) costs real,
-#: measured time to edit. `QPlainTextEdit`'s own word-wrap relayout runs on
-#: every keystroke that touches the block it's in, and its cost scales with
-#: the block's length — measured directly against a bare `QPlainTextEdit`
-#: with none of this file's code attached: backspacing all the way through
-#: one 2,000-character unbroken line took ~5 SECONDS, 8,000 characters took
-#: ~45, because erasing it one character at a time is quadratic in the
-#: block's length. `_adjust_text_height`'s own per-keystroke walk was
-#: measured NOT to be the cause (under a millisecond of overhead on top of
-#: Qt's own ~12ms for a 20k-character line) — this is Qt's own relayout
-#: cost, so the only lever available is not letting a paste create a block
-#: this long to begin with. Reported for real: a terminal-output paste that
-#: lost its wrapping newlines (a table's padding collapsed into one line of
-#: thousands of characters, likely alongside an emoji from the same output)
-#: left the artist unable to type OR erase. 1,000 keeps a full backspace-
-#: through-it well under a second even in the worst case (one line, no
-#: further newline to break it up) and is still generous for anything an
-#: artist would actually mean as one line — a real multi-line paste (a log,
-#: a code snippet) is untouched by this: it has real newlines, so each
-#: block stays short and cheap regardless of the paste's total size
-#: (measured: 2,000 short lines backspaced at ~2ms each).
-_MAX_PASTE_LINE_CHARS = 1000
+#: measured time to edit, and stays that expensive for as long as it sits in
+#: the live document. `QPlainTextEdit`'s own word-wrap relayout runs on every
+#: keystroke that touches the block it's in, and its cost scales with the
+#: block's length — measured directly against a bare `QPlainTextEdit` with
+#: none of this file's code attached: backspacing all the way through one
+#: 2,000-character unbroken line took ~5 SECONDS, 8,000 characters took ~45,
+#: because erasing it one character at a time is quadratic in the block's
+#: length. `_adjust_text_height`'s own per-keystroke walk was measured NOT to
+#: be the cause (under a millisecond of overhead on top of Qt's own ~12ms for
+#: a 20k-character line) — this is Qt's own relayout cost.
+#:
+#: A first attempt capped the line at this length and dropped the rest —
+#: cheap, but it silently threw away whatever the artist pasted past the
+#: cut, which is worse than slow: exactly the class of bug this project has
+#: spent the week fixing elsewhere (a panel that looks fine while quietly
+#: losing what the artist typed). A pasted line of paths, a long shell
+#: command, a JSON blob — all real, all routinely longer than any character
+#: count that stays cheap to keep in a growing `QPlainTextEdit`.
+#:
+#: So the field never holds this text at all: a line over this length turns
+#: the WHOLE paste into an attachment instead (`Composer._on_large_text_
+#: pasted`) — a small, fixed-size chip, not a block inside the document, so
+#: none of the above cost ever applies regardless of how long the pasted
+#: text is. Every character still goes to the agent, in full, as an ordinary
+#: `text` content block (`_gather_blocks`) — nothing is lost, only where it
+#: lives changes. Only the length of a single unbroken line decides this,
+#: never total size: a real multi-line paste (a log, a code snippet) is left
+#: exactly as it always was, typed straight into the field — its lines are
+#: already short, so each block stays cheap regardless of the paste's total
+#: size (measured: 2,000 short lines, 176k characters, backspaced at ~2ms
+#: each). 1,000 is comfortably past where the cost becomes noticeable
+#: (measured: 500 characters ~1.3ms/keystroke, 2,000 ~6ms) while still
+#: keeping ordinary single-line pastes — a path, a URL, a command — as
+#: plain, editable text.
+_LARGE_PASTE_LINE_CHARS = 1000
 
 
 class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
@@ -121,12 +136,12 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
     #: drag-and-drop or the "+" dialog already takes, since the block this
     #: builds is identical either way.
     image_file_pasted = Signal(str)
-    #: A pasted line had to be cut down to `_MAX_PASTE_LINE_CHARS` (see that
-    #: constant's own docstring for the measured cost this avoids). Carries
-    #: a human-readable reason for `Composer.attachment_rejected`-style
-    #: reporting — never dropped in silence, same rule as a rejected
-    #: attachment.
-    paste_trimmed = Signal(str)
+    #: A paste with a line over `_LARGE_PASTE_LINE_CHARS` — see that
+    #: constant's own docstring. Carries the FULL pasted text, untouched;
+    #: `Composer._on_large_text_pasted` decides what becomes of it (an
+    #: attachment where the agent can take one, its own docstring covers
+    #: the one case it still has to fall back to inserting it).
+    large_text_pasted = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -201,8 +216,9 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
         Ordinary text paste (the overwhelming common case) never reaches
         any branch below and falls straight through to Qt's own default,
         untouched — except for the one guard at the end, which only ever
-        touches a line long enough to be a measured performance problem in
-        its own right, see `_MAX_PASTE_LINE_CHARS`.
+        diverts a paste with a line long enough to be a measured
+        performance problem in its own right, see `_LARGE_PASTE_LINE_CHARS`
+        — and even that one loses nothing, it just doesn't insert as text.
         """
         if source.hasUrls():
             image_paths = [
@@ -220,13 +236,9 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
                 self.image_pasted.emit(image)
                 return
         if source.hasText():
-            trimmed, cut = _trim_long_lines(source.text(), _MAX_PASTE_LINE_CHARS)
-            if cut:
-                self.textCursor().insertText(trimmed)
-                self.paste_trimmed.emit(
-                    f"A pasted line was too long to edit safely and was cut to "
-                    f"{_MAX_PASTE_LINE_CHARS} characters."
-                )
+            text = source.text()
+            if _has_line_over(text, _LARGE_PASTE_LINE_CHARS):
+                self.large_text_pasted.emit(text)
                 return
         super().insertFromMimeData(source)
 
@@ -434,25 +446,53 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
     return None
 
 
+#: The scheme a large-paste attachment's synthetic `uri` always starts
+#: with — `EmbeddedResourceContentBlock`'s `uri` is a required field
+#: (measured against the SDK's own `TextResourceContents`), and a paste has
+#: no real file behind it to supply one. Distinguishes it from an ordinary
+#: text-FILE resource (`build_attachment_block`, always a real `file://`
+#: uri) everywhere a block is rendered or persisted, so a pasted paragraph
+#: gets "Pasted text, N lines" instead of a garbled filename — checked by
+#: `ui/attachments.py::is_pasted_text` and, duplicated because that module
+#: imports Qt and `transcript_model.py` deliberately doesn't, by
+#: `transcript_model._attachment_record`. All three MUST agree on this
+#: exact string.
+PASTED_TEXT_URI_SCHEME = "pasted-text:"
+
+
+def _pasted_text_block(text: str) -> dict:
+    """A large paste (`_LARGE_PASTE_LINE_CHARS`), carried as an embedded
+    resource — the same shape `build_attachment_block` already uses for an
+    attached text FILE (`supports_embedded_context`), just with a synthetic
+    `uri` (`PASTED_TEXT_URI_SCHEME`) standing in for the file that doesn't
+    exist. Reusing the shape means nothing downstream — `client.py`'s
+    pydantic build, the feed's `_AttachmentStrip`, persistence — has to
+    learn a new content-block type at all.
+    """
+    return {
+        "type": "resource",
+        "resource": {
+            "uri": f"{PASTED_TEXT_URI_SCHEME}///{uuid.uuid4().hex}",
+            "text": text,
+            "mimeType": "text/plain",
+        },
+    }
+
+
 def _looks_like_image(path: str) -> bool:
     return (mimetypes.guess_type(path)[0] or "").startswith("image/")
 
 
-def _trim_long_lines(text: str, limit: int) -> tuple[str, bool]:
-    """`text` with every line over `limit` characters cut down to it.
+def _has_line_over(text: str, limit: int) -> bool:
+    """Whether `text` has any line (split on `\\n`) longer than `limit`.
 
     Per-LINE, not per-paste: a real multi-line paste (a log, a code
-    snippet) can be as long as it likes and comes through untouched here —
-    every one of its lines is already short, real newlines break the
-    document into many cheap blocks. Only a line with no `\\n` in it for
-    thousands of characters (the pathological case `_MAX_PASTE_LINE_CHARS`
-    exists for) ever gets cut, and only that line.
+    snippet) can be as long as it likes and this stays `False` — every one
+    of its lines is already short, real newlines break the document into
+    many cheap blocks (`_LARGE_PASTE_LINE_CHARS`'s own docstring). Only a
+    line with no `\\n` in it for thousands of characters trips this.
     """
-    lines = text.split("\n")
-    cut = any(len(line) > limit for line in lines)
-    if not cut:
-        return text, False
-    return "\n".join(line[:limit] for line in lines), True
+    return any(len(line) > limit for line in text.split("\n"))
 
 
 def attachment_rejection_reason(path: Path, info: "AgentInfo") -> str | None:
@@ -512,6 +552,10 @@ def _attachment_thumbnail(block: dict) -> "QtGui.QPixmap | None":
 
 def _attachment_label(block: dict) -> str:
     return attachments.label(block)
+
+
+def _attachment_tooltip(block: dict) -> str:
+    return attachments.tooltip(block)
 
 
 class _ComposerSurface(QtWidgets.QFrame):
@@ -734,9 +778,6 @@ class Composer(QtWidgets.QWidget):
     mode_selected = Signal(str)
     config_option_selected = Signal(str, str)  # config_id, value
     attachment_rejected = Signal(str)
-    #: Forwarded straight from `_GrowingTextEdit.paste_trimmed` — see that
-    #: signal's own docstring and `_MAX_PASTE_LINE_CHARS`.
-    paste_trimmed = Signal(str)
     buddy_selected = Signal(str)
     #: The footer's own "Report a bug" link. Placement was the owner's own
     #: call, by screenshot: the thin strip below the input box, not the
@@ -810,7 +851,7 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.accept_requested.connect(self._on_popup_accept)
         self._text_edit.image_pasted.connect(self._on_image_pasted)
         self._text_edit.image_file_pasted.connect(self._on_image_file_pasted)
-        self._text_edit.paste_trimmed.connect(self.paste_trimmed.emit)
+        self._text_edit.large_text_pasted.connect(self._on_large_text_pasted)
         self._text_edit.history_navigate_requested.connect(self.history_navigate_requested.emit)
 
         self._popup = _CommandPopup(self)
@@ -1593,7 +1634,11 @@ class Composer(QtWidgets.QWidget):
             layout.addWidget(preview)
 
         label = QtWidgets.QLabel(_attachment_label(block), chip)
-        label.setToolTip(_attachment_label(block))
+        # The full pasted text for a large-paste attachment (there is no
+        # filename to show instead, and this is the only place to read it
+        # back before sending) — `_attachment_label`'s own short answer for
+        # everything else, unchanged.
+        label.setToolTip(_attachment_tooltip(block))
         layout.addWidget(label)
 
         remove = QtWidgets.QToolButton(chip)
@@ -1666,6 +1711,40 @@ class Composer(QtWidgets.QWidget):
             return
         self._attachments.append(block)
         self._refresh_attachments_bar()
+
+    def _on_large_text_pasted(self, text: str) -> None:
+        """A paste with a line over `_LARGE_PASTE_LINE_CHARS`
+        (`_GrowingTextEdit.large_text_pasted`) — too expensive for
+        `QPlainTextEdit` to keep editing live, so it never went into the
+        field at all.
+
+        A plain `{"type": "text", ...}` block was tried first and dropped:
+        `ui/panel.py::_on_submitted` reads `_text_of_blocks`/`block_
+        attachments` by checking `type == "text"` to tell "the artist's own
+        typed words" apart from "everything else that rode along" — a
+        SECOND text block is indistinguishable from the first at that
+        layer, so it silently merged into the plain message and the chip
+        was lost the moment it left this widget (measured: the feed showed
+        one long wall of text, not a chip, after the round trip). `resource`
+        (`_pasted_text_block`) is a content-block type the artist's own
+        words never use, so there is no ambiguity to resolve.
+
+        That does mean the ordinary `supports_embedded_context` gate
+        applies, same as any other embedded resource — an agent without it
+        has no way to receive a block shaped like this at all, so the paste
+        falls back to the field's own default behavior instead (inserted
+        as text, same as before this feature existed): worse for that one
+        agent's editing performance on a pathological paste, but nothing is
+        silently dropped either way, and no agent this panel ships was
+        measured lacking the capability entirely — `can_attach`
+        (`set_capabilities`) already treats it as one of the two that make
+        "+" show up at all.
+        """
+        if self._info is not None and self._info.supports_embedded_context:
+            self._attachments.append(_pasted_text_block(text))
+            self._refresh_attachments_bar()
+        else:
+            self._text_edit.textCursor().insertText(text)
 
     # --- voice -------------------------------------------------------------
 

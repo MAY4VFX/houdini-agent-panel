@@ -662,7 +662,15 @@ class _AttachmentStrip(QtWidgets.QWidget):
         layout.setSpacing(6)
         text = attachment_view.label(block)
         name = QtWidgets.QLabel(text, chip)
-        name.setToolTip(attachment_view.source_uri(block) or text)
+        # A `text` block has no file behind it to name — its tooltip is the
+        # pasted text itself (`attachment_view.tooltip`), the only place in
+        # the feed an artist can read it back. Everything else keeps its
+        # own file's URI, unchanged.
+        name.setToolTip(
+            attachment_view.tooltip(block)
+            if block.get("type") == "text"
+            else (attachment_view.source_uri(block) or text)
+        )
         layout.addWidget(name)
         return chip
 

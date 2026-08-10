@@ -100,6 +100,27 @@ def _plain_list(values: Any) -> list[dict]:
     return [_plain(item) for item in (values or [])]
 
 
+#: Must match `ui/composer.py::PASTED_TEXT_URI_SCHEME` exactly. Duplicated
+#: rather than imported: this module is deliberately Qt-free (see its own
+#: module docstring), and `ui/composer.py` imports Qt at module level, so
+#: importing it here would pull Qt into every test that touches this file.
+_PASTED_TEXT_URI_SCHEME = "pasted-text:"
+
+#: How much of a large-paste attachment (`ui/composer.py::_pasted_text_
+#: block`, a `resource` block with a `PASTED_TEXT_URI_SCHEME` uri) survives
+#: to disk. Unlike an image's base64 payload — tens of megabytes, and a
+#: restored conversation can never resend it anyway — this is the artist's
+#: own words, a few KB at most for anything an artist would plausibly
+#: paste, and losing it outright reads as a chip with nothing behind it the
+#: moment the conversation is restored. Still capped, not unconditional:
+#: `conversations.json` autosaves on every prompt and turn, and nothing
+#: here should be able to make that grow without bound. Past this, the
+#: record keeps the first `_MAX_STORED_PASTE_CHARS` characters and says how
+#: many more there were (`truncated_chars`) rather than pretending nothing
+#: was lost.
+_MAX_STORED_PASTE_CHARS = 20_000
+
+
 def _attachment_record(block: dict) -> dict:
     """An attachment as it goes to disk — everything except the payload.
 
@@ -109,6 +130,15 @@ def _attachment_record(block: dict) -> dict:
     and a restored conversation is a read-only replay — nothing can resend
     those bytes anyway. What survives is what the artist needs to recognise
     the message later: what kind of thing it was and what it was called.
+
+    A large-paste attachment (`ui/composer.py::_pasted_text_block` — a
+    `resource` block, told apart from a real text FILE attachment by its
+    synthetic `_PASTED_TEXT_URI_SCHEME` uri) is the one exception to
+    "everything except the payload": its payload IS the artist's own typed
+    words, not megabytes of pixels, so it survives too — up to `_MAX_
+    STORED_PASTE_CHARS`, past which it's cut with `truncated_chars` saying
+    how much, the same "never drop something without a word" rule
+    `ui/attachments.py::tooltip` reads it back with.
     """
     record = {"type": str(block.get("type") or "")}
     uri = block.get("uri") or (block.get("resource") or {}).get("uri")
@@ -117,6 +147,16 @@ def _attachment_record(block: dict) -> dict:
     mime = block.get("mimeType") or (block.get("resource") or {}).get("mimeType")
     if mime:
         record["mimeType"] = str(mime)
+    if str(uri or "").startswith(_PASTED_TEXT_URI_SCHEME):
+        text = block.get("text")
+        if text is None:
+            text = (block.get("resource") or {}).get("text")
+        text = str(text or "")
+        if len(text) > _MAX_STORED_PASTE_CHARS:
+            record["text"] = text[:_MAX_STORED_PASTE_CHARS]
+            record["truncated_chars"] = len(text) - _MAX_STORED_PASTE_CHARS
+        else:
+            record["text"] = text
     return record
 
 
@@ -418,10 +458,11 @@ class TranscriptModel:
         # busy is exactly as much theirs as one they typed while idle, and
         # a hang that loses it is the same bug as the one that motivated
         # persisting a prompt the instant it exists at all (`ui/panel.py::
-        # _persist_conversations_soon`). Only the text round-trips in full,
-        # same as "user"/"agent"/"error"/"note" — an attachment survives as
-        # its stripped record (`_attachment_record`: kind and name, never
-        # the payload), not as the block needed to actually resend it;
+        # _persist_conversations_soon`). An attachment survives as its
+        # stripped record (`_attachment_record`: kind and name, never an
+        # image's payload — a large-paste attachment is the one exception,
+        # its own words up to a cap, see that function's own docstring),
+        # not necessarily as the block needed to actually resend it;
         # `ui/panel.py::_restore_conversations` rebuilds a plain-text-only
         # block from this for whatever was still queued.
         records: list[dict] = []
