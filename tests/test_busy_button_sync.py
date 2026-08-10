@@ -7,21 +7,27 @@ no longer matches what the tab considers current at that moment (a restored
 conversation adopting a real session, or the queue-batch send from
 `_drain_queue`, which can dispatch for a session that isn't even on screen).
 
-Every one of those paths is covered below and all of them already agree with
-what's on screen on current `main` — `_show_session`/`_set_current_session`
-re-reads `state.busy` fresh on every switch, so a session that started busy
-in the background still shows "stop" the moment the artist switches into it.
-No fix landed here because none of this was found broken; this closes the
-coverage gap the report surfaced, the same way `test_ui_attachments.py`'s
-persist round-trip did for a different report.
+Every path checked here agrees with what's on screen on current `main` —
+`_show_session`/`_set_current_session` re-reads `state.busy` fresh on every
+switch, so a session that started busy in the background still shows "stop"
+the moment the artist switches into it. Widened past the original hypothesis
+to cover the newer `session/load` resume path (`bffae30`) and plain repeated
+use (several send/receive cycles, cancel-then-resend, error-then-resend, no
+tab switching or queueing involved at all) once those didn't turn anything
+up either. No fix landed here because none of this was found broken; this
+closes the coverage gap the report surfaced, the same way `test_ui_
+attachments.py`'s persist round-trip did for a different report — the report
+itself is still open.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from houdini_agent_panel import client as client_mod
 from houdini_agent_panel import conversations_store as store
 from houdini_agent_panel import sessions
+from houdini_agent_panel import settings as settings_mod
 from houdini_agent_panel.ui import panel as panel_mod
 
 
@@ -174,4 +180,133 @@ def test_switching_into_a_session_that_started_busy_in_the_background_shows_stop
 
     assert widget._composer._busy is True, "switching into a running turn must show stop"
     assert widget._composer._send_button.text() == "■"
+    widget.shutdown()
+
+
+# --- the newer resume path: a real `session/load`, not a fresh session -----
+
+
+def _resume_info(**kwargs) -> client_mod.AgentInfo:
+    base = dict(
+        name="agent", version="1.0", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=True, supports_logout=False, auth_methods=(),
+    )
+    base.update(kwargs)
+    return client_mod.AgentInfo(**base)
+
+
+def _stored_with_session(title: str, text: str, *, agent_session_id: str) -> store.StoredConversation:
+    conversation = store.StoredConversation.new(title=title, agent_id="claude-acp", cwd="/tmp")
+    conversation.agent_session_id = agent_session_id
+    conversation.entries = [{"kind": "user", "id": "e1", "text": text}]
+    return conversation
+
+
+def test_stop_button_shows_after_a_real_session_load_resume(qapp, monkeypatch):
+    """The newer resume path (`bffae30`): a restored conversation with a
+    surviving `agent_session_id` and an agent that supports `session/load`
+    goes through `_on_session_loaded`, not `_on_session_started`. Same
+    ordering concern as the fresh-session adoption path already covered
+    above — does `_set_current_session` run before the pending prompt is
+    replayed here too?
+    """
+    conversation = _stored_with_session("Rotor pyro", "make dust", agent_session_id="agent-sess-9")
+    store.save([conversation])
+
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _resume_info()
+    client._running = True
+    monkeypatch.setattr(client, "load_session", lambda **kw: None)
+    calls = []
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: calls.append((sid, blocks)))
+
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._set_current_session(key)
+    widget._on_submitted([{"type": "text", "text": "and more dust"}])
+
+    live = sessions.SessionState(
+        session_id="agent-sess-9", title="New chat", cwd="/tmp", created_at=0.0
+    )
+    client.session_loaded.emit("agent-sess-9", live)
+    qapp.processEvents()
+
+    assert calls, "the pending prompt must actually have been sent"
+    assert widget._pool.get("agent-sess-9").busy is True
+    assert widget._composer._busy is True, "resuming via session/load must show stop too"
+    assert widget._composer._send_button.text() == "■"
+    widget.shutdown()
+
+
+# --- ordinary, repeated use — no tab switching, no queue, nothing exotic ---
+
+
+def test_the_button_survives_several_ordinary_send_receive_cycles(qapp, monkeypatch):
+    """The plainest possible reading of "when the agent replies for a long
+    time, in a loop" — several messages sent and answered back to back, in
+    the one tab, on the one session. Not exotic at all, and worth pinning
+    down exactly because everything more elaborate above already checks out."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    state = _state()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: None)
+
+    for i in range(5):
+        widget._on_submitted([{"type": "text", "text": f"message {i}"}])
+        assert widget._composer._busy is True, f"round {i}: must show stop after submit"
+        client.turn_finished.emit(state.session_id, "end_turn")
+        qapp.processEvents()
+        assert widget._composer._busy is False, f"round {i}: must show send after finish"
+    widget.shutdown()
+
+
+def test_cancelling_then_sending_again_shows_stop_for_the_new_turn(qapp, monkeypatch):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    state = _state()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: None)
+    monkeypatch.setattr(client, "cancel", lambda sid: None)
+
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    widget._on_cancelled()
+    client.turn_finished.emit(state.session_id, "cancelled")  # the agent's own ack
+    qapp.processEvents()
+    assert widget._composer._busy is False
+
+    widget._on_submitted([{"type": "text", "text": "second"}])
+
+    assert widget._composer._busy is True
+    assert widget._composer._send_button.text() == "■"
+    widget.shutdown()
+
+
+def test_an_error_then_sending_again_shows_stop_for_the_new_turn(qapp, monkeypatch):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    state = _state()
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: None)
+
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    client.error.emit(state.session_id, "boom")
+    qapp.processEvents()
+    assert widget._composer._busy is False
+
+    widget._on_submitted([{"type": "text", "text": "second"}])
+
+    assert widget._composer._busy is True
     widget.shutdown()
