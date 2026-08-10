@@ -15,6 +15,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .logbook import logger as _logbook_logger
+
+_log = _logbook_logger("houdini_agent_panel.transcript_model")
+
 EntryKind = Literal[
     "user", "activity", "agent", "thought", "tool", "plan", "permission",
     "error", "note", "queued",
@@ -92,6 +96,39 @@ def _plain_list(values: Any) -> list[dict]:
 #: following chunk can tell "keep appending to this" from "this belongs to
 #: a message the agent actually named".
 _UNKEYED_PREFIX = "unkeyed:"
+
+#: Below this length, a chunk that happens to start with the text
+#: accumulated so far is more likely a coincidence than a resend — see
+#: `_is_repeated_message`.
+_REPEAT_GUARD_MIN_LEN = 12
+
+
+def _is_repeated_message(accumulated: str, chunk: str) -> bool:
+    """True when `chunk` looks like the WHOLE message so far, sent again,
+    rather than the next delta to append.
+
+    Measured cause: `@agentclientprotocol/claude-agent-acp` streams chunks
+    as usual, then re-emits the full consolidated message under the SAME
+    `message_id` once its own streamed-content bookkeeping (`streamedBlocks`
+    in the adapter's own source) is reset on activation — see
+    docs/facts/acp-sdk.md. The panel used to append the resend onto what it
+    already had, so the feed showed the tail of the message glued onto a
+    duplicate of its own start.
+
+    A real delta only ever adds characters at the end — it has no reason to
+    restate the beginning — so "the new chunk starts with everything
+    accumulated so far" is a reliable tell once the accumulated text is
+    long enough that matching it by coincidence is implausible. Below
+    `_REPEAT_GUARD_MIN_LEN` that stops being true: a short accumulated
+    fragment (a letter or two) is often the literal start of a perfectly
+    ordinary, unrelated next word — e.g. accumulated "Да" is a genuine
+    prefix of the real continuation "Давай посмотрим" — so the guard sits
+    out and lets the normal append happen instead of misfiring and
+    swallowing real content.
+    """
+    if len(accumulated) < _REPEAT_GUARD_MIN_LEN:
+        return False
+    return chunk.startswith(accumulated)
 
 
 class TranscriptModel:
@@ -191,7 +228,15 @@ class TranscriptModel:
             key = (kind, message_id)
             existing = self._by_message_id.get(key)
             if existing is not None:
-                existing.text += text
+                if _is_repeated_message(existing.text, text):
+                    _log.info(
+                        "chunk repeated the accumulated text, replaced instead of "
+                        "appended (kind=%s, accumulated=%d chars, chunk=%d chars)",
+                        kind, len(existing.text), len(text),
+                    )
+                    existing.text = text
+                else:
+                    existing.text += text
                 return existing
             entry = Entry(kind=kind, id=f"{kind}:{message_id}", text=text)
             self._by_message_id[key] = entry
