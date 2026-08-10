@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
+from houdini_agent_panel import conversations_store as store
+from houdini_agent_panel import sessions
 from houdini_agent_panel.transcript_model import TranscriptModel
 from houdini_agent_panel.ui import attachments
+from houdini_agent_panel.ui import panel as panel_mod
 from houdini_agent_panel.ui.qt import QtCore, QtGui
-from houdini_agent_panel.ui.transcript import TranscriptView
+from houdini_agent_panel.ui.transcript import TranscriptView, _MessageRow
 
 
 def _png_bytes(size: int = 8) -> bytes:
@@ -143,3 +148,86 @@ def test_a_file_with_no_preview_falls_back_to_a_named_chip(qapp):
     strip = view._rows[entry.id]._attachments
     texts = [child.text() for child in strip.findChildren(object) if hasattr(child, "text")]
     assert "notes.txt" in texts
+
+
+# --- the full round trip, through the panel and onto disk -------------------
+#
+# Everything above exercises `TranscriptModel` directly — real coverage, but
+# it never proves `ui/panel.py::_on_submitted` actually hands attachments to
+# the model it just tested, or that `conversations_store` still has them
+# after `_persist_conversations` writes and something reads the file back.
+# Investigated after a report ("вложения не сохраняются", conversations.json
+# had zero `attachments` keys across 50 real conversations) that turned out
+# to be old data: those particular messages were sent under panel 0.8.20,
+# hours before `Entry.attachments` existed at all (shipped in 0.8.21).
+# Nothing upstream of here was actually broken — but nothing had ever proven
+# that either, so this closes the real gap the report surfaced.
+
+
+@pytest.fixture
+def isolated_panel(qapp, monkeypatch):
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: "/tmp")
+    monkeypatch.setattr(
+        panel_mod.scene, "mcp_servers",
+        lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": []}],
+    )
+    monkeypatch.setattr(panel_mod._RefreshWorker, "start", lambda self: None)
+    panel_mod.reset_shared_state_for_tests()
+    yield
+    panel_mod.reset_shared_state_for_tests()
+
+
+def test_a_sent_attachment_survives_persist_and_reload_from_disk(isolated_panel, qapp, monkeypatch):
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    state = sessions.SessionState(
+        session_id="s1", title="New conversation", cwd="/tmp", created_at=0.0
+    )
+    client.session_started.emit(state.session_id, state)
+    qapp.processEvents()
+    monkeypatch.setattr(client, "prompt", lambda sid, blocks: None)
+
+    widget._on_submitted([{"type": "text", "text": "look at this"}, _image_block()])
+    widget._persist_conversations()
+
+    conversation_id = widget._conversation_ids[state.session_id]
+    reloaded = next(c for c in store.load() if c.id == conversation_id)
+    user_entries = [e for e in reloaded.entries if e.get("kind") == "user"]
+    assert user_entries, "the sent message must be on disk"
+    assert user_entries[-1].get("attachments") == [
+        {"type": "image", "uri": "file:///tmp/hero%20render.png", "mimeType": "image/png"},
+    ]
+    widget.shutdown()
+
+
+def test_queued_messages_sent_together_stay_separate_bubbles(qapp):
+    """The queue-batch send (b09f083: everything queued goes out in ONE
+    `session/prompt` call, but "each keeps its own transcript entry") was
+    the other suspect for the same report — three images with text between
+    them, in what read as a single message bubble. Reproduced here as three
+    queued-then-promoted entries, the exact shape `_drain_queue` produces:
+    each gets its own `_MessageRow` and its own `_AttachmentStrip`, nothing
+    merges them into one. If this ever goes red, that IS the bug — today it
+    doesn't, so what the owner saw was several genuinely separate bubbles
+    sitting close together, not blocks landing in the wrong strip.
+    """
+    model = TranscriptModel()
+    view = TranscriptView()
+    view.set_model(model)
+
+    entries = [
+        model.queue_message(f"q{i}", f"message {i}", [_image_block(f"file:///tmp/img{i}.png")])
+        for i in range(3)
+    ]
+    for entry in entries:
+        view.refresh(entry.id)
+    for entry in entries:
+        model.promote_queued(entry.id)
+        view.refresh(entry.id)
+
+    unique_rows = list({id(row): row for row in view._rows.values()}.values())
+    assert len(unique_rows) == 3, "each queued message keeps its own row"
+    for row in unique_rows:
+        assert isinstance(row, _MessageRow)
+        assert row._attachments is not None
