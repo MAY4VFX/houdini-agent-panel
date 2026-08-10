@@ -9,6 +9,7 @@ from houdini_agent_panel import settings as settings_module
 from houdini_agent_panel import updates as updates_module
 from houdini_agent_panel.registry import AgentEntry, BinaryDistribution
 from houdini_agent_panel.ui.agents import AgentsView
+from houdini_agent_panel.ui import settings_view as settings_view_mod
 from houdini_agent_panel.ui.qt import QtCore, QtWidgets
 from houdini_agent_panel.ui.settings_view import SettingsView, _ROW_LABELS
 
@@ -641,3 +642,49 @@ def test_a_second_click_while_checking_is_a_noop(qapp, fetcher, monkeypatch):
 
     assert view._check_now_worker is first_worker
     _wait_until(lambda: view._check_now_worker is None)
+
+
+# --- Voice section: shown only when this machine can actually record -------
+#
+# `recording_available()` (`ui/voice.py`) is computed once, at construction —
+# the same check `VoiceButton` uses for the composer's mic button, so the two
+# can never disagree about whether voice input works here. design.md's own
+# rule ("the agent doesn't support it — the control doesn't get drawn")
+# applies to a hardware/OS reason exactly as it does to an agent one.
+
+
+def test_voice_section_hidden_when_recording_is_unavailable(qapp, monkeypatch):
+    monkeypatch.setattr(
+        settings_view_mod, "recording_available", lambda: (False, "no entitlement")
+    )
+    view = SettingsView()
+    view.show()  # isVisible() follows the ancestor chain — see the probe test above.
+
+    assert view._voice_section.isVisible() is False
+
+
+def test_voice_caption_names_the_real_reason_when_hidden(qapp, monkeypatch):
+    """The artist isn't left to guess where the section went, or to go
+    looking in System Settings for a Houdini entry that (per the owner's
+    own measurement) likely isn't even listed there."""
+    monkeypatch.setattr(
+        settings_view_mod,
+        "recording_available",
+        lambda: (False, "Houdini's own app bundle doesn't declare microphone use"),
+    )
+    view = SettingsView()
+    view.show()
+
+    assert view._voice_unavailable_caption.isVisible() is True
+    assert "Houdini's own app bundle doesn't declare microphone use" in (
+        view._voice_unavailable_caption.text()
+    )
+
+
+def test_voice_section_shown_when_recording_is_available(qapp, monkeypatch):
+    monkeypatch.setattr(settings_view_mod, "recording_available", lambda: (True, ""))
+    view = SettingsView()
+    view.show()
+
+    assert view._voice_section.isVisible() is True
+    assert view._voice_unavailable_caption.isVisible() is False

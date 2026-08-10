@@ -14,6 +14,8 @@ keep working with nothing configured — both are exercised below.
 from __future__ import annotations
 
 import json
+import plistlib
+import types
 import urllib.error
 from pathlib import Path
 
@@ -685,3 +687,211 @@ def test_neither_the_api_key_nor_the_transcript_reaches_the_log(qapp, caplog, mo
     assert spoken not in blob, "the artist's own words reached the log"
     assert any(str(len(spoken)) in m for m in messages), "the length is the diagnostic part"
     assert any("whisper.example" in m for m in messages), "the endpoint is not a secret"
+
+
+# --- microphone availability: bundle Info.plist / TCC permission gating ----
+#
+# The owner's own measurement: none of Houdini's ten installed macOS
+# bundles (20.5/21.0/22.0, every edition) declare
+# `NSMicrophoneUsageDescription`, so Qt6 refuses to even ask for microphone
+# access and a "successful" recording is silently empty (the 16-byte bug
+# the rest of this file is built around). `recording_available()`/
+# `build_default_backend()` check for that ahead of time so the mic button
+# and Settings → Voice section are never offered for something guaranteed
+# to fail — see `ui/voice.py`'s module docstring.
+
+
+def _fake_bundle(tmp_path: Path, *, declares_microphone: bool) -> Path:
+    """A minimal `.app/Contents/{Info.plist,MacOS/houdini}` tree standing
+    in for one of Houdini's real bundles. Returns the fake executable path
+    `_main_bundle_info_plist_path`/`_bundle_declares_microphone_usage` take
+    as their `executable=` override — no hardcoded Houdini path, same as
+    production."""
+    bundle = tmp_path / "Houdini FX 20.5.test.app"
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    info: dict = {"CFBundleName": "Houdini FX"}
+    if declares_microphone:
+        info["NSMicrophoneUsageDescription"] = "Houdini uses the microphone for voice input."
+    with (bundle / "Contents" / "Info.plist").open("wb") as fh:
+        plistlib.dump(info, fh)
+    executable = macos / "houdini"
+    executable.write_bytes(b"")
+    return executable
+
+
+def test_bundle_info_plist_path_found_by_walking_up_from_the_executable(tmp_path):
+    executable = _fake_bundle(tmp_path, declares_microphone=False)
+    plist_path = voice._main_bundle_info_plist_path(executable=str(executable))
+    assert plist_path == executable.parent.parent / "Info.plist"
+
+
+def test_bundle_info_plist_path_is_none_outside_any_app_bundle(tmp_path):
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_bytes(b"")
+    assert voice._main_bundle_info_plist_path(executable=str(executable)) is None
+
+
+def test_bundle_declares_microphone_usage_true_when_key_present(tmp_path):
+    executable = _fake_bundle(tmp_path, declares_microphone=True)
+    assert voice._bundle_declares_microphone_usage(executable=str(executable)) is True
+
+
+def test_bundle_declares_microphone_usage_false_when_key_absent(tmp_path):
+    """The measured, real shape of every one of Houdini's ten installed
+    bundles (20.5/21.0/22.0, every edition): no
+    `NSMicrophoneUsageDescription` at all."""
+    executable = _fake_bundle(tmp_path, declares_microphone=False)
+    assert voice._bundle_declares_microphone_usage(executable=str(executable)) is False
+
+
+def test_bundle_declares_microphone_usage_false_with_no_bundle_at_all(tmp_path):
+    executable = tmp_path / "bin" / "python3"
+    executable.parent.mkdir()
+    executable.write_bytes(b"")
+    assert voice._bundle_declares_microphone_usage(executable=str(executable)) is False
+
+
+class _FakeApp:
+    """Stands in for the real, process-wide `QApplication` singleton so a
+    test controls `checkPermission`'s answer directly instead of depending
+    on whatever TCC state the machine running pytest happens to be in."""
+
+    def __init__(self, status) -> None:
+        self.status = status
+        self.calls = 0
+
+    def checkPermission(self, permission) -> object:  # noqa: N802 - Qt's own name
+        self.calls += 1
+        return self.status
+
+
+def test_qt6_permission_denied_blocks_with_the_denied_message(qapp):
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Denied)
+    reason = voice._qt6_permission_block_reason(platform="darwin", app=app)
+    assert reason == voice._MIC_BLOCKED_DENIED
+
+
+def test_qt6_permission_undetermined_without_entitlement_blocks(qapp):
+    """The special case this whole feature exists for: Qt has never been
+    asked, and never can be — the bundle's own Info.plist has no
+    `NSMicrophoneUsageDescription` key for it to ask with."""
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Undetermined)
+    reason = voice._qt6_permission_block_reason(
+        platform="darwin", app=app, bundle_declares_microphone=False
+    )
+    assert reason == voice._MIC_BLOCKED_NO_ENTITLEMENT
+
+
+def test_qt6_permission_undetermined_with_entitlement_is_available(qapp):
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Undetermined)
+    reason = voice._qt6_permission_block_reason(
+        platform="darwin", app=app, bundle_declares_microphone=True
+    )
+    assert reason == ""
+
+
+def test_qt6_permission_granted_is_available(qapp):
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Granted)
+    reason = voice._qt6_permission_block_reason(platform="darwin", app=app)
+    assert reason == ""
+
+
+def test_qt6_permission_check_is_skipped_off_macos(qapp):
+    """TCC (and this whole permission dance) doesn't exist off macOS — even
+    a `Denied` app must not block, and the check must not even run."""
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Denied)
+    reason = voice._qt6_permission_block_reason(platform="linux", app=app)
+    assert reason == ""
+    assert app.calls == 0
+
+
+def test_qt6_permission_check_reports_nothing_without_the_api(qapp, monkeypatch):
+    """PySide2/Qt5 (Houdini 20.5) has no `QMicrophonePermission` at all —
+    the one case where recording is treated as available regardless of
+    platform, and any real failure surfaces later through the existing
+    empty-recording path (`_empty_recording_message`)."""
+    monkeypatch.delattr(voice.QtCore, "QMicrophonePermission", raising=False)
+    app = _FakeApp(voice.QtCore.Qt.PermissionStatus.Denied)
+    reason = voice._qt6_permission_block_reason(platform="darwin", app=app)
+    assert reason == ""
+    assert app.calls == 0
+
+
+def test_blocked_reason_when_qtmultimedia_is_unavailable():
+    assert voice._blocked_reason(None) == "QtMultimedia is unavailable in this environment"
+
+
+def test_blocked_reason_qt6_defers_to_the_permission_check(monkeypatch):
+    monkeypatch.setattr(voice, "_qt6_permission_block_reason", lambda: "permission blocked")
+    fake_qtmultimedia = types.SimpleNamespace(QMediaCaptureSession=object(), QAudioInput=object())
+    assert voice._blocked_reason(fake_qtmultimedia) == "permission blocked"
+
+
+def test_blocked_reason_qt5_has_no_permission_api_to_check(monkeypatch):
+    """Qt5 (PySide2, Houdini 20.5) offers no permission API — the
+    permission check must not even run for it."""
+
+    def _fail():
+        raise AssertionError("the Qt6 permission check ran for a Qt5-shaped QtMultimedia")
+
+    monkeypatch.setattr(voice, "_qt6_permission_block_reason", _fail)
+    fake_qtmultimedia = types.SimpleNamespace(QAudioRecorder=object())
+    assert voice._blocked_reason(fake_qtmultimedia) == ""
+
+
+def test_blocked_reason_when_qtmultimedia_offers_neither_api():
+    fake_qtmultimedia = types.SimpleNamespace()
+    assert (
+        voice._blocked_reason(fake_qtmultimedia) == "QtMultimedia offers no recording API we know"
+    )
+
+
+def test_recording_available_true_when_nothing_blocks(monkeypatch):
+    monkeypatch.setattr(voice, "_blocked_reason", lambda qtm: "")
+    assert voice.recording_available() == (True, "")
+
+
+def test_recording_available_false_with_the_reason(monkeypatch):
+    monkeypatch.setattr(voice, "_blocked_reason", lambda qtm: "no entitlement")
+    assert voice.recording_available() == (False, "no entitlement")
+
+
+def test_build_default_backend_is_none_when_blocked_reason_says_so(monkeypatch):
+    """`build_default_backend` never even tries to construct a
+    `_Qt6RecordBackend` once `_blocked_reason` has already said no —
+    nothing here builds a real `QMediaRecorder` that would only fail
+    silently the moment recording actually started."""
+    monkeypatch.setattr(voice, "_blocked_reason", lambda qtm: "blocked: no entitlement")
+    backend, reason = voice.build_default_backend()
+    assert backend is None
+    assert reason == "blocked: no entitlement"
+
+
+def test_build_default_backend_logs_the_blocked_reason(monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.voice")
+    monkeypatch.setattr(voice, "_blocked_reason", lambda qtm: "blocked: no entitlement")
+
+    voice.build_default_backend()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("blocked: no entitlement" in m for m in messages), messages
+
+
+def test_voice_button_hides_when_recording_is_blocked(qapp, monkeypatch):
+    """End to end through the button's own default `backend_factory`
+    (`build_default_backend`) — not a stubbed-out fake this time — so this
+    proves the wiring, not just the pure function above it."""
+    monkeypatch.setattr(voice, "_blocked_reason", lambda qtm: "no entitlement")
+    button = voice.VoiceButton(uploader=lambda *a, **k: "unreachable")
+    failures: list[str] = []
+    button.failed.connect(failures.append)
+
+    button.configure(supports_audio=True, whisper_endpoint="")
+
+    assert button.isVisible() is False
+    assert failures == ["no entitlement"]
+    button.shutdown()

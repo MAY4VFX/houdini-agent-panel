@@ -12,6 +12,12 @@ Updates & notices / Voice / Privacy / Network / Data) inside a fixed-width,
 centered rail — the same 736 px column the feed and composer use — instead
 of one long form stretched edge to edge.
 
+Voice is the one section that can be entirely absent: `recording_available()`
+(`ui/voice.py`) decides once, at construction, whether this machine can
+record at all, and a "no" hides the section outright rather than offering
+fields for a microphone button that can never appear — see where
+`voice_section`/`_voice_unavailable_caption` are built, below.
+
 Reads and writes `settings.json` directly (`settings.load`/`settings.save`) —
 the same one-way layering as `ui/agents.py`: the settings screen is allowed
 to know about `settings.py`, not the other way round.
@@ -29,6 +35,7 @@ from .. import updates as updates_module
 from .agents import AgentsView
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
+from .voice import recording_available
 from .worker import Worker, release
 
 if TYPE_CHECKING:
@@ -666,9 +673,34 @@ class SettingsView(QtWidgets.QWidget):
         updates_section.add_row("fxhoudinimcp", fx_version_row)
         updates_section.add_action_row(self._check_updates_now_button)
 
+        # Voice — drawn only when recording can actually work on this
+        # machine (design.md's own rule: "the agent doesn't support it —
+        # the control doesn't get drawn", applied here to a hardware/OS
+        # reason instead of an agent one). `recording_available()` is the
+        # same cheap, side-effect-free check `VoiceButton`/`build_default_
+        # backend` use, so this section and the composer's mic button can
+        # never disagree about whether voice input works here — see
+        # `ui/voice.py`'s module docstring for what actually blocks it on
+        # macOS (Houdini's own bundle never declares microphone use).
+        #
+        # The section is hidden outright, not disabled — an artist isn't
+        # meant to configure a whisper endpoint for a button that can never
+        # appear. `_voice_unavailable_caption` takes its place instead of
+        # letting it vanish without a trace, and names the real cause
+        # rather than leaving the artist to guess or to go looking in
+        # System Settings for a Houdini entry that likely isn't even
+        # listed there.
+        recording_ok, recording_reason = recording_available()
         voice_section = _Section("Voice", self, expanded=True, grid=grid_metrics)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
         voice_section.add_row("Whisper API key", self._whisper_api_key_edit)
+        voice_section.setVisible(recording_ok)
+
+        self._voice_unavailable_caption = QtWidgets.QLabel(self)
+        self._voice_unavailable_caption.setWordWrap(True)
+        self._voice_unavailable_caption.setStyleSheet("color: palette(disabled, text);")
+        self._voice_unavailable_caption.setText(f"Voice input: {recording_reason}")
+        self._voice_unavailable_caption.setVisible(not recording_ok)
 
         privacy_section = _Section("Privacy", self, expanded=False, grid=grid_metrics)
         privacy_section.add_checkbox(self._telemetry_checkbox)
@@ -716,16 +748,17 @@ class SettingsView(QtWidgets.QWidget):
         rail_layout = QtWidgets.QVBoxLayout(rail)
         rail_layout.setContentsMargins(0, 8, 0, 24)
         rail_layout.setSpacing(grid_metrics.section_gap)
-        for section in (
+        for widget in (
             agents_section,
             behaviour_section,
             updates_section,
             voice_section,
+            self._voice_unavailable_caption,
             privacy_section,
             network_section,
             data_section,
         ):
-            rail_layout.addWidget(section)
+            rail_layout.addWidget(widget)
         # Slack goes to the bottom, not between the sections. The scroll area
         # stretches its content to the viewport, and without this the spare
         # height was shared out among the section bodies, drifting them
