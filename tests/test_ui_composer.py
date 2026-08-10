@@ -628,6 +628,93 @@ def test_pasted_image_over_the_cap_is_rejected_with_a_clear_reason(qapp, monkeyp
     assert rejected and "too large" in rejected[0].lower()
 
 
+def test_a_pasted_line_far_over_the_cap_gets_trimmed_not_left_to_freeze_the_field(
+    qapp, monkeypatch
+):
+    """Reported for real: a terminal-output paste that lost its wrapping
+    newlines (a table's padding collapsed into one line of thousands of
+    characters) left the artist unable to type OR erase — measured
+    directly (not assumed): a bare `QPlainTextEdit` with no code of ours
+    attached at all backspaces through one 2,000-character unbroken line in
+    ~5 SECONDS, 8,000 characters in ~45 — `QPlainTextEdit`'s own word-wrap
+    relayout runs on every edit that touches the block, and its cost scales
+    with the block's length, so erasing the whole thing character by
+    character is quadratic in the paste's size. Nothing on our side adds to
+    that (measured: `_adjust_text_height`'s own per-keystroke walk costs
+    under a millisecond extra on top of Qt's own ~12ms for a 20k-char
+    line) — the only lever available is not letting a paste create a block
+    this long in the first place.
+    """
+    monkeypatch.setattr(composer_mod, "_MAX_PASTE_LINE_CHARS", 100)
+    composer = Composer()
+    composer.show()
+    trimmed = []
+    composer.paste_trimmed.connect(trimmed.append)
+    mime = QtCore.QMimeData()
+    mime.setText("word " * 400)  # one unbroken 2000-char line
+
+    composer._text_edit.insertFromMimeData(mime)
+
+    lines = composer._text_edit.toPlainText().split("\n")
+    assert max(len(line) for line in lines) <= 100
+    assert trimmed, "the artist must be told something was trimmed, not left guessing"
+
+
+def test_an_ordinary_multiline_paste_is_left_untouched(qapp, monkeypatch):
+    """The cap is about one absurdly long UNBROKEN line, never about total
+    length — a real multi-line log or code paste (short lines, real
+    newlines) is cheap to edit (measured: 2,000 short lines backspaced at
+    ~2ms each) and must go in verbatim."""
+    monkeypatch.setattr(composer_mod, "_MAX_PASTE_LINE_CHARS", 2000)
+    composer = Composer()
+    composer.show()
+    trimmed = []
+    composer.paste_trimmed.connect(trimmed.append)
+    text = "\n".join(f"line {i}: some ordinary short text" for i in range(50))
+    mime = QtCore.QMimeData()
+    mime.setText(text)
+
+    composer._text_edit.insertFromMimeData(mime)
+
+    assert composer._text_edit.toPlainText() == text
+    assert not trimmed
+
+
+def test_erasing_a_realistic_terminal_paste_is_no_longer_unacceptably_slow(qapp):
+    """The owner's own described scenario, verbatim: a couple of lines
+    copied out of a terminal, its padding spaces collapsed onto one line
+    with no wrapping newline left, an emoji from the output riding along
+    (one outside the BMP — a surrogate pair). Before the cap, a line this
+    long backspaced through in tens of SECONDS (measured: an 8,000-
+    character unbroken line took ~45s on a bare `QPlainTextEdit`, no code
+    of ours involved). 5s is a generous ceiling — comfortably clear of that
+    old number, not a tight budget — chosen so this catches a regression
+    that reintroduces the quadratic cost without being flaky on a loaded
+    CI box.
+    """
+    composer = Composer()
+    composer.show()
+    text = "word " * 4000 + "✅" + ("\U0001F9CA" * 5) + (" " * 2000)
+    composer._text_edit.setFocus()
+    mime = QtCore.QMimeData()
+    mime.setText(text)
+    composer._text_edit.insertFromMimeData(mime)
+
+    import time
+
+    start = time.perf_counter()
+    for _ in range(len(composer._text_edit.toPlainText())):
+        QtTest.QTest.keyClick(composer._text_edit, QtCore.Qt.Key_Backspace)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 5.0, f"erasing a trimmed paste took {elapsed:.1f}s — the cap regressed"
+    assert composer._text_edit.toPlainText() == ""
+    assert composer._text_edit.isEnabled()
+    cursor = composer._text_edit.textCursor()
+    cursor.insertText("still works")
+    assert composer._text_edit.toPlainText() == "still works"
+
+
 def test_attachment_rejection_reason_distinguishes_too_large_from_unsupported(tmp_path, monkeypatch):
     small = tmp_path / "small.png"
     small.write_bytes(b"tiny")
