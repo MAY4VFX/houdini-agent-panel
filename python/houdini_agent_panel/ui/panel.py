@@ -2460,8 +2460,12 @@ class AgentPanel(QtWidgets.QWidget):
             self._start_new_session()
             return
         text = _text_of_blocks(blocks)
-        if text:
-            entry = self._model(current.session_id).append_user(text)
+        # Everything that isn't typed words travelled with this message and
+        # belongs to it — a picture the artist attached is part of what they
+        # said, not something that happened next to it.
+        block_attachments = [block for block in blocks if block.get("type") != "text"]
+        if text or block_attachments:
+            entry = self._model(current.session_id).append_user(text, block_attachments)
             self._touch(current.session_id, entry.id)
             # `client.py.do_new_session` seeds every fresh session with the
             # placeholder title, and this is where the first thing the artist
@@ -2469,7 +2473,7 @@ class AgentPanel(QtWidgets.QWidget):
             # conversations written before the rename are on disk with that
             # exact title — dropping it would leave them called "New
             # conversation" forever, no matter what was said in them.
-            if current.title in ("", "New chat", "New conversation"):
+            if text and current.title in ("", "New chat", "New conversation"):
                 current.title = summarize_title(text)
                 self._pool.mark_changed(current.session_id)
             # On disk before it is sent anywhere: this is the artist's own
@@ -2523,15 +2527,17 @@ class AgentPanel(QtWidgets.QWidget):
             self._on_submitted(blocks)
             return
         text = _text_of_blocks(blocks)
+        # Same reasoning as `_on_submitted`: whatever the artist attached
+        # belongs to this message, queued or not — a queued row has to show
+        # what it's about to become, not less than the sent message will.
+        block_attachments = [block for block in blocks if block.get("type") != "text"]
         import uuid as _uuid
 
         entry_id = str(_uuid.uuid4())
-        if text:
-            # Attachment-only messages get no transcript entry here, same
-            # as a direct send (`_on_submitted` above) — the blocks still
-            # queue and will still be sent, they just have nothing to show
-            # in a feed that has never rendered a textless user message.
-            entry = self._model(current.session_id).queue_message(entry_id, text)
+        if text or block_attachments:
+            entry = self._model(current.session_id).queue_message(
+                entry_id, text, block_attachments
+            )
             self._touch(current.session_id, entry.id)
         current.queued.append(sessions.QueuedMessage(id=entry_id, blocks=list(blocks)))
         self._pool.mark_changed(current.session_id)
@@ -4717,12 +4723,15 @@ class AgentPanel(QtWidgets.QWidget):
                 created_at=conversation.created_at,
             )
             # Whatever was still queued when this was last written survives
-            # here too — only as plain text, though: `to_records` never
-            # kept the original blocks (attachments in particular), the
-            # same limit every other restored entry already has ("Only
-            # text survives a restart" — `transcript_model.py`). Carried
-            # onto a real session's `SessionState` the moment one opens for
-            # this conversation (`_on_session_started`'s adoption).
+            # here too — as RESEND blocks, only ever plain text, though:
+            # `to_records` never kept the original blocks, only a stripped
+            # record of any attachment (kind and name, `transcript_model.
+            # _attachment_record`) for the entry to still show its chip.
+            # There is no payload left to actually resend, the same limit
+            # every other restored entry already has ("Only text survives a
+            # restart" — `transcript_model.py`). Carried onto a real
+            # session's `SessionState` the moment one opens for this
+            # conversation (`_on_session_started`'s adoption).
             state.queued = [
                 sessions.QueuedMessage(
                     id=record["id"], blocks=[{"type": "text", "text": record["text"]}]

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import settings as settings_module
-from . import theme
+from . import attachments, theme
 from .chips import ChoiceButton, ModeChip
 from .boot_status import BootStatus
 from .qt import QtCore, QtGui, QtWidgets, Signal
@@ -368,6 +368,13 @@ def build_attachment_block(path: Path, info: "AgentInfo") -> dict | None:
             "type": "image",
             "data": base64.b64encode(data).decode("ascii"),
             "mimeType": mime_type,
+            # `uri` is ImageContentBlock's own optional field ("where this
+            # image came from") — not something invented on top of the
+            # protocol. The pixels still travel in `data`; this is what
+            # lets the chip and the sent message say `render.exr` instead
+            # of a flat "Image", and it is the only trace of the file's
+            # name that survives into the saved conversation.
+            "uri": path.resolve().as_uri(),
         }
     if info.supports_embedded_context:
         uri = path.resolve().as_uri()
@@ -437,37 +444,17 @@ _ATTACHMENT_THUMBNAIL = 20
 
 
 def _attachment_thumbnail(block: dict) -> "QtGui.QPixmap | None":
-    """A small preview for an image block, None for anything else."""
-    if block.get("type") != "image":
-        return None
-    data = block.get("data")
-    if not isinstance(data, str):
-        return None
-    try:
-        raw = base64.b64decode(data)
-    except (ValueError, TypeError):
-        return None
-    pixmap = QtGui.QPixmap()
-    if not pixmap.loadFromData(raw):
-        return None
-    return pixmap.scaled(
-        _ATTACHMENT_THUMBNAIL,
-        _ATTACHMENT_THUMBNAIL,
-        QtCore.Qt.KeepAspectRatio,
-        QtCore.Qt.SmoothTransformation,
-    )
+    """A chip-sized preview for an image block, None for anything else.
+
+    Delegates to `ui/attachments.py` — the same answer the sent message in
+    the feed uses, just scaled smaller: the chip here and the row there must
+    never disagree about what an attachment is called or looks like.
+    """
+    return attachments.pixmap(block, _ATTACHMENT_THUMBNAIL)
 
 
 def _attachment_label(block: dict) -> str:
-    kind = block.get("type")
-    if kind == "image":
-        return "Image"
-    if kind == "audio":
-        return "Audio"
-    if kind == "resource":
-        uri = (block.get("resource") or {}).get("uri", "")
-        return uri.rsplit("/", 1)[-1] if uri else "File"
-    return "Attachment"
+    return attachments.label(block)
 
 
 class _ComposerSurface(QtWidgets.QFrame):
