@@ -161,6 +161,41 @@ def test_hip_dir_missing_directory_falls_back_to_home(tmp_path):
     assert scene.hip_dir() == str(Path.home())
 
 
+# --- real_hip_dir ------------------------------------------------------------
+
+
+def test_real_hip_dir_new_file_is_none(tmp_path):
+    _install_fake_hou(is_new_file=True, path=str(tmp_path / "untitled.hip"))
+    assert scene.real_hip_dir() is None
+
+
+def test_real_hip_dir_existing_scene_is_its_directory(tmp_path):
+    hip_path = tmp_path / "shots" / "shot010.hip"
+    hip_path.parent.mkdir(parents=True)
+    _install_fake_hou(is_new_file=False, path=str(hip_path))
+
+    assert scene.real_hip_dir() == str(hip_path.parent)
+
+
+def test_real_hip_dir_missing_directory_is_none(tmp_path):
+    missing = tmp_path / "gone" / "shot.hip"
+    _install_fake_hou(is_new_file=False, path=str(missing))
+
+    assert scene.real_hip_dir() is None
+
+
+def test_hip_dir_falls_back_to_home_exactly_when_real_hip_dir_is_none(tmp_path, monkeypatch):
+    """`hip_dir()` must not drift from `real_hip_dir()` — it's a thin
+    wrapper that only supplies the `$HOME` fallback."""
+    from pathlib import Path
+
+    monkeypatch.setattr(scene, "real_hip_dir", lambda: None)
+    assert scene.hip_dir() == str(Path.home())
+
+    monkeypatch.setattr(scene, "real_hip_dir", lambda: str(tmp_path))
+    assert scene.hip_dir() == str(tmp_path)
+
+
 # --- watch_hip_dir_changes --------------------------------------------------
 
 

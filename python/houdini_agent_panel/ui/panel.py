@@ -32,7 +32,7 @@ from dataclasses import replace
 from typing import Any
 
 from .. import client as acp_client
-from .. import refresh, scene, sessions, settings as settings_mod
+from .. import context_files, refresh, scene, sessions, settings as settings_mod
 from .. import shellenv, signin_evidence, updates as updates_mod
 from ..announcements import Announcement, Button
 from ..logbook import logger as _logbook_logger
@@ -906,6 +906,7 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._restore_conversations()
         self._header.set_cwd(scene.hip_dir())
+        self._write_context_files()
         # `_restore_conversations` and the header's cwd label are both
         # scoped to `scene.hip_dir()` AT THIS MOMENT, and nothing above
         # ever asks again. If the artist opens a real scene into a
@@ -969,9 +970,34 @@ class AgentPanel(QtWidgets.QWidget):
         `_restore_conversations` already reads it fresh and is already
         idempotent (skips anything already in `self._pool`), so nothing
         about what it does needed to change, only how often it runs.
+        `context_files.ensure_context_files` is the same story — it's a
+        no-op past the first real scene folder it ever sees, so calling it
+        again here is what actually gets AGENTS.md/CLAUDE.md written the
+        first time the artist opens a REAL scene into a tab that booted
+        against an unsaved one.
         """
         self._header.set_cwd(scene.hip_dir())
+        self._write_context_files()
         self._restore_conversations()
+
+    def _write_context_files(self) -> None:
+        """AGENTS.md/CLAUDE.md, written once into the real scene folder (if
+        any) so the agent knows before it reads anything else that it's
+        inside Houdini and must work through fxhoudini's MCP tools — see
+        `context_files.py`'s own docstring. `real_hip_dir()`, not
+        `hip_dir()`: an unsaved scene must not get files dropped into
+        `$HOME`.
+
+        Called from `_boot()` (before any agent is started) and from
+        `_on_hip_dir_changed()` (the scene may not have been real yet at
+        boot time). Guarded like the hip-dir watcher registration right
+        above: `real_hip_dir()` touches `hou`, and a panel that somehow
+        can't reach it still has an agent worth booting.
+        """
+        try:
+            context_files.ensure_context_files(scene.real_hip_dir())
+        except Exception:  # noqa: BLE001
+            _log.warning("could not write AGENTS.md/CLAUDE.md", exc_info=True)
 
     def _on_session_refresh_due(self) -> None:
         """The recurring half of `_SESSION_REFRESH_INTERVAL_MS` — a panel

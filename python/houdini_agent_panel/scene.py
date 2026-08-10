@@ -167,14 +167,29 @@ def hip_dir() -> str:
     An unsaved scene resolves to $HOME, not a nonexistent untitled path:
     the cwd in session/new must exist.
     """
+    directory = real_hip_dir()
+    return directory if directory is not None else str(Path.home())
+
+
+def real_hip_dir() -> str | None:
+    """The directory of an actually-saved scene, or `None` when there isn't
+    one. From the main thread ONLY, same as `hip_dir()`.
+
+    `hip_dir()` always returns a path (it falls back to `$HOME` so
+    `session/new`'s cwd is never a nonexistent one), which makes it the
+    wrong function for anything that WRITES next to the scene: a fresh,
+    never-saved file would send that write straight into the artist's home
+    directory. This is the honest half of that answer — the real project
+    folder, or nothing.
+    """
     import hou  # noqa: PLC0415 - lazy, this module only exists inside Houdini
 
     if hou.hipFile.isNewFile():
-        return str(Path.home())
+        return None
 
     directory = Path(hou.hipFile.path()).parent
     if not directory.is_dir():
-        return str(Path.home())
+        return None
     return str(directory)
 
 
