@@ -77,6 +77,14 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
     navigate_requested = Signal(int)  # -1 / +1
     escape_requested = Signal()
     accept_requested = Signal()
+    #: Up/Down pressed with the caret already on the field's own first/last
+    #: visual line — the one terminal-style gesture the composer itself
+    #: knows nothing about (which message that recalls is a fact about a
+    #: SESSION's queue and history, `ui/panel.py`'s territory, not this
+    #: widget's). `-1` for Up, `+1` for Down. Deliberately NOT fired for a
+    #: press that still has somewhere to move the caret inside a multi-line
+    #: draft — see `_can_move_caret`.
+    history_navigate_requested = Signal(int)
     #: A screenshot or copied image with no file behind it — raw pixels,
     #: straight off the clipboard (`QMimeData.hasImage()`). Measured on
     #: this Mac with a real `screencapture -c`: `hasImage=True`,
@@ -118,7 +126,31 @@ class _GrowingTextEdit(QtWidgets.QPlainTextEdit):
             self.submit_requested.emit()
             event.accept()
             return
+        if (
+            not self.popup_active
+            and key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down)
+            and event.modifiers() == QtCore.Qt.NoModifier
+            and not self._can_move_caret(key)
+        ):
+            # As in a terminal: the caret is already on the field's own top
+            # (Up) or bottom (Down) edge, with nowhere further of its own to
+            # go — this key press means "recall a message," not "move the
+            # cursor." A press that still has room to move (a multi-line
+            # draft, caret not yet on that edge line) falls through to the
+            # ordinary caret motion below, untouched.
+            self.history_navigate_requested.emit(-1 if key == QtCore.Qt.Key_Up else 1)
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _can_move_caret(self, key: int) -> bool:
+        """Whether `key` (Up/Down) would still move the caret inside the
+        text, probed on a throwaway COPY of the live cursor — `QTextCursor`
+        is an implicitly-shared value type, so moving the copy never
+        touches the widget's own cursor."""
+        probe = self.textCursor()
+        direction = QtGui.QTextCursor.Up if key == QtCore.Qt.Key_Up else QtGui.QTextCursor.Down
+        return probe.movePosition(direction, QtGui.QTextCursor.MoveAnchor)
 
     def insertFromMimeData(self, source: QtCore.QMimeData) -> None:  # noqa: N802 - Qt override
         """Paste — Ctrl+V, or the input field's own right-click Paste.
@@ -649,6 +681,11 @@ class Composer(QtWidgets.QWidget):
     #: an attachment is allowed, `ui/panel.py` is the one that knows what a
     #: conversation's queue is and owns it (`sessions.SessionState.queued`).
     enqueue_requested = Signal(list)
+    #: Forwarded straight from `_GrowingTextEdit.history_navigate_requested`
+    #: — see that signal's own docstring. `ui/panel.py` owns what it means
+    #: (a session's queue, then its sent-message history); the composer
+    #: only reports the gesture, same split as `enqueue_requested`.
+    history_navigate_requested = Signal(int)
     cancelled = Signal()
     mode_selected = Signal(str)
     config_option_selected = Signal(str, str)  # config_id, value
@@ -660,6 +697,14 @@ class Composer(QtWidgets.QWidget):
     #: link`'s own docstring for how it avoids moving the input box or the
     #: conversation drawer moving it sideways.
     bug_report_link_clicked = Signal()
+    #: Fired whenever the slash-command popup is shown or hidden (either
+    #: kind — interactive or the read-only argument hint). `ui/panel.py`
+    #: listens so its own panel-wide Escape shortcut knows to stand down
+    #: while there is something IN THE COMPOSER for Escape to close first
+    #: — see `is_popup_active`/`close_popup_if_open`'s own docstrings for
+    #: why the panel needs this at all rather than leaving it to
+    #: `_GrowingTextEdit`'s own `keyPressEvent`.
+    popup_visibility_changed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -718,6 +763,7 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.accept_requested.connect(self._on_popup_accept)
         self._text_edit.image_pasted.connect(self._on_image_pasted)
         self._text_edit.image_file_pasted.connect(self._on_image_file_pasted)
+        self._text_edit.history_navigate_requested.connect(self.history_navigate_requested.emit)
 
         self._popup = _CommandPopup(self)
         #: Which command's argument the popup is currently hinting at, while
@@ -1218,6 +1264,65 @@ class Composer(QtWidgets.QWidget):
         self._text_edit.setTextCursor(cursor)
         self._text_edit.setFocus()
 
+    def current_text(self) -> str:
+        """The artist's own words in the field right now, verbatim.
+
+        Read by `ui/panel.py::_on_history_navigate` before the first Up
+        press overwrites the field, so a still-unsent draft can be handed
+        back once the artist arrows back down past it.
+        """
+        return self._text_edit.toPlainText()
+
+    def show_history_text(self, text: str) -> None:
+        """Overwrite the field with `text` — a queued or previously-sent
+        message recalled via arrow-key history (`ui/panel.py::_on_history_
+        navigate`).
+
+        Unlike `set_text`, this DOES replace whatever is already typed:
+        that is the entire point of walking back and forth through
+        history, as opposed to `set_text`'s "offering a command is help,
+        sending it for them is deciding" — the artist already asked for
+        this by pressing the arrow key. `_on_history_navigate` is the one
+        place that calls this, and it always saves the live draft
+        (`current_text`) before the first call, so nothing typed is lost.
+        """
+        self._text_edit.setPlainText(text)
+        cursor = self._text_edit.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        self._text_edit.setTextCursor(cursor)
+
+    def is_popup_active(self) -> bool:
+        """Whether the slash-command popup is up AND interactive — the
+        same condition `_GrowingTextEdit.keyPressEvent` already gates
+        Up/Down/Enter/Escape on (`popup_active`), read from outside for
+        `ui/panel.py`'s own Escape shortcut to decide whether it should
+        even be enabled right now. Deliberately NOT `self._popup.
+        isVisible()`: a read-only argument hint (`_show_popup(interactive
+        =False)`) shows the SAME popup widget but was never something
+        Escape closed, and this must not start being the first thing
+        that does.
+        """
+        return self._text_edit.popup_active
+
+    def close_popup_if_open(self) -> bool:
+        """Close the interactive popup if it's up; `True` if it did.
+
+        Replicates `_GrowingTextEdit`'s own Escape handling
+        (`escape_requested` -> `_hide_popup`) rather than relying on it:
+        `ui/panel.py` installs a panel-wide Escape shortcut
+        (`WidgetWithChildrenShortcut`) for cancelling a running turn, and
+        a `QShortcut` on an ancestor consumes a key BEFORE any focused
+        descendant's own `keyPressEvent` ever sees it — measured, not
+        assumed. Without this, wiring that shortcut up would have quietly
+        broken "Escape closes the slash popup" the moment this widget
+        sits inside a real `AgentPanel`, since `_GrowingTextEdit.
+        keyPressEvent`'s own Escape branch would simply never run again.
+        """
+        if not self._text_edit.popup_active:
+            return False
+        self._hide_popup()
+        return True
+
     def set_commands(self, commands: list["AvailableCommand"]) -> None:
         self._all_commands = list(commands)
         if self._popup.isVisible():
@@ -1717,11 +1822,13 @@ class Composer(QtWidgets.QWidget):
         self._popup.show()
         self._popup.raise_()
         self._text_edit.popup_active = interactive
+        self.popup_visibility_changed.emit()
 
     def _hide_popup(self) -> None:
         self._popup.hide()
         self._text_edit.popup_active = False
         self._popup_command_name = None
+        self.popup_visibility_changed.emit()
 
     def _position_popup(self) -> None:
         # The palette belongs to the panel overlay rather than the short

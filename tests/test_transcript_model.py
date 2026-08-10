@@ -229,3 +229,54 @@ def test_note_and_error_both_survive_a_round_trip_through_records():
     kinds = {entry.id: entry.kind for entry in restored.entries()}
     assert kinds[note.id] == "note"
     assert kinds[error.id] == "error"
+
+
+# --- queue / promote / remove -------------------------------------------------
+
+
+def test_promote_queued_flips_kind_and_keeps_the_same_entry():
+    model = TranscriptModel()
+    queued = model.queue_message("q1", "make it rain")
+
+    promoted = model.promote_queued("q1")
+
+    assert promoted is queued
+    assert promoted.kind == "user"
+
+
+def test_promote_queued_returns_none_for_an_unknown_id():
+    model = TranscriptModel()
+    assert model.promote_queued("does-not-exist") is None
+
+
+def test_remove_entry_takes_out_a_queued_message():
+    model = TranscriptModel()
+    model.queue_message("q1", "second thought")
+
+    assert model.remove_entry("q1") is True
+    assert all(e.id != "q1" for e in model.entries())
+
+
+def test_remove_entry_refuses_a_message_that_already_sent():
+    """The other half of the owner's report: a stale "Queued" row on
+    screen must never let Remove delete a message that has ALREADY been
+    promoted to `"user"` — the id can still match a row on screen (it
+    hasn't been re-rendered yet), but the row is no longer a queued one,
+    and `remove_entry` is not the button that un-sends a real message."""
+    model = TranscriptModel()
+    model.queue_message("q1", "make it rain")
+    model.promote_queued("q1")
+
+    assert model.remove_entry("q1") is False
+    entry = next(e for e in model.entries() if e.id == "q1")
+    assert entry.kind == "user"
+    assert entry.text == "make it rain"
+
+
+def test_remove_entry_refuses_any_other_kind_too():
+    model = TranscriptModel()
+    model.append_user("hello")
+    entry_id = model.entries()[0].id
+
+    assert model.remove_entry(entry_id) is False
+    assert len(model.entries()) == 1

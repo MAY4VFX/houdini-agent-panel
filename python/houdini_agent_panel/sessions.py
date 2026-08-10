@@ -42,10 +42,14 @@ class QueuedMessage:
     Lives on the `SessionState` it was typed into, not on the panel or the
     agent process — a queue is a fact about ONE conversation, the same way
     `entries`/`busy` already are. `blocks` are the real ACP content blocks,
-    ready to send unchanged once this message's turn comes
-    (`ui/panel.py::_drain_queue`); `id` matches the `queued`-kind
-    `transcript_model.Entry` shown for it, so promoting or removing one
-    finds the other.
+    ready to send unchanged once this conversation's turn comes
+    (`ui/panel.py::_drain_queue`, which sends everything still queued at
+    that moment together, in one `session/prompt` call — not one call per
+    queued message); `id` matches the `queued`-kind `transcript_model.
+    Entry` shown for it, so promoting or removing one finds the other.
+    Also read outside a drain, by the arrow-key-history feature
+    (`ui/panel.py::_build_history_candidates`) — an Up press in an empty
+    field pulls the most recently queued one back out for editing.
 
     Only alive for as long as this process is: `blocks` (attachments
     included — a pasted image or a drag-and-dropped file queued behind a
@@ -86,10 +90,10 @@ class SessionState:
     #: — "read" means "the artist had it open," nothing more elaborate.
     unread: bool = False
     #: Messages typed while `busy` was already true, waiting their turn —
-    #: drained one at a time, oldest first, as each turn finishes
-    #: (`ui/panel.py::_drain_queue`). Per conversation like everything else
-    #: here: switching to a different one must never show or send another
-    #: conversation's still-typed words.
+    #: drained together, oldest first, in one `session/prompt` call the
+    #: moment the running turn finishes (`ui/panel.py::_drain_queue`). Per
+    #: conversation like everything else here: switching to a different one
+    #: must never show or send another conversation's still-typed words.
     queued: list[QueuedMessage] = field(default_factory=list)
 
 

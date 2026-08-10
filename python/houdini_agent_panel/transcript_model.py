@@ -189,9 +189,21 @@ class TranscriptModel:
     def remove_entry(self, entry_id: str) -> bool:
         """Drop an entry outright — today, only ever a queued message the
         artist pulled back before it was sent (`ui/panel.py::_on_queue_
-        remove_requested`). Nothing else in the feed is ever taken back."""
+        remove_requested`). Nothing else in the feed is ever taken back.
+
+        `entry.kind == "queued"` is not just this docstring's claim, it is
+        the guard that makes it true: reported for real, an id the artist
+        clicked Remove on can belong to a message that has ALREADY been
+        promoted to `"user"` (`promote_queued`) by the time the click
+        lands — a stale "Queued — waiting to send" row the screen never
+        got around to refreshing (`ui/panel.py::_drain_queue`'s own fix for
+        that). Without this check, that click deleted a real SENT message,
+        not an unsent one — the id matched, the kind didn't, and the code
+        removed it anyway. `False` for that case leaves the already-sent
+        message exactly where it is.
+        """
         for index, entry in enumerate(self._entries):
-            if entry.id == entry_id:
+            if entry.id == entry_id and entry.kind == "queued":
                 del self._entries[index]
                 return True
         return False

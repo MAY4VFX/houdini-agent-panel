@@ -84,10 +84,19 @@ def test_a_message_typed_while_busy_is_queued_not_sent(qapp, monkeypatch):
     widget.shutdown()
 
 
-# --- drain order: one at a time, oldest first -------------------------------
+# --- drain order: everything queued goes out together, one call ------------
 
 
-def test_queue_drains_one_message_at_a_time_in_order(qapp, monkeypatch):
+def test_queue_drains_everything_at_once_in_one_call(qapp, monkeypatch):
+    """The owner's own ask, after looking at openclaude's queue processor:
+    three messages typed while the agent was busy should go out as ONE
+    `session/prompt` call the moment the running turn ends, not as three
+    separate turns — `session/prompt` already carries a flat list of
+    content blocks with no "message" boundary of its own, so several
+    queued messages concatenate into one call's blocks the same way one
+    message's text and its attachments already do. Each one still keeps
+    its own transcript entry — the artist sees three separate messages,
+    in the order they were typed, same as before."""
     widget, client, state, calls = _live_widget(qapp, monkeypatch)
     widget._on_submitted([{"type": "text", "text": "first"}])
     widget._on_enqueue_requested([{"type": "text", "text": "second"}])
@@ -97,27 +106,43 @@ def test_queue_drains_one_message_at_a_time_in_order(qapp, monkeypatch):
 
     client.turn_finished.emit(state.session_id, "end_turn")
 
-    # Draining is never "the whole backlog at once" — each queued message
-    # is its own separate turn, so only ONE more send happens here.
-    assert len(calls) == 2, "only the next queued message goes out, not the whole backlog"
-    assert _text_of(calls[1][1]) == "second"
-    assert len(state.queued) == 1
-    assert state.queued[0].blocks[0]["text"] == "third"
-    entries = {e.id: e for e in widget._model(state.session_id).entries() if e.text}
-    promoted = next(e for e in entries.values() if e.text == "second")
-    assert promoted.kind == "user", "a drained message must stop reading as queued"
-    still_waiting = next(e for e in entries.values() if e.text == "third")
-    assert still_waiting.kind == "queued"
-
-    client.turn_finished.emit(state.session_id, "end_turn")
-
-    assert len(calls) == 3
-    assert _text_of(calls[2][1]) == "third"
+    # ONE more call, carrying BOTH queued messages' blocks, in order.
+    assert len(calls) == 2, "everything queued must go out in a single call"
+    assert calls[1][1] == [
+        {"type": "text", "text": "second"},
+        {"type": "text", "text": "third"},
+    ]
     assert state.queued == []
+
+    # Each queued message is still its OWN entry in the feed — batching the
+    # send must never merge them into one bubble.
+    entries = [e for e in widget._model(state.session_id).entries() if e.text]
+    second = next(e for e in entries if e.text == "second")
+    third = next(e for e in entries if e.text == "third")
+    assert second.id != third.id
+    assert second.kind == "user" and third.kind == "user", (
+        "a drained message must stop reading as queued"
+    )
 
     # Nothing left to drain — a further turn end must not resend anything.
     client.turn_finished.emit(state.session_id, "end_turn")
-    assert len(calls) == 3
+    assert len(calls) == 2
+    widget.shutdown()
+
+
+def test_queue_drains_one_at_a_time_when_only_one_is_waiting(qapp, monkeypatch):
+    """The common case (one thought queued behind one turn) still looks
+    exactly like it always did — batching only changes anything once
+    there is more than one message waiting at drain time."""
+    widget, client, state, calls = _live_widget(qapp, monkeypatch)
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    widget._on_enqueue_requested([{"type": "text", "text": "second"}])
+
+    client.turn_finished.emit(state.session_id, "end_turn")
+
+    assert len(calls) == 2
+    assert _text_of(calls[1][1]) == "second"
+    assert state.queued == []
     widget.shutdown()
 
 
@@ -134,9 +159,9 @@ def test_an_error_ending_the_turn_still_drains_the_queue(qapp, monkeypatch):
 
     # Draining resends immediately, so `busy` is back to True for the
     # message that just went out — the same shape as any other drain
-    # (see test_queue_drains_one_message_at_a_time_in_order). What this
-    # test pins is that the error path reaches that drain AT ALL, which a
-    # `busy` left stuck True forever would have prevented.
+    # (see test_queue_drains_one_at_a_time_when_only_one_is_waiting). What
+    # this test pins is that the error path reaches that drain AT ALL,
+    # which a `busy` left stuck True forever would have prevented.
     assert len(calls) == 2
     assert _text_of(calls[1][1]) == "second"
     assert state.queued == []
@@ -165,6 +190,85 @@ def test_removing_a_queued_message_takes_it_out_and_it_is_never_sent(qapp, monke
     # "drop" must never have gone out, at any point.
     assert all(_text_of(sid_blocks[1]) != "drop" for sid_blocks in calls)
     assert len(calls) == 2
+    widget.shutdown()
+
+
+def test_removing_an_already_sent_message_does_not_delete_it(qapp, monkeypatch):
+    """The owner's own report, its second half: a screenshot showed a
+    "Queued — waiting to send" row for a message that had, in fact,
+    already gone out — the screen just hadn't caught up. If the artist
+    clicks Remove on a stale row like that, it must never delete the real,
+    already-sent message underneath it."""
+    widget, client, state, calls = _live_widget(qapp, monkeypatch)
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    widget._on_enqueue_requested([{"type": "text", "text": "second"}])
+    sent_id = state.queued[0].id
+    client.turn_finished.emit(state.session_id, "end_turn")  # drains and promotes "second"
+    entry = next(e for e in widget._model(state.session_id).entries() if e.id == sent_id)
+    assert entry.kind == "user"
+
+    # The artist clicks Remove on what the screen still shows as queued.
+    widget._on_queue_remove_requested(sent_id)
+
+    still_there = next(e for e in widget._model(state.session_id).entries() if e.id == sent_id)
+    assert still_there.kind == "user"
+    assert still_there.text == "second", "a real sent message must survive a stale Remove click"
+    widget.shutdown()
+
+
+# --- self-healing: the screen must never lag behind what was actually sent --
+
+
+def test_drain_recreates_a_missing_row_so_the_screen_matches_what_was_sent(qapp, monkeypatch, caplog):
+    """Defensive: `promote_queued` finding no match for a text-bearing
+    queued message should not currently be reachable (`state.queued` and
+    the model are always mutated together — see `_drain_queue`'s own
+    docstring), but IF it ever happens again, the message still goes out
+    either way, so the one thing that must never happen is the feed
+    disagreeing with that fact by leaving a stale "Queued" row on screen."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.panel")
+    widget, client, state, calls = _live_widget(qapp, monkeypatch)
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    widget._on_enqueue_requested([{"type": "text", "text": "second"}])
+    queued_id = state.queued[0].id
+    # Simulate the corruption this guards against: the row is gone from
+    # the model, but `state.queued` (what actually gets sent) still has it.
+    widget._model(state.session_id).remove_entry(queued_id)
+
+    client.turn_finished.emit(state.session_id, "end_turn")
+
+    # The message still went out — draining must never silently drop it.
+    assert _text_of(calls[1][1]) == "second"
+    # And the feed has a "user" row for it, not a missing or stuck one.
+    recreated = next(
+        e for e in widget._model(state.session_id).entries() if e.text == "second"
+    )
+    assert recreated.kind == "user"
+    assert recreated.id != queued_id, "a fresh row, not a resurrection of the old id"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("no matching row" in m for m in messages), messages
+    widget.shutdown()
+
+
+def test_drain_logs_a_successful_promotion(qapp, monkeypatch, caplog):
+    """The owner's own ask: promotion and its failure both belong in the
+    log, with the id and the outcome — not the text (`logbook.py`'s own
+    rule)."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.ui.panel")
+    widget, client, state, calls = _live_widget(qapp, monkeypatch)
+    widget._on_submitted([{"type": "text", "text": "first"}])
+    widget._on_enqueue_requested([{"type": "text", "text": "second"}])
+    queued_id = state.queued[0].id
+
+    client.turn_finished.emit(state.session_id, "end_turn")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(queued_id in m and "promoted" in m for m in messages), messages
+    assert not any("second" in m for m in messages), "the message text must never be logged"
     widget.shutdown()
 
 

@@ -1249,3 +1249,170 @@ def test_distinct_models_are_never_collapsed(qapp):
     ]
     kept, _ = _named_choices(choices, "fable")
     assert len(kept) == 3
+
+
+# --- arrow-key history: the composer's own half — detecting the gesture ------
+#
+# `ui/panel.py` owns what a recalled message actually IS (queue, then sent
+# history); this file only pins that `_GrowingTextEdit` fires the request at
+# exactly the right moment — the caret already on the field's own top/bottom
+# edge — and, just as importantly, that it does NOT fire while there is still
+# somewhere for the caret itself to go, which is the one thing this feature
+# must never break (a multi-line draft still has to let Up/Down move the
+# cursor through it normally).
+
+
+def _press_up(edit: QtWidgets.QWidget) -> None:
+    QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Up)
+
+
+def _press_down(edit: QtWidgets.QWidget) -> None:
+    QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Down)
+
+
+def test_up_in_an_empty_field_requests_history_navigate(qapp):
+    composer = Composer()
+    composer.show()
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_up(composer._text_edit)
+
+    assert received == [-1]
+
+
+def test_down_in_an_empty_field_requests_history_navigate(qapp):
+    composer = Composer()
+    composer.show()
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_down(composer._text_edit)
+
+    assert received == [1]
+
+
+def test_up_on_the_only_line_of_a_single_line_draft_requests_history(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "make it rain")
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_up(composer._text_edit)
+
+    assert received == [-1]
+    # And the caret never moved off the single line into nothing.
+    assert composer._text_edit.toPlainText() == "make it rain"
+
+
+def test_up_on_the_second_line_of_a_multiline_draft_moves_the_cursor(qapp):
+    """The mechanic that must never break: the caret is still ABOVE the
+    first line inside a multi-line draft, so Up is ordinary cursor motion,
+    not a history request."""
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "line one\nline two")
+    # `_type_text` leaves the caret at the end — the second line.
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_up(composer._text_edit)
+
+    assert received == [], "the caret still had somewhere of its own to go"
+    cursor = composer._text_edit.textCursor()
+    assert cursor.block().text() == "line one", "Up moved the caret onto the first line"
+
+
+def test_up_on_the_first_line_of_a_multiline_draft_requests_history(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "line one\nline two")
+    cursor = composer._text_edit.textCursor()
+    cursor.movePosition(QtGui.QTextCursor.Start)
+    composer._text_edit.setTextCursor(cursor)
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_up(composer._text_edit)
+
+    assert received == [-1]
+
+
+def test_down_on_the_first_line_of_a_multiline_draft_moves_the_cursor(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "line one\nline two")
+    cursor = composer._text_edit.textCursor()
+    cursor.movePosition(QtGui.QTextCursor.Start)
+    composer._text_edit.setTextCursor(cursor)
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_down(composer._text_edit)
+
+    assert received == [], "the caret still had somewhere of its own to go"
+    cursor = composer._text_edit.textCursor()
+    assert cursor.block().text() == "line two", "Down moved the caret onto the second line"
+
+
+def test_down_on_the_last_line_of_a_multiline_draft_requests_history(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "line one\nline two")
+    # `_type_text` leaves the caret at the end — already the last line.
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_down(composer._text_edit)
+
+    assert received == [1]
+
+
+def test_history_navigate_not_requested_while_the_slash_popup_is_active(qapp):
+    """Popup navigation already owns Up/Down while it's showing — history
+    must not also fire underneath it."""
+    composer = Composer()
+    composer.show()
+    composer.set_commands(_commands())
+    _type_text(composer._text_edit, "/mo")
+    assert composer._text_edit.popup_active
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    _press_up(composer._text_edit)
+
+    assert received == []
+
+
+def test_history_navigate_not_requested_with_a_modifier_held(qapp):
+    """Shift/Ctrl+Up is a selection or word-jump gesture, not "recall a
+    message" — left to Qt's own default handling."""
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "hello")
+    received = []
+    composer._text_edit.history_navigate_requested.connect(received.append)
+
+    QtTest.QTest.keyClick(composer._text_edit, QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier)
+
+    assert received == []
+
+
+def test_show_history_text_overwrites_whatever_was_typed(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "half a thought")
+
+    composer.show_history_text("an earlier message")
+
+    assert composer._text_edit.toPlainText() == "an earlier message"
+    assert composer.current_text() == "an earlier message"
+
+
+def test_current_text_reads_the_live_draft(qapp):
+    composer = Composer()
+    composer.show()
+    _type_text(composer._text_edit, "draft in progress")
+
+    assert composer.current_text() == "draft in progress"

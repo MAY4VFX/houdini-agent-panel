@@ -286,6 +286,19 @@ _RESTORED_PREFIX = "restored:"
 
 _CANCEL_GRACE_MS = 4000
 
+
+def _text_of_blocks(blocks: list[dict]) -> str:
+    """The text an artist typed, out of a list of ready ACP content blocks —
+    everything a submitted/queued/history message carries besides its
+    attachments. Shared by every place that needs it (`_on_submitted`,
+    `_on_enqueue_requested`, `_build_history_candidates`) instead of each
+    repeating the same `block.get("type") == "text"` filter.
+    """
+    return " ".join(
+        block.get("text", "") for block in blocks if block.get("type") == "text"
+    ).strip()
+
+
 #: How long `session/new` may take before the panel says something. An agent
 #: that spawns an MCP server per session can genuinely need a few seconds;
 #: silence past this reads as a dead button, and a dead button is exactly
@@ -474,6 +487,21 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_agent_label: str = ""
         #: Blocks typed before any session existed, waiting for `session/new`.
         self._pending_prompt: list | None = None
+        #: Arrow-key history state for THIS tab's own composer — see
+        #: `_on_history_navigate`. `-1` means "not currently browsing," the
+        #: same as an empty index has no meaning to walk back from.
+        #: `_history_candidates` is a snapshot built the moment browsing
+        #: STARTS (the first Up press from index -1), not a live view: a
+        #: queued message it captured is already popped out of `SessionState.
+        #: queued` at that point (`_build_history_candidates`), so further
+        #: mutation of the real queue or transcript while browsing can't
+        #: retroactively change what arrow keys keep cycling through.
+        #: `_history_draft` is whatever the artist had typed before that
+        #: first press — handed back once Down walks past index 0, so
+        #: browsing history never costs an unsent draft.
+        self._history_index: int = -1
+        self._history_candidates: list[str] = []
+        self._history_draft: str = ""
         #: Session ids already checked against `settings.config_options_by_
         #: agent` — see `_reapply_remembered_config`. Once per session: a
         #: later `config_option_update` reflects a live choice (the
@@ -710,6 +738,7 @@ class AgentPanel(QtWidgets.QWidget):
 
         self._composer.submitted.connect(self._on_submitted)
         self._composer.enqueue_requested.connect(self._on_enqueue_requested)
+        self._composer.history_navigate_requested.connect(self._on_history_navigate)
         self._composer.cancelled.connect(self._on_cancelled)
         self._composer.mode_selected.connect(self._on_mode_selected)
         self._composer.config_option_selected.connect(self._on_config_option_selected)
@@ -722,21 +751,36 @@ class AgentPanel(QtWidgets.QWidget):
         self._blocking.action_clicked.connect(self._on_blocking_action)
         self._consent.answered.connect(self._on_telemetry_answer)
 
-        # Settings lost its own back button (owner's call — it's an overlay
-        # now, not a page you navigate away from): Escape is one of the
-        # remaining ways out, alongside the "…" button toggling it closed
-        # again and whatever already returned to the transcript on its own
-        # (an agent switch does, deliberately). `WidgetWithChildrenShortcut`
-        # so it fires no matter which child inside Settings currently has
-        # focus — a plain `keyPressEvent` override on `self` would miss
-        # every keystroke a focused child widget consumes first. Scoped to
-        # ONLY close Settings, never anything else: Auth/BugReport are out
-        # of scope for this change and keep whatever behaviour they already
-        # had (a real `keyPressEvent` on the composer's own popup is a
-        # separate, already-working mechanism this doesn't touch).
+        # One panel-wide Escape shortcut, not several competing ones.
+        # `WidgetWithChildrenShortcut` fires no matter which child
+        # currently has focus — a plain `keyPressEvent` override on `self`
+        # would miss every keystroke a focused child widget consumes
+        # first, and MEASURED (not assumed) the other way round too: a
+        # `QShortcut` on an ancestor wins over ANY focused descendant's
+        # own `keyPressEvent`, this composer's included — which is why
+        # `_on_escape_pressed` below has to replicate the composer's own
+        # slash-popup close rather than leave it to `_GrowingTextEdit`
+        # (see `Composer.close_popup_if_open`'s own docstring for the
+        # measurement). Originally just "close Settings" (the owner's own
+        # ask, when Settings lost its back button); the owner's later ask
+        # — "хочу чтобы эскейп прерывал задачу если он сделан над панелью"
+        # — folded a running turn, and the popups Escape already closed
+        # elsewhere, into the SAME shortcut rather than adding a second
+        # one that would only race the first.
+        #
+        # Kept enabled ONLY while at least one of `_on_escape_pressed`'s
+        # branches has something to do (`_update_escape_shortcut_enabled`)
+        # — a `QShortcut`, once matched, consumes the key unconditionally;
+        # there is no way to decide from inside `activated()` to let it
+        # through instead. Disabling it is the only way for Escape to ever
+        # reach Houdini, which the owner's own ask requires: "если ход не
+        # идёт — событие должно уходить дальше, Houdini им пользуется."
         escape = QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
         escape.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
-        escape.activated.connect(self._on_settings_escape)
+        escape.activated.connect(self._on_escape_pressed)
+        self._escape_shortcut = escape
+        self._composer.popup_visibility_changed.connect(self._update_escape_shortcut_enabled)
+        self._update_escape_shortcut_enabled()
 
     def _toggle_settings(self) -> None:
         """The "…" button's one job now (bug reporting moved to its own
@@ -750,9 +794,66 @@ class AgentPanel(QtWidgets.QWidget):
         else:
             self._show_page(self.PAGE_SETTINGS)
 
-    def _on_settings_escape(self) -> None:
+    def _update_escape_shortcut_enabled(self) -> None:
+        """Recomputed fresh at every point any of `_on_escape_pressed`'s
+        four conditions can change — never cached across those changes.
+        Called from: `_sync_permission_popover` (which already runs on
+        every page change via `_show_page`, and on every conversation
+        switch via `_show_session` — covering Settings open/close and the
+        permission popover in one place), the composer's own `popup_
+        visibility_changed`, and every place a session's `busy` flips
+        (`_dispatch_prompt`, `_on_turn_finished`, `_on_error`, `_release_
+        if_still_busy`).
+        """
+        current = self._current_session()
+        self._escape_shortcut.setEnabled(
+            self._composer.is_popup_active()
+            or self._pages.currentIndex() == self.PAGE_SETTINGS
+            or self._permission_popover is not None
+            or (current is not None and current.busy)
+        )
+
+    def _on_escape_pressed(self) -> None:
+        """Priority order — each branch closes/cancels exactly the thing
+        Escape already meant (or, per the owner's newest ask, now also
+        means), nothing more:
+
+        1. The composer's own slash-command popup (`Composer.close_popup_
+           if_open`) — see the shortcut's own construction comment for why
+           this widget has to do it explicitly now.
+        2. Settings — unchanged from before this shortcut did anything else.
+        3. A pending permission request. There is no "just close" for one
+           of these without an answer — the agent is genuinely waiting on
+           `session/request_permission` — so this sends the answer the
+           protocol has a name for: `RequestPermissionResponse(outcome=
+           DeniedOutcome(outcome="cancelled"))`, documented in `docs/facts/
+           acp-sdk.md` §4 as exactly "the user cancelled/closed the
+           dialog." `_on_permission_answered` with an empty `option_id`
+           is the same path a real button click already takes
+           (`answer_permission`'s own docstring: `option_id=None` ->
+           `DeniedOutcome`).
+        4. Otherwise, if this conversation's turn is running, cancel it —
+           the same `session/cancel` the Stop button already sends
+           (`_on_cancelled`), including its own queued-message note and
+           grace-period fallback; no second cancellation path is added.
+
+        `_update_escape_shortcut_enabled` already keeps this shortcut
+        disabled unless at least one of these applies, but every branch
+        re-checks its own condition anyway rather than trusting that flag
+        blindly — cheap, and it means a stale flag can only ever cost a
+        silent no-op, never acting on the wrong thing.
+        """
+        if self._composer.close_popup_if_open():
+            return
         if self._pages.currentIndex() == self.PAGE_SETTINGS:
             self._show_page(self.PAGE_TRANSCRIPT)
+            return
+        if self._permission_popover is not None:
+            self._on_permission_answered(self._permission_popover.request_key(), "")
+            return
+        current = self._current_session()
+        if current is not None and current.busy:
+            self._on_cancelled()
 
     def _make_settings_view(self) -> QtWidgets.QWidget:
         from .settings_view import SettingsView
@@ -1450,6 +1551,7 @@ class AgentPanel(QtWidgets.QWidget):
         for state in self._pool.all():
             state.busy = False
         self._composer.set_busy(False)
+        self._update_escape_shortcut_enabled()
         current = self._current_session()
         if current is not None:
             self._finish_activity(current.session_id)
@@ -1772,6 +1874,7 @@ class AgentPanel(QtWidgets.QWidget):
             state.busy = False
         if self._is_current(session_id):
             self._composer.set_busy(False)
+            self._update_escape_shortcut_enabled()
         self._finish_activity(session_id)
         if stop_reason and stop_reason not in ("end_turn", "cancelled"):
             entry = self._model(session_id).append_error(f"Agent stopped: {stop_reason}")
@@ -1830,6 +1933,7 @@ class AgentPanel(QtWidgets.QWidget):
             state.busy = False
         if self._is_current(target):
             self._composer.set_busy(False)
+            self._update_escape_shortcut_enabled()
         self._finish_activity(target)
         self._persist_conversations_soon()
         self._drain_queue(target)
@@ -2058,6 +2162,12 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _show_session(self, session_id: str) -> None:
+        # Arrow-key history is a fact about what THIS tab was just typing
+        # into — carrying a browsing position from one conversation's queue
+        # and history over into a different one's would show the wrong
+        # session's messages the moment an artist pressed Up right after
+        # switching (`_history_candidates`'s own docstring).
+        self._reset_history_navigation()
         state = self._pool.get(session_id)
         self._transcript.set_model(self._model(session_id))
         self._transcript.refresh(None)
@@ -2075,6 +2185,19 @@ class AgentPanel(QtWidgets.QWidget):
         self._refresh_sessions()
 
     def _sync_permission_popover(self) -> None:
+        """Show/hide/reposition the popover, then reconcile the Escape
+        shortcut's enabled state against whatever that just decided
+        (`_update_escape_shortcut_enabled`'s own docstring: this is one of
+        its chokepoints — it also runs on every page change, via `_show_
+        page`, and every conversation switch, via `_show_session`). Split
+        from `_sync_permission_popover_impl` only so that update happens
+        exactly once, after every branch below, including each early
+        return, rather than needing to remember it at each one.
+        """
+        self._sync_permission_popover_impl()
+        self._update_escape_shortcut_enabled()
+
+    def _sync_permission_popover_impl(self) -> None:
         if self._pages.currentIndex() != self.PAGE_TRANSCRIPT:
             # It anchors to the composer, which is hidden on every other
             # page. The pending request isn't lost — it comes back the moment
@@ -2312,6 +2435,10 @@ class AgentPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------- input
 
     def _on_submitted(self, blocks: list) -> None:
+        # A send is a clean break for arrow-key history too — same as a real
+        # terminal, the next Up press should start over from this newest
+        # message, not resume wherever a previous browse left off.
+        self._reset_history_navigation()
         current = self._current_session()
         if current is not None and current.session_id.startswith(_RESTORED_PREFIX):
             # A conversation read back from disk has no agent behind it. Keep
@@ -2332,9 +2459,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._note("No conversation open yet — starting one and sending this.")
             self._start_new_session()
             return
-        text = " ".join(
-            block.get("text", "") for block in blocks if block.get("type") == "text"
-        ).strip()
+        text = _text_of_blocks(blocks)
         if text:
             entry = self._model(current.session_id).append_user(text)
             self._touch(current.session_id, entry.id)
@@ -2359,11 +2484,11 @@ class AgentPanel(QtWidgets.QWidget):
 
         The shared tail of two very different moments: "type and press
         send" (`_on_submitted`, always the CURRENT session) and "the turn
-        ahead of this queued message just finished, so its own turn has
-        come" (`_drain_queue`, which may be draining a session that isn't
-        even the one on screen right now — the artist could have switched
-        tabs while it was waiting). `_is_current` is what tells the two
-        apart: the composer only ever reflects the ONE session on screen.
+        ahead of whatever was queued just finished, so its turn has come"
+        (`_drain_queue`, which may be draining a session that isn't even
+        the one on screen right now — the artist could have switched tabs
+        while it was waiting). `_is_current` is what tells the two apart:
+        the composer only ever reflects the ONE session on screen.
         """
         state = self._pool.get(session_id)
         if state is not None:
@@ -2371,6 +2496,7 @@ class AgentPanel(QtWidgets.QWidget):
         if self._is_current(session_id):
             self._composer.set_busy(True)
             self._composer.trigger_buddy()
+            self._update_escape_shortcut_enabled()
         activity = self._model(session_id).start_activity()
         self._touch(session_id, activity.id)
         shared_client(self._agent_id).prompt(session_id, blocks)
@@ -2385,6 +2511,10 @@ class AgentPanel(QtWidgets.QWidget):
         still working must not carry these typed words along, or leave
         them showing up in the wrong one.
         """
+        # Same clean break as an immediate send (`_on_submitted`) — this is
+        # just as much "the artist just said something," only it has to
+        # wait its turn.
+        self._reset_history_navigation()
         current = self._current_session()
         if current is None or current.session_id.startswith(_RESTORED_PREFIX):
             # Nothing live and busy to queue behind — this is the same
@@ -2392,9 +2522,7 @@ class AgentPanel(QtWidgets.QWidget):
             # for, so let it, rather than queuing behind nothing.
             self._on_submitted(blocks)
             return
-        text = " ".join(
-            block.get("text", "") for block in blocks if block.get("type") == "text"
-        ).strip()
+        text = _text_of_blocks(blocks)
         import uuid as _uuid
 
         entry_id = str(_uuid.uuid4())
@@ -2413,31 +2541,95 @@ class AgentPanel(QtWidgets.QWidget):
         self._persist_conversations_soon()
 
     def _drain_queue(self, session_id: str) -> None:
-        """The next queued message's turn has come.
+        """Whatever is queued goes out together, in ONE `session/prompt` call.
 
-        One at a time, oldest first — never the whole backlog at once: each
-        queued message is its own separate turn, the same as if the artist
-        had waited for each answer and typed the next one by hand. Does
-        nothing if the session is busy (another turn is already running —
-        it will call back here when IT finishes) or the queue is empty.
+        This used to send one queued message per turn — "each queued
+        message is its own separate turn, the same as if the artist had
+        waited for each answer and typed the next one by hand." That rule
+        existed only to dodge §15 (`docs/facts/acp-sdk.md`): two concurrent
+        `session/prompt` calls on one session race and corrupt the
+        transcript. It was never a reason to make three artist thoughts
+        wait through three separate round trips — `session/prompt` already
+        carries a flat list of content blocks with no "message" boundary of
+        its own (`client.py::do_prompt`'s `blocks` parameter), so several
+        queued messages concatenate into ONE call's blocks exactly as
+        naturally as one message's text and its attachments already do.
+        That is one call, not two concurrent ones — nothing §15 measured
+        forbids it.
+
+        Each queued message still gets its own transcript entry
+        (`promote_queued`, unchanged) — the artist sees them exactly as
+        separate messages they always were, in the order they were typed;
+        only the number of turns changes, from N down to 1. Does nothing if
+        the session is busy (another turn is already running — it will
+        call back here when IT finishes) or the queue is empty.
+
+        Sending and showing can never be allowed to disagree. Reported for
+        real: a screenshot with a "Queued — waiting to send" row still on
+        screen for a message the store already had recorded as sent — the
+        blocks go out regardless of whether `promote_queued` finds a row to
+        flip (it always should: `state.queued` and this model are mutated
+        together on every path that touches either, and `batch` was
+        already popped off the live queue atomically before this loop
+        starts, so nothing else can still be racing it). If it ever
+        doesn't, for a message that DOES have text, a fresh row is created
+        so the feed still ends up saying "sent" — leaving the stale
+        "Queued" text on screen would be worse than a duplicate id would
+        be, and it would also leave `_on_queue_remove_requested`'s Remove
+        button sitting on a row for a message that already left, which is
+        the second half of the same report (see that method's own note).
+        Logged either way, id and outcome only — never the text, same
+        rule as everywhere else in this file (`logbook.py`).
         """
         state = self._pool.get(session_id)
         if state is None or state.busy or not state.queued:
             return
-        queued = state.queued.pop(0)
-        entry = self._model(session_id).promote_queued(queued.id)
-        if entry is not None:
-            self._touch(session_id, entry.id)
+        batch, state.queued = state.queued, []
+        combined_blocks: list[dict] = []
+        for queued in batch:
+            entry = self._model(session_id).promote_queued(queued.id)
+            if entry is not None:
+                _log.info("promote_queued: id=%s session=%s -> promoted", queued.id, session_id)
+                self._touch(session_id, entry.id)
+            else:
+                text = _text_of_blocks(queued.blocks)
+                if text:
+                    _log.warning(
+                        "promote_queued: id=%s session=%s -> no matching row; "
+                        "recreating it so the feed matches the send",
+                        queued.id, session_id,
+                    )
+                    entry = self._model(session_id).append_user(text)
+                    self._touch(session_id, entry.id)
+                else:
+                    # Expected, not an error: an attachment-only queued
+                    # message never had a row to begin with (`_on_enqueue_
+                    # requested`'s own comment) — there is nothing to
+                    # reconcile.
+                    _log.info(
+                        "promote_queued: id=%s session=%s -> no row (attachment-only)",
+                        queued.id, session_id,
+                    )
+            combined_blocks.extend(queued.blocks)
         self._pool.mark_changed(session_id)
         self._persist_conversations_soon()
-        self._dispatch_prompt(session_id, queued.blocks)
+        self._dispatch_prompt(session_id, combined_blocks)
 
     def _on_queue_remove_requested(self, entry_id: str) -> None:
         """The artist pulled a still-waiting message back out — the one
         thing about a queue that has to work, per the owner's own ask.
         Only ever reachable for the CURRENT session: the remove button
         lives on a transcript row, and only the session on screen has any
-        rows drawn at all."""
+        rows drawn at all.
+
+        `entry_id` naming something that ALREADY went out (a stale
+        "Queued" row the screen hadn't refreshed — `_drain_queue`'s own
+        note) is handled below it, not here: the list comprehension is a
+        harmless no-op against an id no longer in `current.queued`, and
+        `TranscriptModel.remove_entry` now refuses to delete anything
+        whose kind isn't still `"queued"` — so clicking Remove on a stale
+        row can no longer erase a real sent message, it just does nothing.
+        """
         current = self._current_session()
         if current is None:
             return
@@ -2446,6 +2638,108 @@ class AgentPanel(QtWidgets.QWidget):
             self._touch(current.session_id, entry_id)
         self._pool.mark_changed(current.session_id)
         self._persist_conversations_soon()
+
+    # --- arrow-key history: the queue first, then sent messages ------------
+
+    def _reset_history_navigation(self) -> None:
+        self._history_index = -1
+        self._history_candidates = []
+        self._history_draft = ""
+
+    def _on_history_navigate(self, direction: int) -> None:
+        """Up (`direction=-1`) / Down (`direction=+1`) with the caret
+        already on the composer's own top/bottom edge (`Composer.history_
+        navigate_requested`, `_GrowingTextEdit._can_move_caret`) — a
+        multi-line draft still gets ordinary caret movement everywhere
+        else; this only fires once there is nowhere left for the caret
+        itself to go.
+
+        Two different pasts share this one gesture, in an order that is
+        the owner's own call, made explicitly for this feature: a message
+        still WAITING to go out (`SessionState.queued`) is more recent
+        than anything already sent — it was typed LAST, it just hasn't
+        left yet because the agent was busy — so the very first Up press
+        reaches for that before it ever looks at history, exactly the "и
+        убрать из очереди — как Remove" ask. Once there is no queued
+        message left to reach for (or the field already had something
+        else typed in it when browsing started — see `_build_history_
+        candidates`), Up walks sent messages, newest first, same as a
+        terminal's own history.
+        """
+        current = self._current_session()
+        if current is None:
+            return
+        if direction < 0:
+            self._history_step_back(current)
+        else:
+            self._history_step_forward()
+
+    def _history_step_back(self, current: sessions.SessionState) -> None:
+        if self._history_index == -1:
+            # Starting a fresh browse: the artist's own words, whatever
+            # they are (empty or not), are not to be lost the moment the
+            # first candidate overwrites the field.
+            self._history_draft = self._composer.current_text()
+            self._history_candidates = self._build_history_candidates(current)
+            if not self._history_candidates:
+                return
+            self._history_index = 0
+            self._composer.show_history_text(self._history_candidates[0])
+            return
+        next_index = self._history_index + 1
+        if next_index >= len(self._history_candidates):
+            # Already at the oldest message — stays put, same as a
+            # terminal has nothing further back to show either.
+            return
+        self._history_index = next_index
+        self._composer.show_history_text(self._history_candidates[next_index])
+
+    def _history_step_forward(self) -> None:
+        if self._history_index == -1:
+            return  # not browsing — nothing to come back down FROM
+        if self._history_index == 0:
+            self._history_index = -1
+            self._composer.show_history_text(self._history_draft)
+            return
+        self._history_index -= 1
+        self._composer.show_history_text(self._history_candidates[self._history_index])
+
+    def _build_history_candidates(self, current: sessions.SessionState) -> list[str]:
+        """Everything a fresh Up press can reach, newest first — built ONCE,
+        not re-read on every further press (`_history_index`'s own
+        docstring says why a snapshot, not a live view, is the point).
+
+        Reaches into the QUEUE first, but only from an empty field — the
+        owner's own words, "стрелка вверх в пустом поле ввода": an artist
+        mid-edit of something else is not this gesture, so a non-empty
+        `_history_draft` skips straight to sent history below. Pulling the
+        queued message out reuses `_on_queue_remove_requested` outright
+        rather than a second copy of its bookkeeping — this IS a Remove,
+        the owner's own description of the feature ("как Remove, только с
+        текстом в поле"), just with the text handed back instead of
+        thrown away.
+        """
+        candidates: list[str] = []
+        if current.queued and not self._history_draft:
+            queued = current.queued[-1]  # most recently typed, LIFO
+            candidates.append(_text_of_blocks(queued.blocks))
+            self._on_queue_remove_requested(queued.id)
+        candidates.extend(self._sent_history(current.session_id))
+        return candidates
+
+    def _sent_history(self, session_id: str) -> list[str]:
+        """Every non-empty message the artist has actually SENT in this
+        conversation, most recent first — read straight off the transcript
+        (`kind == "user"`), not a second store: `conversations_store.py`
+        already persists every entry's text, so this survives a Houdini
+        restart for free, restored conversations included (`_RESTORED_
+        PREFIX`, `load_records` — there was nothing left to build).
+        """
+        return [
+            entry.text
+            for entry in reversed(self._model(session_id).entries())
+            if entry.kind == "user" and entry.text
+        ]
 
     def _finish_activity(self, session_id: str) -> None:
         activity = self._model(session_id).finish_activity()
@@ -2467,12 +2761,13 @@ class AgentPanel(QtWidgets.QWidget):
             return
         if current.queued:
             # Visible at the moment of the decision, not discovered later
-            # as a surprise once the next queued message quietly goes out
-            # on its own: the queue is kept, not silently dropped, and
-            # cancelling this turn is what lets the FIRST of them start.
+            # as a surprise once the queue quietly goes out on its own: the
+            # queue is kept, not silently dropped, and cancelling this turn
+            # is what lets it start (`_drain_queue` — all of it, together,
+            # in one call, not one turn per message).
             self._note(
                 f"Stopping — {len(current.queued)} queued message(s) will "
-                "still be sent, one at a time, once this turn ends."
+                "still be sent once this turn ends."
             )
         shared_client(self._agent_id).cancel(current.session_id)
         session_id = current.session_id
@@ -2487,6 +2782,7 @@ class AgentPanel(QtWidgets.QWidget):
         state.busy = False
         if self._is_current(session_id):
             self._composer.set_busy(False)
+            self._update_escape_shortcut_enabled()
         queue_note = (
             f" {len(state.queued)} queued message(s) will still be sent."
             if state.queued
