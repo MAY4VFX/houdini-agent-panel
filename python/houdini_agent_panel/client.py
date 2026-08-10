@@ -426,6 +426,19 @@ class AcpWorker(QtCore.QThread):
 
     # --- sessions -----------------------------------------------------------
     session_started = Signal(str, object)  # session_id, SessionState
+    #: `session/load` succeeded — the SAME session_id passed to `do_load_
+    #: session` (the protocol has no separate id for a loaded session, it
+    #: reuses the one asked for). By the time this fires, the agent has
+    #: already replayed the whole conversation as ordinary `session_update`
+    #: notifications (the protocol requires it to, before ever answering
+    #: `session/load`) — see `do_load_session`'s own docstring.
+    session_loaded = Signal(str, object)  # session_id, SessionState
+    #: `session/load` was refused or errored — a stale/unknown session id
+    #: (agent restarted and never persisted it, session expired, agent
+    #: doesn't actually keep what it advertised), a transport failure,
+    #: anything. `session_id` is the one that was ASKED for, since no
+    #: SessionState exists to carry it on a failure.
+    session_load_failed = Signal(str, str)  # session_id, message
     modes_changed = Signal(str, object)  # session_id, acp.schema.SessionModeState
     commands_changed = Signal(str, list)  # session_id, list[acp.schema.AvailableCommand]
     config_options_changed = Signal(str, list)  # session_id, list[ConfigOption]
@@ -957,6 +970,70 @@ class AcpWorker(QtCore.QThread):
         if options:
             self.config_options_changed.emit(response.session_id, options)
 
+    async def do_load_session(self, session_id: str, cwd: str, mcp_servers: list[dict]) -> None:
+        """`session/load` — the protocol's own way to resume a session, as
+        opposed to `conversations_store.py`'s read-only replay off disk.
+
+        Per the ACP spec (agentclientprotocol.com/protocol/session-setup,
+        confirmed by reading it, not assumed): the agent MUST replay the
+        entire conversation as ordinary `session_update` notifications
+        BEFORE answering this request. Nothing special is done with those
+        here — they arrive through the exact same `session_update` handler
+        every live turn already uses, and land in `AgentPanel._models
+        [session_id]` (keyed by the session_id below, which — unlike
+        `do_new_session` — is not new, it's the one WE pass in) through the
+        ordinary per-kind signals. By the time `session_loaded` fires, that
+        model already IS the resumed transcript.
+        """
+        if self._conn is None:
+            self.session_load_failed.emit(session_id, "no connection to the agent")
+            return
+        _log.info("session/load: session=%s", session_id)
+        try:
+            servers = _build_mcp_servers(mcp_servers)
+            response = await self._conn.load_session(
+                cwd=cwd, session_id=session_id, mcp_servers=servers
+            )
+        except acp.RequestError as exc:
+            _log.warning("session/load failed: session=%s error=%s", session_id, exc)
+            if not self._emit_if_auth_required(exc):
+                self.session_load_failed.emit(session_id, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("session/load failed: session=%s error=%r", session_id, exc)
+            self.session_load_failed.emit(session_id, str(exc))
+            return
+        _log.info("session/load: ok session=%s", session_id)
+
+        current_mode_id = None
+        available_modes: list[_SessionMode] = []
+        if response is not None and response.modes is not None:
+            current_mode_id = response.modes.current_mode_id
+            self._session_modes[session_id] = list(response.modes.available_modes)
+            self._session_current_modes[session_id] = current_mode_id
+            available_modes = [
+                _SessionMode(id=m.id, name=m.name, description=m.description or "")
+                for m in response.modes.available_modes
+            ]
+
+        state = SessionState(
+            session_id=session_id,
+            title="New chat",
+            cwd=cwd,
+            created_at=time.time(),
+            current_mode_id=current_mode_id,
+            available_modes=available_modes,
+            available_commands=[],
+        )
+        self.session_loaded.emit(session_id, state)
+        options = (
+            _config_options_from(getattr(response, "config_options", None))
+            if response is not None
+            else []
+        )
+        if options:
+            self.config_options_changed.emit(session_id, options)
+
     async def do_prompt(self, session_id: str, blocks: list[dict]) -> None:
         if self._conn is None:
             self.error.emit(session_id, "no connection to the agent")
@@ -1195,6 +1272,8 @@ _FORWARDED_SIGNALS = (
     "authenticated",
     "log_line",
     "session_started",
+    "session_loaded",
+    "session_load_failed",
     "modes_changed",
     "commands_changed",
     "config_options_changed",
@@ -1227,6 +1306,8 @@ class AcpClient(QtCore.QObject):
     log_line = Signal(str)
 
     session_started = Signal(str, object)
+    session_loaded = Signal(str, object)
+    session_load_failed = Signal(str, str)
     modes_changed = Signal(str, object)
     commands_changed = Signal(str, list)
     config_options_changed = Signal(str, list)
@@ -1429,6 +1510,13 @@ class AcpClient(QtCore.QObject):
 
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None:
         self._submit(lambda w: w.do_new_session(cwd, mcp_servers))
+
+    def load_session(self, *, session_id: str, cwd: str, mcp_servers: list[dict]) -> None:
+        """Resume a session the agent may still remember — only meaningful
+        when `agent_info().supports_load_session` and `session_id` is one
+        this same agent actually issued (see `ui/panel.py::AgentPanel.
+        _adopt_or_resume`, the only caller)."""
+        self._submit(lambda w: w.do_load_session(session_id, cwd, mcp_servers))
 
     def prompt(self, session_id: str, blocks: list[dict]) -> None:
         self._submit(lambda w: w.do_prompt(session_id, blocks))

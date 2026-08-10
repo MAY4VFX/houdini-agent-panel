@@ -181,12 +181,24 @@ Qt imports — only through `hutil.PySide`. Reuse from `fxhoudinimcp/install.py`
 
 - A networked studio install with runtimes pre-populated for chosen OSes.
 - Choosing a working folder and adding roots from `hou.fileReferences()` (API verified, works).
-- History across restarts via the protocol's own `session/load` (an optional
-  capability) — what shipped instead is our own read-only
-  `conversations_store.py`, replaying a saved transcript rather than
-  resuming a live agent session; `session/load` itself is still unused.
 - Upstreaming the panel into fx via a PR.
 
-Done since, no longer deferred: **several different agents at once inside
-one Houdini** — one process per agent id, not per Houdini process (see "One
-agent process per agent id, many sessions" above).
+Done since, no longer deferred:
+
+- **Several different agents at once inside one Houdini** — one process
+  per agent id, not per Houdini process (see "One agent process per agent
+  id, many sessions" above).
+- **History across restarts via the protocol's own `session/load`.**
+  `conversations_store.py`'s read-only replay is still what an artist gets
+  from an agent that doesn't declare `loadSession`, or for a conversation
+  saved before this — but for an agent that does (confirmed working
+  end-to-end against `tests/fake_agent.py`'s `load`/`load-fail`
+  scenarios; NOT independently confirmed yet against a real
+  `@agentclientprotocol/claude-agent-acp` process, which requires a live,
+  signed-in agent this environment doesn't have) and a conversation with a
+  surviving `StoredConversation.agent_session_id`, reopening it and typing
+  resumes the SAME agent session — the agent replays its own history via
+  `session_update` per the ACP spec, and the panel continues into it
+  rather than opening a fresh, memory-less one. See `ui/panel.py::
+  AgentPanel._adopt_or_resume` and `docs/architecture.md`'s `AcpClient.
+  load_session`.

@@ -509,6 +509,14 @@ class AgentPanel(QtWidgets.QWidget):
         self._reapplied_config_sessions: set[str] = set()
         self._restored: list = []
         self._adopting_restored: str | None = None
+        #: The agent session id THIS tab is currently waiting on `session/
+        #: load` for — set by `_start_loaded_session`, cleared by whichever
+        #: of `_on_session_loaded`/`_on_session_load_failed` answers it.
+        #: `session_loaded`/`session_load_failed` reach every tab on this
+        #: agent (see `_wire_client`'s own docstring); this is what tells a
+        #: tab that never asked for a load to leave someone else's answer
+        #: alone.
+        self._loading_session_id: str | None = None
         self._last_auth_method: str = ""
         #: Set by `_on_agent_row_sign_in`/`_on_agent_row_sign_out` when the
         #: artist clicked Sign in/out on a Settings row for an agent that
@@ -1137,9 +1145,10 @@ class AgentPanel(QtWidgets.QWidget):
             self._start_new_session()
         elif current.session_id.startswith(_RESTORED_PREFIX):
             # Same reasoning as in `_on_connected`: a transcript off disk
-            # has no session under it, so it has no modes and no model.
-            self._adopting_restored = current.session_id
-            self._start_new_session()
+            # has no session under it, so it has no modes and no model —
+            # `_adopt_or_resume` decides whether that means a real
+            # `session/load` or the old read-only-history fallback.
+            self._adopt_or_resume(current.session_id)
         else:
             self._show_session(current.session_id)
         self._show_page(self.PAGE_TRANSCRIPT)
@@ -1262,6 +1271,8 @@ class AgentPanel(QtWidgets.QWidget):
             (client.log_line, self._on_log_line),
             (client.authenticated, self._on_authenticated),
             (client.session_started, self._on_session_started),
+            (client.session_loaded, self._on_session_loaded),
+            (client.session_load_failed, self._on_session_load_failed),
             (client.modes_changed, self._on_modes_changed),
             (client.commands_changed, self._on_commands_changed),
             (client.config_options_changed, self._on_config_options_changed),
@@ -1480,10 +1491,11 @@ class AgentPanel(QtWidgets.QWidget):
             # opening a session looked harmless, but modes, slash commands
             # and the model picker all arrive with `session/new` — so until
             # they typed, the panel showed a conversation with no controls
-            # under it. Adopt the restored transcript into a live session
-            # right away; `_on_session_started` carries the words over.
-            self._adopting_restored = current.session_id
-            self._start_new_session()
+            # under it. `_adopt_or_resume` picks `session/load` when THIS
+            # agent can actually resume it, otherwise the same read-only-
+            # history-on-a-new-session adoption as before
+            # (`_on_session_started` carries the words over either way).
+            self._adopt_or_resume(current.session_id)
         else:
             # A session was already live (a reattach, not a fresh connect) —
             # `_on_session_started` isn't coming to do this instead, so if
@@ -1736,6 +1748,139 @@ class AgentPanel(QtWidgets.QWidget):
         # exactly that, this is a no-op (`_drain_queue` checks `busy`
         # first) and the restored queue waits its turn like any other.
         self._drain_queue(session_id)
+
+    def _adopt_or_resume(self, restored_session_id: str) -> None:
+        """What's on screen was read back from disk and has no live agent
+        session behind it. Decide whether it can actually be CONTINUED —
+        `session/load`, when the agent declares `loadSession` and a past
+        live session id survived for this exact conversation
+        (`StoredConversation.agent_session_id`) — or only carried along as
+        read-only history glued onto a brand new session, which is all a
+        restored conversation could ever do before this (see `docs/
+        design.md`'s "Deferred" note on `session/load`).
+
+        We invent nothing on top of what the agent tells us: no capability,
+        no stored session id, or no live connection yet at all (`info is
+        None`) all fall straight through to the old behavior, unchanged.
+        """
+        client = shared_client(self._agent_id)
+        info = client.agent_info()
+        conversation_id = self._conversation_ids.get(restored_session_id)
+        stored = next((c for c in self._restored if c.id == conversation_id), None)
+        agent_session_id = stored.agent_session_id if stored is not None else ""
+        if info is not None and info.supports_load_session and agent_session_id:
+            _log.info(
+                "conversation resumable: agent=%s restored=%s -> session/load",
+                self._agent_id, restored_session_id,
+            )
+            self._start_loaded_session(restored_session_id, agent_session_id)
+            return
+        _log.info(
+            "conversation read-only: agent=%s restored=%s "
+            "(supports_load_session=%s, stored_session_id=%s)",
+            self._agent_id, restored_session_id,
+            bool(info is not None and info.supports_load_session), bool(agent_session_id),
+        )
+        self._adopting_restored = restored_session_id
+        self._start_new_session()
+
+    def _start_loaded_session(self, restored_key: str, agent_session_id: str) -> None:
+        """Ask the agent to actually resume `agent_session_id` via
+        `session/load` — reached only once `_adopt_or_resume` has already
+        confirmed the agent supports it and a session id survived for this
+        conversation. `_on_session_loaded`/`_on_session_load_failed`
+        finish what this starts.
+        """
+        client = shared_client(self._agent_id)
+        self._adopting_restored = restored_key
+        self._loading_session_id = agent_session_id
+        self._composer.set_boot_phase(PHASE_SESSION)
+        client.load_session(
+            session_id=agent_session_id, cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers()
+        )
+
+    def _on_session_loaded(self, session_id: str, state: Any) -> None:
+        """`session/load` came back: the agent has already replayed this
+        session's own history as ordinary `session_update` notifications
+        (the protocol requires that before it ever answers `session/load`
+        — confirmed by reading agentclientprotocol.com/protocol/session-
+        setup, not assumed), which landed in `self._models[session_id]`
+        through the same per-kind handlers a live turn already uses
+        (`_on_message_chunk`, `_on_tool_call`, ...). That IS the resumed
+        transcript by the time this runs.
+
+        Unlike `_on_session_started`'s adoption of a brand new session,
+        this does NOT transplant our own local, read-only copy onto
+        `session_id`: a new session has nothing of its own to lose, a
+        loaded one does — the agent's own replay is the more trustworthy
+        of the two, and overwriting it would throw away exactly what
+        `session/load` was called to get back. The local copy is dropped,
+        not merged, so a slow replay racing this signal can never end up
+        duplicated alongside it.
+        """
+        _log.info("session/load resolved: agent=%s session=%s", self._agent_id, session_id)
+        self._composer.finish_boot()
+        adopted = self._adopting_restored
+        self._adopting_restored = None
+        self._loading_session_id = None
+        if adopted is not None:
+            self._models.pop(adopted, None)
+            conversation_id = self._conversation_ids.pop(adopted, None)
+            if conversation_id is not None:
+                self._conversation_ids[session_id] = conversation_id
+            restored_state = self._pool.get(adopted)
+            if restored_state is not None:
+                state.title = restored_state.title
+                state.queued = restored_state.queued
+                self._pool.remove(adopted)
+        import uuid as _uuid
+
+        self._conversation_ids.setdefault(session_id, _uuid.uuid4().hex)
+        state.busy = False
+        self._models.setdefault(session_id, TranscriptModel())
+        self._pool.add(state)
+        info = shared_client(self._agent_id).agent_info()
+        if info is not None:
+            self._sync_agent_auth_row(info)
+        self._set_current_session(session_id)
+        self._show_session(session_id)
+        self._show_page(self.PAGE_TRANSCRIPT)
+        self._complete_pending_auth_switch()
+        pending, self._pending_prompt = self._pending_prompt, None
+        if pending:
+            self._on_submitted(pending)
+        self._drain_queue(session_id)
+
+    def _on_session_load_failed(self, session_id: str, message: str) -> None:
+        """`session/load` was refused or errored — a stale/unknown session
+        id (the agent restarted and never actually persisted it, despite
+        advertising the capability), a transport failure, anything. Silence
+        here would BE the exact bug this whole feature exists to fix
+        ("the previous conversation ended on different information") in a
+        new disguise, so it says so plainly and falls back to the ordinary
+        new-session-with-read-only-history path — `_adopting_restored` is
+        still set from `_start_loaded_session`, so `_on_session_started`
+        (once the new session comes up) carries the old transcript over
+        exactly as it would for an agent with no `loadSession` at all.
+
+        Guarded against a sibling tab's own attempt: `session_load_failed`
+        reaches every tab on this agent, and only the tab that actually
+        called `load_session` has a matching `_loading_session_id`.
+        """
+        if self._adopting_restored is None or session_id != self._loading_session_id:
+            return
+        _log.warning(
+            "session/load failed: agent=%s session=%s -> falling back to a new session",
+            self._agent_id, session_id,
+        )
+        self._loading_session_id = None
+        self._note(
+            f"Could not resume the previous conversation with the agent ({message}). "
+            "Starting a new one — the earlier messages are kept here, but the "
+            "agent itself has no memory of them.",
+            error=True,
+        )
+        self._start_new_session()
 
     def _on_modes_changed(self, session_id: str, mode_state: Any) -> None:
         state = self._pool.get(session_id)
@@ -2441,14 +2586,15 @@ class AgentPanel(QtWidgets.QWidget):
         self._reset_history_navigation()
         current = self._current_session()
         if current is not None and current.session_id.startswith(_RESTORED_PREFIX):
-            # A conversation read back from disk has no agent behind it. Keep
-            # the words, open a real session, and let `_on_session_started`
-            # carry the transcript over — throwing the message away because
-            # the transport is not up yet would be the artist's loss, not
-            # ours.
-            self._adopting_restored = current.session_id
+            # A conversation read back from disk has no LIVE agent behind it
+            # yet. Keep the words and either resume it for real
+            # (`session/load`, when `_adopt_or_resume` finds the agent can)
+            # or open a fresh session and let `_on_session_started` carry
+            # the transcript over read-only — throwing the message away
+            # because the transport is not up yet would be the artist's
+            # loss, not ours.
             self._pending_prompt = list(blocks)
-            self._start_new_session()
+            self._adopt_or_resume(current.session_id)
             return
         if current is None:
             # The composer has already cleared itself by now, so dropping the
@@ -4583,11 +4729,11 @@ class AgentPanel(QtWidgets.QWidget):
                 records = model.to_records()
                 if not records:
                     continue
-                conversation = existing.get(conversation_id) or store.StoredConversation.new()
+                prior = existing.get(conversation_id)
+                conversation = prior or store.StoredConversation.new()
                 conversation.id = conversation_id
                 state = self._pool.get(session_id)
-                if state is not None:
-                    conversation.title = state.title
+                new_title = state.title if state is not None else conversation.title
                 # The scene this conversation belongs to. Preferably from the
                 # session, so saving after the artist opens a different scene
                 # doesn't drag the previous scene's conversations along — but
@@ -4597,7 +4743,7 @@ class AgentPanel(QtWidgets.QWidget):
                 # Claude conversations were saved that way and became
                 # invisible for good, which read as "the panel lost them".
                 # Leaving the pool is exactly when persisting matters most.
-                conversation.cwd = (
+                new_cwd = (
                     (state.cwd if state is not None else "")
                     or conversation.cwd
                     or scene.hip_dir()
@@ -4610,9 +4756,46 @@ class AgentPanel(QtWidgets.QWidget):
                 # never actually had with, and `store.load`'s new per-agent
                 # filter (see `conversations_store.py`) would then never
                 # find it again under the agent it really happened with.
-                conversation.agent_id = self._agent_id or ""
+                new_agent_id = self._agent_id or ""
+                # The agent's own session id, for a real `session/load`
+                # later (`_adopt_or_resume`) — but only out of a key that
+                # actually IS one. A restored, still-unadopted conversation
+                # is keyed by `_RESTORED_PREFIX + conversation_id`, our own
+                # id, never the agent's; saving that would overwrite the
+                # one real id a future resume needs with something no agent
+                # ever issued.
+                new_agent_session_id = (
+                    session_id
+                    if not session_id.startswith(_RESTORED_PREFIX)
+                    else conversation.agent_session_id
+                )
+                # A conversation's timestamp on disk should say when IT last
+                # actually changed, not when some unrelated save happened to
+                # run. `self._models` is shared process-wide across every
+                # conversation this agent has ever had (`sessions.models`),
+                # and this method runs on every prompt sent and every turn
+                # finished — so stamping every conversation that still has
+                # records unconditionally made `updated_at` close to random
+                # noise: eight of nine of an owner's own conversations ended
+                # up sharing the very same instant, microseconds apart, and
+                # `_ordered`'s sort by `-updated_at` then reflected whatever
+                # order the dict happened to iterate in, not the order any
+                # of them were actually last worked on.
+                changed = (
+                    prior is None
+                    or prior.title != new_title
+                    or prior.cwd != new_cwd
+                    or prior.agent_id != new_agent_id
+                    or prior.agent_session_id != new_agent_session_id
+                    or prior.entries != records
+                )
+                conversation.title = new_title
+                conversation.cwd = new_cwd
+                conversation.agent_id = new_agent_id
+                conversation.agent_session_id = new_agent_session_id
                 conversation.entries = records
-                conversation.updated_at = time.time()
+                if changed:
+                    conversation.updated_at = time.time()
                 existing[conversation_id] = conversation
             current = self._current_session()
             active_id = (

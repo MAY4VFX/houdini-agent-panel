@@ -62,6 +62,17 @@ class StoredConversation:
     #: same scoping a terminal agent gets for free by being started in a
     #: directory. Empty means it predates this field; see `load`.
     cwd: str = ""
+    #: The agent's OWN session id, from the last time this conversation had
+    #: a live transport — meaningless to any agent other than `agent_id`,
+    #: and to a NEW process of even that same agent unless it kept its own
+    #: record of the session (`session/load`'s whole premise). Empty means
+    #: either this predates `session/load` support, or the conversation was
+    #: never anything but a restored replay. `ui/panel.py::AgentPanel.
+    #: _adopt_or_resume` is the only reader: a live id plus an agent that
+    #: declares `loadSession` is what turns "reopen a past conversation"
+    #: into a real resume instead of a read-only transcript glued onto a
+    #: brand new session.
+    agent_session_id: str = ""
     entries: list[dict] = field(default_factory=list)
 
     @staticmethod
@@ -87,6 +98,7 @@ class StoredConversation:
             "pinned": self.pinned,
             "agent_id": self.agent_id,
             "cwd": self.cwd,
+            "agent_session_id": self.agent_session_id,
             "entries": self.entries[-MAX_ENTRIES:],
         }
 
@@ -106,6 +118,7 @@ class StoredConversation:
             pinned=bool(payload.get("pinned")),
             agent_id=str(payload.get("agent_id") or ""),
             cwd=str(payload.get("cwd") or ""),
+            agent_session_id=str(payload.get("agent_session_id") or ""),
             entries=[e for e in (entries or []) if isinstance(e, dict)][-MAX_ENTRIES:],
         )
 

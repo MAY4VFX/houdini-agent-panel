@@ -228,6 +228,62 @@ def test_prompt_streams_thought_then_message_and_finishes(qapp, make_client, tmp
     assert finished.calls[0] == (session_id, "end_turn")
 
 
+# --- session/load -------------------------------------------------------------
+
+
+def test_connect_reports_load_session_support(qapp, make_client, tmp_path):
+    client = make_client()
+    connected = _connect(qapp, client, "load", tmp_path)
+    assert connected.calls[0][0].supports_load_session is True
+
+    client2 = make_client()
+    connected2 = _connect(qapp, client2, "stream", tmp_path)
+    assert connected2.calls[0][0].supports_load_session is False
+
+
+def test_load_session_replays_history_under_the_same_session_id(qapp, make_client, tmp_path):
+    """Per the ACP spec (agentclientprotocol.com/protocol/session-setup),
+    the agent replays the whole conversation as `session_update`
+    notifications BEFORE answering `session/load` — the fake agent's
+    ``load`` scenario does exactly that. Those notifications go through the
+    ordinary `session_update` handler, same as a live turn, so a plain
+    `message_chunk` recorder is enough to prove the replay arrived, keyed
+    by the SAME session id that was asked for (not a new one — unlike
+    `session/new`, `session/load` never mints one)."""
+    client = make_client()
+    _connect(qapp, client, "load", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    loaded = _Recorder(client.session_loaded)
+    load_failed = _Recorder(client.session_load_failed)
+    messages = _Recorder(client.message_chunk)
+
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
+    _pump_until(qapp, lambda: loaded.calls, "session/load to answer")
+
+    assert not load_failed.calls
+    assert loaded.calls[0][0] == session_id
+    assert loaded.calls[0][1].session_id == session_id
+    replayed = [c for c in messages.calls if c[0] == session_id]
+    assert replayed and "rotor pyro" in replayed[0][2]
+
+
+def test_load_session_failure_is_reported_not_silent(qapp, make_client, tmp_path):
+    client = make_client()
+    _connect(qapp, client, "load-fail", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    loaded = _Recorder(client.session_loaded)
+    load_failed = _Recorder(client.session_load_failed)
+
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
+    _pump_until(qapp, lambda: load_failed.calls, "session/load to fail")
+
+    assert not loaded.calls
+    assert load_failed.calls[0][0] == session_id
+    assert load_failed.calls[0][1]  # a real message, not an empty string
+
+
 # --- auth_required -----------------------------------------------------------
 
 

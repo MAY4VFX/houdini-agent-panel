@@ -16,6 +16,14 @@ Behavior is selected via the ``FAKE_AGENT_SCENARIO`` environment variable:
 - ``modes`` — offers `availableModes`/`currentModeId`, listens for `set_session_mode`.
 - ``plan`` — sends a plan and `tool_call`/`tool_call_update` before replying.
 - ``slow`` — hangs in `prompt` until a `session/cancel` arrives (for the cancel test).
+- ``load`` — declares `loadSession: true`; `session/load` replays one
+  remembered exchange as ordinary `session_update` notifications (per the
+  ACP spec, agentclientprotocol.com/protocol/session-setup: the Agent MUST
+  replay the whole conversation before answering `session/load`) and then
+  answers; a `prompt` after that continues the SAME session id.
+- ``load-fail`` — declares `loadSession: true`, but `session/load` always
+  errors with `resource_not_found` — the "the agent said yes and then
+  couldn't" case a real restart can produce.
 """
 
 from __future__ import annotations
@@ -103,7 +111,9 @@ class FakeAgent:
         return acp.InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
-                load_session=False, prompt_capabilities=prompt_caps, auth=auth_caps
+                load_session=SCENARIO in ("load", "load-fail"),
+                prompt_capabilities=prompt_caps,
+                auth=auth_caps,
             ),
             auth_methods=auth_methods,
             agent_info=Implementation(name="fake-agent", version="0.0.1"),
@@ -133,6 +143,23 @@ class FakeAgent:
             )
         self._sessions[session_id] = "ask" if modes else None
         return acp.NewSessionResponse(session_id=session_id, modes=modes)
+
+    async def load_session(
+        self, cwd, session_id, mcp_servers=None, additional_directories=None, **kwargs
+    ):
+        """`session/load` — only reachable when `SCENARIO` declared
+        `loadSession` in `initialize`. Per the ACP spec, the whole
+        conversation is replayed as `session_update` notifications BEFORE
+        this ever answers, so the client can rebuild the exact same
+        transcript a live turn would have produced.
+        """
+        if SCENARIO == "load-fail":
+            raise RequestError.resource_not_found(session_id)
+        self._sessions[session_id] = None
+        await self._client.session_update(
+            session_id=session_id, update=_message_chunk("earlier: rotor pyro setup", "replay-1")
+        )
+        return acp.LoadSessionResponse()
 
     async def set_session_mode(self, session_id, mode_id, **kwargs):
         self._sessions[session_id] = mode_id

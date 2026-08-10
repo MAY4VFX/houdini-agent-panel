@@ -374,6 +374,8 @@ class AcpClient(QtCore.QObject):
 
     # --- sessions
     session_started = Signal(str, object) # session_id, SessionState
+    session_loaded = Signal(str, object)  # session_id, SessionState — session/load succeeded
+    session_load_failed = Signal(str, str)  # session_id, message — session/load refused/errored
     modes_changed = Signal(str, object)   # session_id, SessionModeState
     commands_changed = Signal(str, list)  # session_id, list[AvailableCommand]
     config_options_changed = Signal(str, list)  # session_id, list[ConfigOption]
@@ -401,6 +403,16 @@ class AcpClient(QtCore.QObject):
     def authenticate(self, method_id: str) -> None
     def logout(self) -> None
     def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None
+    def load_session(self, *, session_id: str, cwd: str, mcp_servers: list[dict]) -> None
+        """session/load — resumes a session the agent may still remember,
+        only when AgentInfo.supports_load_session and `session_id` is one
+        this same agent actually issued in a previous run (persisted as
+        StoredConversation.agent_session_id). Per the ACP spec, the agent
+        replays the whole conversation as ordinary session_update
+        notifications before answering — see ui/panel.py::AgentPanel.
+        _adopt_or_resume, the only caller, and its own docstring for what
+        happens when the agent can't (no capability, or no stored id) or
+        the load itself fails."""
     def prompt(self, session_id: str, blocks: list[dict]) -> None
     def cancel(self, session_id: str) -> None
     def close_session(self, session_id: str) -> None
