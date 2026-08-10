@@ -46,10 +46,14 @@ Houdini itself. Your working directory is this scene's own folder.
 
 ## How to change the scene
 
-Use the `fxhoudini` MCP tools for everything: creating and wiring nodes, setting
-parameters, inspecting geometry, and so on. Do not edit the `.hip` file directly, do not
-write a script to run under `hython`, and do not try to `import hou` — none of that is
-available in this process. The MCP tools are the only way in.
+Reach for the `fxhoudini` MCP tools first, for everything: creating and wiring nodes,
+setting parameters, inspecting geometry, and so on. They act on the session that is open
+right now, which nothing else here can do — you have no `hou` in this process, and the
+`.hip` file on disk is a stale copy that the live session will overwrite when it saves.
+
+If something genuinely can't be done through those tools, say so and suggest how it could
+be done instead — a script the artist runs themselves, a manual step, a different
+approach. Propose it and let them decide, rather than working around the tools quietly.
 
 ## Houdini is live, and someone is watching
 
@@ -58,13 +62,14 @@ immediately. Only take destructive actions — deleting nodes, `new_scene`, over
 files on disk — when asked to. Saving the scene is a deliberate action you take when
 asked, never a side effect of something else.
 
-## Never cook PDG/TOP synchronously
+## Say so before a synchronous PDG/TOP cook
 
 A synchronous TOP cook (e.g. `cookWorkItems`) runs on Houdini's main thread and freezes
-the entire UI — including this panel — until every work item finishes. The normal cancel
-action is frozen along with everything else, since it needs that same thread. Don't start
-a long cook or render this way; if one is genuinely needed, warn the artist first and let
-them start it.
+the whole UI — this panel included — until every work item finishes. The cancel action is
+frozen with it, since it needs that same thread, so nobody can stop it from inside
+Houdini. Tell the artist what you're about to start and roughly how long it will take,
+and let them decide. Never start a long cook or render as an unannounced side effect of
+something else.
 
 ## Batch your calls
 
