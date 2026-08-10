@@ -15,10 +15,10 @@ of one long form stretched edge to edge.
 Voice is the one section that can be entirely absent: `recording_available()`
 (`ui/voice.py`) is checked once, at construction, and currently always says
 no — voice input is pinned off on every platform pending per-platform
-verification (see `ui/voice.py::_VOICE_INPUT_AVAILABLE`) — which hides the
-section outright rather than offering fields for a microphone button that
-can never appear. See where `voice_section`/`_voice_unavailable_caption`
-are built, below.
+verification (see `ui/voice.py::_VOICE_INPUT_AVAILABLE`). The section is
+hidden with nothing put in its place: an explanatory line is still
+something to read and wonder about, for a feature the panel does not
+offer at all right now.
 
 Reads and writes `settings.json` directly (`settings.load`/`settings.save`) —
 the same one-way layering as `ui/agents.py`: the settings screen is allowed
@@ -685,21 +685,17 @@ class SettingsView(QtWidgets.QWidget):
         # flag, so this section and the composer's mic button can never
         # disagree.
         #
-        # The section is hidden outright, not disabled — an artist isn't
-        # meant to configure a whisper endpoint for a button that can never
-        # appear. `_voice_unavailable_caption` takes its place instead of
-        # letting it vanish without a trace.
-        recording_ok, recording_reason = recording_available()
+        # Hidden outright, and with nothing standing in for it. A note
+        # saying "this is temporarily off" is still a thing to read and
+        # wonder about, for a feature the panel does not currently offer
+        # at all — the owner's own words on seeing one: there is no such
+        # feature yet, so leave no trace of it. It comes back, caption
+        # and all, when `_VOICE_INPUT_AVAILABLE` does.
+        recording_ok, _recording_reason = recording_available()
         voice_section = _Section("Voice", self, expanded=True, grid=grid_metrics)
         voice_section.add_row("Whisper endpoint", self._whisper_edit)
         voice_section.add_row("Whisper API key", self._whisper_api_key_edit)
         voice_section.setVisible(recording_ok)
-
-        self._voice_unavailable_caption = QtWidgets.QLabel(self)
-        self._voice_unavailable_caption.setWordWrap(True)
-        self._voice_unavailable_caption.setStyleSheet("color: palette(disabled, text);")
-        self._voice_unavailable_caption.setText(recording_reason)
-        self._voice_unavailable_caption.setVisible(not recording_ok)
 
         privacy_section = _Section("Privacy", self, expanded=False, grid=grid_metrics)
         privacy_section.add_checkbox(self._telemetry_checkbox)
@@ -752,7 +748,6 @@ class SettingsView(QtWidgets.QWidget):
             behaviour_section,
             updates_section,
             voice_section,
-            self._voice_unavailable_caption,
             privacy_section,
             network_section,
             data_section,

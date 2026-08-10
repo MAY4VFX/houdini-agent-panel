@@ -667,7 +667,6 @@ def test_voice_section_is_hidden_by_default_right_now(qapp):
     view.show()  # isVisible() follows the ancestor chain — see the probe test above.
 
     assert view._voice_section.isVisible() is False
-    assert view._voice_unavailable_caption.isVisible() is True
 
 
 def test_voice_section_hidden_when_recording_is_unavailable(qapp, monkeypatch):
@@ -680,19 +679,21 @@ def test_voice_section_hidden_when_recording_is_unavailable(qapp, monkeypatch):
     assert view._voice_section.isVisible() is False
 
 
-def test_voice_caption_names_the_reason_when_hidden(qapp, monkeypatch):
-    """The artist isn't left to guess where the section went — whatever
-    `recording_available()` says shows up verbatim in its place."""
-    monkeypatch.setattr(
-        settings_view_mod,
-        "recording_available",
-        lambda: (False, "Voice input is temporarily turned off while it's verified on every platform."),
-    )
+def test_nothing_stands_in_for_the_hidden_voice_section(qapp):
+    """Hidden means gone, not replaced by a note about being hidden.
+
+    A line saying "this is temporarily off" is still something to read
+    and wonder about, for a feature the panel does not offer at all right
+    now — the owner asked for it removed after seeing one. Settings shows
+    no trace of voice until `_VOICE_INPUT_AVAILABLE` says otherwise.
+    """
     view = SettingsView()
     view.show()
 
-    assert view._voice_unavailable_caption.isVisible() is True
-    assert "temporarily turned off" in view._voice_unavailable_caption.text()
+    for label in view.findChildren(QtWidgets.QLabel):
+        if label.isVisible():
+            assert "voice" not in label.text().lower(), label.text()
+            assert "whisper" not in label.text().lower(), label.text()
 
 
 def test_voice_section_shown_when_recording_is_available(qapp, monkeypatch):
@@ -704,5 +705,3 @@ def test_voice_section_shown_when_recording_is_available(qapp, monkeypatch):
     view.show()
 
     assert view._voice_section.isVisible() is True
-    assert view._voice_unavailable_caption.isVisible() is False
-    assert view._voice_unavailable_caption.isVisible() is False

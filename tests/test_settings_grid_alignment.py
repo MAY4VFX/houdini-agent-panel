@@ -31,11 +31,7 @@ def _build(qapp) -> SettingsView:
     # grid stopped mattering: forced back visible here purely so its row
     # still participates in the cross-section alignment checks below, the
     # same way Privacy/Data are force-expanded despite starting collapsed.
-    # `_voice_unavailable_caption` (its replacement in the rail while
-    # hidden) is hidden back so it doesn't add an extra row between Voice
-    # and Privacy that the uniform section-gap check would trip over.
     view._voice_section.setVisible(True)
-    view._voice_unavailable_caption.setVisible(False)
     # Privacy and Data start collapsed (design.md) — force every section
     # open so its body actually gets laid out before we measure it.
     for section in (
