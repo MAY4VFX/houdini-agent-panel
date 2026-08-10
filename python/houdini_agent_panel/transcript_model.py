@@ -70,6 +70,14 @@ class Entry:
     plan: list[PlanEntry] = field(default_factory=list)
     permission: PermissionView | None = None
     activity: ActivityView | None = None
+    #: The non-text blocks the artist sent along with this line — the same
+    #: dicts that went to the agent (`image`/`resource`/`audio`). Only ever
+    #: set on a `user` entry, including its `queued` stage before the turn
+    #: comes (`queue_message` sets it too; `promote_queued` flips the kind
+    #: in place on the same `Entry`, so the field carries straight through)
+    #: — an attachment belongs to the message it was attached to, and
+    #: showing it anywhere else would be a lie about what was sent.
+    attachments: list[dict] = field(default_factory=list)
 
 
 def _plain(value: Any) -> Any:
@@ -90,6 +98,26 @@ def _plain(value: Any) -> Any:
 
 def _plain_list(values: Any) -> list[dict]:
     return [_plain(item) for item in (values or [])]
+
+
+def _attachment_record(block: dict) -> dict:
+    """An attachment as it goes to disk — everything except the payload.
+
+    A sent image is a base64 blob of the whole file; a scene reference can
+    be tens of megabytes. Writing that into `conversations.json` on every
+    autosave would turn a folder of chat history into a folder of pictures,
+    and a restored conversation is a read-only replay — nothing can resend
+    those bytes anyway. What survives is what the artist needs to recognise
+    the message later: what kind of thing it was and what it was called.
+    """
+    record = {"type": str(block.get("type") or "")}
+    uri = block.get("uri") or (block.get("resource") or {}).get("uri")
+    if uri:
+        record["uri"] = str(uri)
+    mime = block.get("mimeType") or (block.get("resource") or {}).get("mimeType")
+    if mime:
+        record["mimeType"] = str(mime)
+    return record
 
 
 #: Marks an entry built from chunks that carried no `messageId`, so a
@@ -155,12 +183,19 @@ class TranscriptModel:
 
     # --- appending -----------------------------------------------------
 
-    def append_user(self, text: str) -> Entry:
-        entry = Entry(kind="user", id=str(uuid.uuid4()), text=text)
+    def append_user(self, text: str, attachments: list[dict] | None = None) -> Entry:
+        entry = Entry(
+            kind="user",
+            id=str(uuid.uuid4()),
+            text=text,
+            attachments=[a for a in (attachments or []) if isinstance(a, dict)],
+        )
         self._entries.append(entry)
         return entry
 
-    def queue_message(self, entry_id: str, text: str) -> Entry:
+    def queue_message(
+        self, entry_id: str, text: str, attachments: list[dict] | None = None
+    ) -> Entry:
         """A message the artist sent while a turn was already running.
 
         Its own entry, not a deferred `append_user` — the feed has to show
@@ -168,9 +203,17 @@ class TranscriptModel:
         actually occupy once sent (`ui/panel.py::_on_enqueue_requested`
         appends it right after whatever entry exists when it's typed, same
         as a live send would). `promote_queued` is what turns it into an
-        ordinary sent message once its turn comes.
+        ordinary sent message once its turn comes — same `Entry`, so
+        `attachments` set here carries straight through: the artist attached
+        a picture, the message is waiting to go out, and it has to look like
+        what it is about to become.
         """
-        entry = Entry(kind="queued", id=entry_id, text=text)
+        entry = Entry(
+            kind="queued",
+            id=entry_id,
+            text=text,
+            attachments=[a for a in (attachments or []) if isinstance(a, dict)],
+        )
         self._entries.append(entry)
         return entry
 
@@ -363,16 +406,23 @@ class TranscriptModel:
         # busy is exactly as much theirs as one they typed while idle, and
         # a hang that loses it is the same bug as the one that motivated
         # persisting a prompt the instant it exists at all (`ui/panel.py::
-        # _persist_conversations_soon`). Only the text round-trips, same as
-        # "user"/"agent"/"error"/"note" — the blocks needed to actually
-        # resend it (attachments in particular) don't survive a restart;
+        # _persist_conversations_soon`). Only the text round-trips in full,
+        # same as "user"/"agent"/"error"/"note" — an attachment survives as
+        # its stripped record (`_attachment_record`: kind and name, never
+        # the payload), not as the block needed to actually resend it;
         # `ui/panel.py::_restore_conversations` rebuilds a plain-text-only
-        # block from this.
-        return [
-            {"kind": entry.kind, "id": entry.id, "text": entry.text}
-            for entry in self._entries
-            if entry.kind in ("user", "agent", "error", "note", "queued") and entry.text
-        ]
+        # block from this for whatever was still queued.
+        records: list[dict] = []
+        for entry in self._entries:
+            if entry.kind not in ("user", "agent", "error", "note", "queued"):
+                continue
+            if not entry.text and not entry.attachments:
+                continue
+            record = {"kind": entry.kind, "id": entry.id, "text": entry.text}
+            if entry.attachments:
+                record["attachments"] = [_attachment_record(a) for a in entry.attachments]
+            records.append(record)
+        return records
 
     def load_records(self, records: list[dict]) -> None:
         self._entries = [
@@ -380,9 +430,12 @@ class TranscriptModel:
                 kind=record.get("kind", "agent"),
                 id=str(record.get("id") or uuid.uuid4()),
                 text=str(record.get("text") or ""),
+                attachments=[
+                    a for a in (record.get("attachments") or []) if isinstance(a, dict)
+                ],
             )
             for record in records or []
-            if isinstance(record, dict) and record.get("text")
+            if isinstance(record, dict) and (record.get("text") or record.get("attachments"))
         ]
         self._by_message_id.clear()
         self._by_tool_call_id.clear()

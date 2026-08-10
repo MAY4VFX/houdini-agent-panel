@@ -18,9 +18,15 @@ from __future__ import annotations
 import re
 
 from ..transcript_model import Entry, TranscriptModel
+from . import attachments as attachment_view
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import ThinkingIndicator
+
+#: The longest edge of an image preview inside a sent message. Big enough to
+#: recognise the render you attached, small enough that three of them don't
+#: push the conversation off the screen.
+_ATTACHMENT_PREVIEW = 168
 
 #: How many pixels from the bottom still count as "at the bottom" — a small
 #: allowance for layout rounding, so auto-scroll doesn't break over one pixel.
@@ -435,6 +441,10 @@ class _MessageRow(QtWidgets.QWidget):
         self._apply_kind_margins(entry.kind)
         self._segments: list[QtWidgets.QWidget] = []
         self._queued_footer: QtWidgets.QWidget | None = None
+        #: The attachment strip, built once if this message carries any. It
+        #: sits ABOVE the prose and outside `_segments`, so streaming text
+        #: rebuilding its own widgets never disturbs it.
+        self._attachments: "_AttachmentStrip | None" = None
         self.update_from(entry)
         if entry.kind == "queued":
             self._queued_footer = self._build_queued_footer()
@@ -477,7 +487,13 @@ class _MessageRow(QtWidgets.QWidget):
                 self._queued_footer.setParent(None)
                 self._queued_footer.deleteLater()
                 self._queued_footer = None
-        segments = _split_markdown_segments(entry.text)
+        self._sync_attachments(entry)
+        # An attachment sent on its own is a complete message. Rendering the
+        # empty text alongside it would draw an empty bubble under the
+        # picture.
+        segments = _split_markdown_segments(entry.text) if entry.text else []
+        if not segments and not entry.attachments:
+            segments = [("text", "")]
 
         # Streaming usually just appends to the last chunk without changing
         # the number or type of chunks — then updating contents in place is
@@ -519,6 +535,29 @@ class _MessageRow(QtWidgets.QWidget):
                 else QtCore.Qt.Alignment()
             )
             self._layout.addWidget(widget, 0, alignment)
+
+    def _sync_attachments(self, entry: Entry) -> None:
+        """Draw what was attached, as part of the message it was attached to.
+
+        Before this, a picture the artist dropped into the composer left the
+        chip row on send and appeared nowhere else: the feed said only what
+        was typed, so scrolling back through a conversation gave no way to
+        tell which of four renders the agent had actually been shown. Built
+        once — attachments never change after the entry exists, streaming
+        text does — and inserted at the top of the layout, ahead of any
+        prose segment.
+        """
+        if not entry.attachments or self._attachments is not None:
+            return
+        # A queued message is the same bubble as a sent one (see
+        # `_apply_kind_margins`/`_apply_kind_style` above) — its attachments
+        # line up the same way, because it's what the artist is about to
+        # say, just not yet.
+        own_message = entry.kind in ("user", "queued")
+        alignment = QtCore.Qt.AlignRight if own_message else QtCore.Qt.Alignment()
+        strip = _AttachmentStrip(entry.attachments, own_message, self)
+        self._attachments = strip
+        self._layout.insertWidget(0, strip, 0, alignment)
 
     def _apply_kind_margins(self, kind: str) -> None:
         # The indent is the visual marker for "a human typed this" — no
@@ -568,6 +607,64 @@ class _MessageRow(QtWidgets.QWidget):
             maximum = max(220, int(self.width() * 0.74))
             for widget in self._segments:
                 widget.setMaximumWidth(maximum)
+
+
+class _AttachmentStrip(QtWidgets.QWidget):
+    """What travelled with a message: previews for images, chips for the rest.
+
+    Read-only by design — this is a record of what was sent, so there is no
+    remove button here (that belongs to the composer, before sending) and no
+    click target: the panel is not a file manager.
+
+    A conversation restored from disk keeps the chip and loses the pixels
+    (`transcript_model._attachment_record` strips the payload rather than
+    write megabytes of base64 into the history), so an image with nothing
+    decodable behind it falls back to its own chip instead of a blank hole.
+    """
+
+    def __init__(self, blocks: list[dict], own_message: bool, parent=None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        if own_message:
+            # The artist's own messages sit against the right edge; their
+            # attachments line up with them rather than drifting left.
+            layout.addStretch(1)
+        for block in blocks:
+            preview = attachment_view.pixmap(block, _ATTACHMENT_PREVIEW)
+            if preview is not None:
+                layout.addWidget(self._image(block, preview))
+            else:
+                layout.addWidget(self._chip(block))
+        if not own_message:
+            layout.addStretch(1)
+
+    def _image(self, block: dict, preview: "QtGui.QPixmap") -> QtWidgets.QWidget:
+        label = QtWidgets.QLabel(self)
+        label.setPixmap(preview)
+        label.setFixedSize(preview.size())
+        label.setToolTip(attachment_view.label(block))
+        label.setStyleSheet("QLabel { border-radius: 8px; }")
+        return label
+
+    def _chip(self, block: dict) -> QtWidgets.QWidget:
+        chip = QtWidgets.QFrame(self)
+        chip.setObjectName("sentAttachment")
+        chip.setStyleSheet(
+            "QFrame#sentAttachment {"
+            " border-radius: 8px;"
+            " background: palette(alternate-base);"
+            "}"
+        )
+        layout = QtWidgets.QHBoxLayout(chip)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+        text = attachment_view.label(block)
+        name = QtWidgets.QLabel(text, chip)
+        name.setToolTip(attachment_view.source_uri(block) or text)
+        layout.addWidget(name)
+        return chip
 
 
 class _ProseBlock(QtWidgets.QTextBrowser):

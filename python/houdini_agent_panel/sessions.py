@@ -51,13 +51,15 @@ class QueuedMessage:
     included — a pasted image or a drag-and-dropped file queued behind a
     busy turn) is never written to `conversations_store` at all, only
     referenced by `ui/panel.py::_drain_queue` while the process is up.
-    `transcript_model.Entry` — the thing that DOES get persisted — has no
-    field for a block list, only `text`; a restart restores a queued
-    message's TEXT (if it had any) as a plain `queued`-kind entry with
-    nothing attached, and an attachment-only queued message (no text)
-    leaves no record at all. Confirmed by reading, not assumed: `.blocks`
-    has exactly one reader in the whole codebase
-    (`ui/panel.py::_drain_queue`), never a writer into the store.
+    `transcript_model.Entry` — the thing that DOES get persisted — keeps a
+    STRIPPED record of any attachment (kind and name, never the base64
+    payload — `transcript_model._attachment_record`) alongside `text`, so a
+    restored `queued`-kind entry still shows its chip; a restart restores
+    only that, never a real block ready to resend. An attachment-only
+    queued message (no text) still leaves a record, same as a sent one.
+    Confirmed by reading, not assumed: `.blocks` has exactly one reader in
+    the whole codebase (`ui/panel.py::_drain_queue`), never a writer into
+    the store.
     """
 
     id: str
