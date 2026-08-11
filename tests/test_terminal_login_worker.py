@@ -423,6 +423,30 @@ def test_build_env_never_leaks_pythonpath_from_houdinis_own_process(monkeypatch)
     assert "PYTHONSTARTUP" not in env
 
 
+def test_build_env_never_leaks_pythonpath_from_the_artists_own_profile(monkeypatch):
+    """The gap the base-only strip missed, caught in review: `capture()`
+    reads the artist's REAL login shell (`.zshenv`/`.zprofile`), and on a
+    VFX machine a studio pipeline's own `PYTHONPATH` in there is routine,
+    not exotic. `shellenv.merged()` widens whatever base it started from
+    with `capture()`'s own result — `capture()` only filters names
+    starting `HAP_`, nothing else — so stripping `SHADOWING_VARS` out of
+    the `os.environ` base alone is not enough: the artist's own
+    `PYTHONPATH` rides back in through the merge afterwards. This mocks
+    `capture()` directly (not `_no_shell`) to stand in for exactly that
+    profile export, and must still come back stripped."""
+    from houdini_agent_panel import shellenv as shellenv_module
+
+    monkeypatch.setattr(
+        shellenv_module, "capture", lambda **_: {"PYTHONPATH": "/studio/pipeline/python"}
+    )
+    monkeypatch.setenv("PYTHONPATH", "/houdini/deps/py3.13")  # Houdini's own, unrelated leak
+
+    ta = TerminalAuth(command=sys.executable, args=[], env={})
+    env = TerminalLoginWorker.build_env(ta)
+
+    assert "PYTHONPATH" not in env
+
+
 def test_build_env_still_carries_the_rest_of_the_os_environment(monkeypatch):
     """The other half of the same change: unlike `client.py`'s agent
     launch, this is NOT narrowed to the ACP SDK's six-variable minimum —

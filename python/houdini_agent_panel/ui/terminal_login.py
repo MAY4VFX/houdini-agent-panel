@@ -809,31 +809,42 @@ class TerminalLoginWorker(Worker):
         (`3e38cea`).
 
         `SHADOWING_VARS` (`PYTHONPATH`/`PYTHONHOME`/`PYTHONSTARTUP`) is
-        stripped from that base regardless, though: Houdini's own package
-        json writes `PYTHONPATH` into `os.environ` for the PANEL's own
-        benefit (`houdini_package.py`), same value this method's own
-        caller never intends for a login CLI (or `uvx`, or nothing at
-        all, for the in-process HTTP case). One caller already remembered
-        to pop it back out after calling this (`self_update.py`, with the
-        report of a stale panel importing off a shadowed `PYTHONPATH` to
-        prove it necessary) — another one currently in this codebase does
-        not (`bugreport_worker.py`, `SimpleNamespace(env={})` straight
-        into `post_report`). Stripping it HERE, once, makes that
-        forgettable per-caller step structurally unnecessary instead of
-        merely unlikely to be missed — the exact shape of bug the fx MCP
-        server just went a week silently broken from (`shellenv.py`'s own
-        fix), except this is the one spot that would hit it for any
-        terminal-login command that happens to be a Python program,
-        should one ever join the roughly forty agents in the ACP registry
-        that aren't today.
+        stripped from the RESULT, as the very last step below — not from
+        `os.environ` up front. Houdini's own package json writes
+        `PYTHONPATH` into `os.environ` for the PANEL's own benefit
+        (`houdini_package.py`), same value this method's own caller never
+        intends for a login CLI (or `uvx`, or nothing at all, for the
+        in-process HTTP case) — but `shellenv.merged` widens whatever base
+        it's given with the artist's own login shell afterwards
+        (`capture()` only filters names starting `HAP_`, nothing else),
+        and on a real VFX machine a studio pipeline's `PYTHONPATH` in
+        `.zshenv`/`.zprofile` is routine, not exotic. Stripping the base
+        alone would have let exactly that back in through `capture()` —
+        caught in review, before it shipped, by reproducing it: a fake
+        profile exporting its own `PYTHONPATH` came back out of `merged()`
+        untouched even with Houdini's leaked one gone. One caller already
+        knew this the hard way and stripped AFTER calling this
+        (`self_update.py`, with the report of a stale panel importing off
+        a shadowed `PYTHONPATH` to prove it necessary) — another one
+        currently in this codebase does not (`bugreport_worker.py`,
+        `SimpleNamespace(env={})` straight into `post_report`). Doing it
+        HERE, once, on the finished result, makes that forgettable
+        per-caller step structurally unnecessary instead of merely
+        unlikely to be missed — the exact shape of bug the fx MCP server
+        just went a week silently broken from (`shellenv.py`'s own fix),
+        except this is the one spot that would hit it for any
+        terminal-login command that happens to be a Python program, should
+        one ever join the roughly forty agents in the ACP registry that
+        aren't today.
         """
         from .. import proxy as proxy_module
         from .. import settings as settings_module
 
         current_settings = settings_module.load()
-        base = {k: v for k, v in os.environ.items() if k not in mcp_runtime.SHADOWING_VARS}
-        env = shellenv.merged(base, proxy_module.child_env(current_settings))
+        env = shellenv.merged(dict(os.environ), proxy_module.child_env(current_settings))
         env.update(terminal_auth.env)
+        for name in mcp_runtime.SHADOWING_VARS:
+            env.pop(name, None)
         return env
 
     def work(self) -> None:
