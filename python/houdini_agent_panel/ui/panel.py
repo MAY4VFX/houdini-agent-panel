@@ -684,6 +684,27 @@ class AgentPanel(QtWidgets.QWidget):
 
         _live_panels_for(self._agent_id).add(self)
 
+        # Houdini quitting the whole process is NOT the same event as this
+        # one tab closing. `onDestroyInterface()` -> `shutdown()` — the only
+        # other place this class writes to disk on its own initiative — is
+        # documented (and confirmed on a real owner's machine: "panel tab
+        # closing" never once appeared in `panel.log`, across every one of
+        # dozens of restarts) to fire only for a tab explicitly closed while
+        # Houdini stays open, never for Houdini quitting outright. Meanwhile
+        # `AcpClient.__init__` (client.py) already connects its OWN cleanup
+        # to this exact signal, to cancel the live turn and tear the
+        # connection down — and it has no idea this panel or its on-disk
+        # store exist. Without a persist connected here too, that cancel was
+        # the last thing that happened to a conversation whose newest answer
+        # had only ever lived in memory. The text itself is safe regardless
+        # of ordering between the two connections — `apply_chunk` (transcript_
+        # model.py) writes straight into the model as each chunk arrives, not
+        # through this call — this is only about the write to disk actually
+        # happening before the interpreter goes away.
+        app = QtCore.QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._on_about_to_quit)
+
         # Boot is deferred to the next event loop pass: Houdini waits for the
         # widget to return from onCreateInterface, and anything done before
         # that return delays the tab opening.
@@ -4869,6 +4890,17 @@ class AgentPanel(QtWidgets.QWidget):
 
     # --- conversations that outlive the agent and Houdini -----------------
 
+    def _on_about_to_quit(self) -> None:
+        """`QCoreApplication.aboutToQuit` — see the connection in `__init__`
+        for why this exists at all. Logged as its own line, the same way
+        `shutdown()` logs "panel tab closing": a future investigation should
+        be able to tell "Houdini quit, and this ran" apart from "a tab
+        closed, and `shutdown()` ran" apart from neither happening (a hard
+        kill), from the log alone.
+        """
+        _log.info("app quitting — persisting conversations before Houdini closes")
+        self._persist_conversations()
+
     def _persist_conversations(self) -> None:
         """Write every transcript we have to disk, right now, synchronously.
 
@@ -4882,11 +4914,20 @@ class AgentPanel(QtWidgets.QWidget):
         call sites on purpose: those are already single, deliberate events,
         and `shutdown()` in particular must not leave anything to a timer
         that a process about to go away may never get to run.
+
+        Logs a one-line summary either way (count of conversations on disk
+        afterwards, how many of THIS pass actually changed something) —
+        there used to be nothing here at all, and a real disappearance
+        (may-hub, 2026-08-11) could only be diagnosed by reading
+        `conversations.json` by hand and guessing at timestamps. Counts
+        only, same rule as everywhere else in this file: never a title,
+        never a session id, never a word of what was said.
         """
         try:
             from .. import conversations_store as store
 
             existing = {c.id: c for c in store.load()}
+            touched = 0
             for session_id, model in self._models.items():
                 if session_id == "__idle__":
                     continue
@@ -4963,14 +5004,19 @@ class AgentPanel(QtWidgets.QWidget):
                 conversation.entries = records
                 if changed:
                     conversation.updated_at = time.time()
+                    touched += 1
                 existing[conversation_id] = conversation
             current = self._current_session()
             active_id = (
                 self._conversation_ids.get(current.session_id) if current is not None else None
             )
             store.save(list(existing.values()), active_id=active_id)
-        except Exception:  # noqa: BLE001 - history is never worth a crash
-            pass
+            _log.info(
+                "persisted conversations: %d stored, %d changed this pass",
+                len(existing), touched,
+            )
+        except Exception as exc:  # noqa: BLE001 - history is never worth a crash
+            _log.warning("persisting conversations failed: %r", exc)
 
     def _persist_conversations_soon(self) -> None:
         """Persist, coalescing a burst of calls into at most one extra write.
