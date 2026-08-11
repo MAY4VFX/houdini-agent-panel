@@ -2953,3 +2953,142 @@ Anthropic's billing stance here has changed more than once in a few
 months; treat anything written here as dated the moment it's read, and
 re-check the support article directly (not secondary coverage of it)
 before relying on this again.
+
+## 30. `strictMcpConfig` / `settingSources` — what an artist can turn off without touching sign-in
+
+Replaces `isolate_agent_config` (a Settings toggle that redirected
+`CLAUDE_CONFIG_DIR` for the whole launch), which shipped, then broke the
+owner's real sign-in on his own machine the same day: `CLAUDE_CONFIG_DIR`
+also governs where `claude`'s own credentials live, so redirecting it took
+a real `claude login`'s session down with it. The owner's own words on
+what he'd actually asked for: he wanted the ability to control whether the
+agent sees the HOST's own MCP servers and skills — not the whole account
+isolated. This section documents the two options that do exactly that
+without touching authentication at all.
+
+### The exact adapter mechanism, read directly, not assumed
+
+`claude-agent-acp@0.66.0`'s own `dist/acp-agent.js`
+(`~/.npm/_npx/3eb23f87e75affb3/node_modules/@agentclientprotocol/
+claude-agent-acp/dist/acp-agent.js` — cite the version: line numbers move
+between releases, and a different session citing this file may see
+different ones for the identical logic if its cache holds a different
+version):
+
+```js
+// line 4377-4378
+const sessionMeta = params._meta;
+const userProvidedOptions = sessionMeta?.claudeCode?.options;
+
+// line 4429-4433
+const options = {
+    systemPrompt,
+    settingSources: ["user", "project", "local"],
+    ...(thinking !== undefined && { thinking }),
+    ...userProvidedOptions,
+    // ...
+    mcpServers: { ...(userProvidedOptions?.mcpServers || {}), ...mcpServers },   // line 4450
+```
+
+So: whatever the panel sends in `session/new`'s `_meta.claudeCode.options`
+is read once (`userProvidedOptions`), then spread into `options` AFTER the
+adapter's own default `settingSources` (line 4431 default, line 4433
+spread) — a later spread key always wins over an earlier one in object
+literal semantics, so `userProvidedOptions.settingSources`, if the panel
+sent one, replaces the default outright. Same mechanism covers
+`strictMcpConfig`: it isn't touched anywhere else in `options`, so it
+flows from `userProvidedOptions` straight through unmodified. No patch to
+the adapter is needed — this is its own existing, intentional extension
+point, not a workaround.
+
+`extraArgs` (line 4476-4479, `...userProvidedOptions?.extraArgs`) is the
+same mechanism for any CLI flag with no dedicated `options` key — not
+needed for either option here (both have one), noted for whoever needs a
+third one later.
+
+The Claude Agent SDK itself (`@anthropic-ai/claude-agent-sdk`, wrapped by
+this adapter) turns `settingSources`/`strictMcpConfig`/`mcpServers` into
+`--setting-sources=<a,b,c>` / `--strict-mcp-config` / `--mcp-config
+<json>` CLI flags for the real `claude` binary — the same translation
+already documented for the default case (`docs/facts/acp-sdk.md`, the
+`fx server clears PYTHONPATH` incident's own investigation).
+
+### The two options `houdini_agent_panel` sends (`client.py::claude_session_meta`)
+
+- **`claude_show_host_mcp_servers` off → `{"strictMcpConfig": true}`.**
+  Only servers passed explicitly in THIS session's `mcpServers` (i.e.
+  `fxhoudini` — `scene.mcp_servers()`, always sent regardless of this
+  toggle) get connected. Anything configured in the artist's own account
+  (`~/.claude.json`'s `mcpServers`, loaded because `settingSources`
+  includes `user`) is ignored for this session.
+
+- **`claude_show_host_skills` off → `{"settingSources": ["project",
+  "local"]}`.** NOT `[]`. Dropping only `"user"` is load-bearing: `user`
+  is the scope that loads the artist's personal skill/plugin marketplace
+  and `~/.claude/settings.json`; `project` is the scope
+  `context_files.py::ensure_context_files` writes `AGENTS.md`/`CLAUDE.md`
+  into, next to the scene. An artist's own `.mcp.json`/`.claude/
+  settings.json` living in the SAME project folder would also be read
+  under `project` — accepted, not a concern raised here; the one property
+  that matters is that Houdini's own AGENTS.md keeps reaching the model.
+  `local` is left in too (untested cost to removing it; no reason found
+  to).
+
+Both default to their prior always-on behavior (`True`) — no surprise on
+upgrade. `client.py::claude_session_meta` returns `None` (send nothing)
+when both are at default, and unconditionally for any agent id other than
+`claude-acp` — neither option is verified for the other five agents.
+
+### Live verification, 2026-08-11, against the owner's own running fx server
+
+Read-only toward the owner's live Houdini (a separate, throwaway agent
+process this probe spawned itself, pinned to the already-known live fx
+port 8100 via a read-only `mcp.health` HTTP check — the owner's own panel
+session and scene were never touched). `HAP_DATA_DIR` set to a throwaway
+directory first, per this project's own rule for any such script.
+
+Sent `_meta` with BOTH options off — the strictest combination —
+alongside a real `fxhoudini` MCP server entry and a real project directory
+carrying this panel's own generated `AGENTS.md`/`CLAUDE.md`. Asked the
+agent, in one turn, to: call `get_houdini_connection_status`; say whether
+it has any MCP tool named after `puppeteer`/`playwright`/`browsermcp` (all
+present in this machine's own `~/.claude.json`, confirmed in an earlier
+investigation); and quote its own AGENTS.md's PDG-cook warning heading.
+Verbatim reply:
+
+```
+1. `houdini_version`: 22.0.368.
+2. Нет — среди доступных MCP-инструментов нет ни одного с `puppeteer`,
+   `playwright` или `browsermcp` в имени (подключён только сервер
+   `fxhoudini`).
+3. Файла AGENTS.md у меня нет — инструкции лежат в
+   `/Users/may/hap-verify-scratch-project/CLAUDE.md`, и заголовок там:
+   `## Say so before a synchronous PDG/TOP cook`.
+```
+
+`tool_calls` on the session: three `ToolSearch` calls, then
+`mcp__fxhoudini__get_houdini_connection_status` — confirming `fxhoudini`
+connected and answered with the real, live Houdini's own version
+(`22.0.368`, matching the actual running `houdinifx` process). `stop_reason:
+end_turn`, no `auth_required`, no error — the whole round trip succeeded
+using whatever ambient credentials this machine already had, with neither
+option touching them.
+
+This confirms all four things the design needed proof of, not reasoning
+about: `fxhoudini` still connects with host MCP servers turned off (it's
+passed explicitly, unaffected by `strictMcpConfig`); the host's OTHER MCP
+servers are genuinely gone from the session, not merely deprioritized;
+`AGENTS.md`/`CLAUDE.md` still reaches the model with `settingSources`
+missing `user` (`project` alone carries it); and authentication survives
+both toggles off at once. The fourth point closes the actual worry this
+whole feature exists to answer.
+
+Not established: whether `local` contributes anything real for this
+project's own use (nothing found here needs it specifically; kept because
+removing it was never asked for and its cost is unmeasured, not because a
+positive case for keeping it was found). Whether an artist's own
+project-level `.mcp.json`/`.claude/settings.json`, if one exists in the
+same scene folder, could reintroduce something the artist meant to turn
+off via `claude_show_host_skills` — plausible, given `project` scope
+covers both, not tested (no such file existed in the verification project
+directory).

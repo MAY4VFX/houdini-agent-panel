@@ -175,17 +175,38 @@ class Settings:
     #: Codex/Gemini/Grok/Kimi — not yet established either way) has
     #: somewhere to go without a second field.
     agent_oauth_tokens: dict[str, dict[str, str]] = field(default_factory=dict)
-    #: Launch agents against a panel-owned config directory instead of the
-    #: artist's real one (`runtime.py::_with_config_isolation`,
-    #: `paths.agent_config_dir`). Off by default: today's behavior — every
-    #: agent sees the artist's own account config exactly as a terminal
-    #: launch would — is what artists already have and expect, and turning
-    #: it off is the surprising direction. Currently only `claude-acp` has a
-    #: documented variable for this (`CLAUDE_CONFIG_DIR`); every other agent
-    #: ignores the setting entirely rather than have us guess at a mechanism
-    #: we haven't verified (design.md: "the agent doesn't support it — the
-    #: control doesn't get drawn").
-    isolate_agent_config: bool = False
+    #: Two per-artist toggles for `claude-acp` specifically, sent as
+    #: `_meta.claudeCode.options` on `session/new`/`session/load`
+    #: (`client.py::claude_session_meta`, docs/facts/acp-sdk.md §30). Both
+    #: on by default — today's behavior, no surprise on upgrade.
+    #:
+    #: `claude_show_host_mcp_servers` off sends `strictMcpConfig: true`:
+    #: only the servers THIS panel passes explicitly (`fxhoudini`) are
+    #: connected, not whatever the artist's own account has configured
+    #: globally (`~/.claude.json`) — the fix for a personal MCP server, or
+    #: one that happens to share a name, sitting in front of this panel's
+    #: own tools.
+    #:
+    #: `claude_show_host_skills` off sends `settingSources: ["project",
+    #: "local"]` — deliberately NOT an empty list, and NOT `[]`-by-
+    #: omission either: dropping `"user"` only, keeping `"project"`, is
+    #: what still lets Claude read the account-wide skill/plugin
+    #: marketplace out of the picture while leaving `AGENTS.md`/`CLAUDE.md`
+    #: (`context_files.py`, written next to the scene — a PROJECT-scoped
+    #: file) reaching the agent. An empty list would also blind it to
+    #: being inside Houdini at all — verified live, not by source alone
+    #: (docs/facts/acp-sdk.md §30).
+    #:
+    #: Deliberately replaces the removed `isolate_agent_config`
+    #: (`CLAUDE_CONFIG_DIR`), which the owner rejected live: redirecting
+    #: the whole config directory took the artist's sign-in with it, since
+    #: credentials from a real `claude login` live in that same directory.
+    #: These two options touch neither authentication mechanism this panel
+    #: uses (`CLAUDE_CODE_OAUTH_TOKEN` is an environment variable, read
+    #: regardless of either setting) — that was the actual ask: what the
+    #: agent can SEE, not where it signs in from.
+    claude_show_host_mcp_servers: bool = True
+    claude_show_host_skills: bool = True
 
     # --- serialization
 

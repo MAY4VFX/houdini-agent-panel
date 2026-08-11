@@ -49,7 +49,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 
@@ -101,6 +103,7 @@ from houdini_agent_panel import (  # noqa: E402
     scene,
     sessions,
     settings as settings_mod,
+    shellenv,
 )
 from houdini_agent_panel.client import AcpClient  # noqa: E402
 from houdini_agent_panel.ui import panel as panel_mod  # noqa: E402
@@ -518,18 +521,35 @@ def check_captured_token_signs_in_alone(agent_id: str) -> str:
     so its own real work never runs.
 
     This isolates the claim that's actually ours: with NO ambient Claude
-    login reachable at all (`isolate_agent_config=True` — the agent gets a
-    fresh, empty `CLAUDE_CONFIG_DIR` of its own, see runtime.py::
-    _CONFIG_DIR_ENV_VAR) and nothing else in `agent_oauth_tokens` but the
-    one captured token, the agent still connects and opens a session. The
-    only way that can happen is the injection actually reaching the
+    login reachable at all and nothing else in `agent_oauth_tokens` but
+    the one captured token, the agent still connects and opens a session.
+    The only way that can happen is the injection actually reaching the
     process — there is nothing else left for it to have authenticated
     with.
 
-    Claude-specific by construction (`CLAUDE_CODE_OAUTH_TOKEN`/
-    `isolate_agent_config` are both verified for `claude-acp` only,
-    docs/facts/acp-sdk.md §21) — skips with a stated reason for any other
-    agent id, not silently.
+    "No ambient login reachable" used to mean `isolate_agent_config` — a
+    Settings toggle that redirected `CLAUDE_CONFIG_DIR` for every launch.
+    Removed (not by this check's own choice): it broke the owner's real
+    sign-in on a real machine, because a real `claude login`'s credentials
+    live in that same directory, and the owner never asked for the whole
+    account isolated — he asked whether the agent can see MCP servers and
+    skills, which `Settings.claude_show_host_mcp_servers`/
+    `claude_show_host_skills` now answer without touching auth at all
+    (client.py::claude_session_meta). Neither of those helps THIS check —
+    they gate `strictMcpConfig`/`settingSources`, not where credentials
+    live — so this still needs some way to defeat a real `~/.claude` on
+    the test machine for its own assertion to mean anything, without
+    bringing the rejected product feature back as something Settings
+    exposes. Monkeypatches `shellenv.capture` for the duration of this one
+    check only — the same technique `test_terminal_login_worker.py::
+    _no_shell` already uses to keep a real machine's shell profile out of
+    a unit test — so the composed launch env carries a `CLAUDE_CONFIG_DIR`
+    pointed at a throwaway directory instead of whatever the real login
+    shell would report. Restored immediately after, always.
+
+    Claude-specific by construction (`CLAUDE_CODE_OAUTH_TOKEN` is verified
+    for `claude-acp` only, docs/facts/acp-sdk.md §21) — skips with a
+    stated reason for any other agent id, not silently.
 
     The token is never written into this repository, fixture or literal,
     even a fake-looking one — read from `HAP_E2E_CLAUDE_TOKEN` at the
@@ -540,36 +560,46 @@ def check_captured_token_signs_in_alone(agent_id: str) -> str:
     """
     if agent_id != "claude-acp":
         return (
-            f"{_SKIP_PREFIX}CLAUDE_CODE_OAUTH_TOKEN/isolate_agent_config are "
-            "claude-acp-specific; nothing verified here applies to this agent"
+            f"{_SKIP_PREFIX}CLAUDE_CODE_OAUTH_TOKEN is claude-acp-specific; "
+            "nothing verified here applies to this agent"
         )
     token = os.environ.get("HAP_E2E_CLAUDE_TOKEN")
     if not token:
         return f"{_SKIP_PREFIX}HAP_E2E_CLAUDE_TOKEN is not set, nothing to inject"
 
+    tmp_config_dir = tempfile.mkdtemp(prefix="hap-e2e-claude-config-")
+    original_capture = shellenv.capture
     original = settings_mod.load()
     isolated = settings_mod.Settings(
         default_agent=agent_id,
         autostart_agent=True,
         agent_oauth_tokens={agent_id: {"CLAUDE_CODE_OAUTH_TOKEN": token}},
-        isolate_agent_config=True,
     )
     settings_mod.save(isolated)
+    # Test-only, not a product path: no real shell is asked, no real
+    # profile is read — `merged()` (client.py::do_start) still calls
+    # `shellenv.capture()` by name, so replacing the function object
+    # itself is what reaches it, same as the module's own `_cache` would
+    # if a real subprocess had actually run.
+    shellenv.capture = lambda **_: {"CLAUDE_CONFIG_DIR": tmp_config_dir}
     try:
         with Harness(agent_id) as h:
             h.connect()
             session_id = h.open_session()
             return (
-                f"session {session_id[:16]}… opened with an isolated "
-                "CLAUDE_CONFIG_DIR and only the captured token to authenticate with"
+                f"session {session_id[:16]}… opened with a throwaway "
+                "CLAUDE_CONFIG_DIR (test-only, not a Settings toggle) and "
+                "only the captured token to authenticate with"
             )
     finally:
+        shellenv.capture = original_capture
         # Whatever the machine's owner actually has restored exactly as
         # `Harness.__exit__` already restores default_agent/autostart_agent
-        # for every other check — this additionally restores the fields
-        # this check itself overwrote (agent_oauth_tokens, isolate_agent_
-        # config), which that narrower restore does not touch.
+        # for every other check — this additionally restores the field
+        # this check itself overwrote (agent_oauth_tokens), which that
+        # narrower restore does not touch.
         settings_mod.save(original)
+        shutil.rmtree(tmp_config_dir, ignore_errors=True)
 
 
 def check_two_panels_share_one_agent(agent_id: str) -> str:

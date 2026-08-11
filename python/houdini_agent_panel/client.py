@@ -300,6 +300,44 @@ def _build_mcp_servers(entries: list[dict]) -> list[McpServerStdio]:
     ]
 
 
+#: `settingSources` value for `claude_show_host_skills` off — NOT `[]`.
+#: Dropping `"user"` only, keeping `"project"`, is what still lets Claude
+#: read the artist's account-wide skill/plugin marketplace out of the
+#: picture while leaving `AGENTS.md`/`CLAUDE.md` (`context_files.py`,
+#: written next to the SCENE — a project-scoped file, not account-scoped)
+#: reaching the agent. An empty list would also blind it to being inside
+#: Houdini at all — the one feature this whole mechanism must not cost
+#: (docs/facts/acp-sdk.md §30, verified live, not by source reading alone).
+_SETTING_SOURCES_WITHOUT_USER = ["project", "local"]
+
+
+def claude_session_meta(agent_id: str, settings: Any) -> dict[str, Any] | None:
+    """`_meta.claudeCode.options` for `session/new`/`session/load` —
+    `Settings.claude_show_host_mcp_servers`/`claude_show_host_skills`
+    turned into the two options `claude-agent-acp` actually reads there
+    (`sessionMeta?.claudeCode?.options`, `dist/acp-agent.js`, docs/facts/
+    acp-sdk.md §30). `None` when both are at their default (on) — sending
+    nothing preserves today's behavior exactly, rather than re-asserting
+    the SDK's own default.
+
+    `claude-acp` only. Every other agent id gets `None` unconditionally:
+    these two options are verified for this one adapter, not guessed at
+    for the other five (design.md: "the agent doesn't support it — the
+    control doesn't get drawn" extends to what we SEND, not only what we
+    draw).
+    """
+    if agent_id != "claude-acp":
+        return None
+    options: dict[str, Any] = {}
+    if not getattr(settings, "claude_show_host_mcp_servers", True):
+        options["strictMcpConfig"] = True
+    if not getattr(settings, "claude_show_host_skills", True):
+        options["settingSources"] = list(_SETTING_SOURCES_WITHOUT_USER)
+    if not options:
+        return None
+    return {"claudeCode": {"options": options}}
+
+
 def _build_content_block(block: dict) -> Any:
     """Build an ACP content block from a `Composer.submitted` dict."""
     kind = block.get("type")
@@ -926,13 +964,15 @@ class AcpWorker(QtCore.QThread):
         methods = list(self._agent_info.auth_methods) if self._agent_info else []
         self.auth_required.emit(methods)
 
-    async def do_new_session(self, cwd: str, mcp_servers: list[dict]) -> None:
+    async def do_new_session(
+        self, cwd: str, mcp_servers: list[dict], session_meta: dict[str, Any] | None = None
+    ) -> None:
         if self._conn is None:
             self.error.emit("", "no connection to the agent")
             return
         try:
             servers = _build_mcp_servers(mcp_servers)
-            response = await self._conn.new_session(cwd=cwd, mcp_servers=servers)
+            response = await self._conn.new_session(cwd=cwd, mcp_servers=servers, **(session_meta or {}))
         except acp.RequestError as exc:
             if not self._emit_if_auth_required(exc):
                 self.error.emit("", str(exc))
@@ -970,7 +1010,13 @@ class AcpWorker(QtCore.QThread):
         if options:
             self.config_options_changed.emit(response.session_id, options)
 
-    async def do_load_session(self, session_id: str, cwd: str, mcp_servers: list[dict]) -> None:
+    async def do_load_session(
+        self,
+        session_id: str,
+        cwd: str,
+        mcp_servers: list[dict],
+        session_meta: dict[str, Any] | None = None,
+    ) -> None:
         """`session/load` — the protocol's own way to resume a session, as
         opposed to `conversations_store.py`'s read-only replay off disk.
 
@@ -984,6 +1030,14 @@ class AcpWorker(QtCore.QThread):
         `do_new_session` — is not new, it's the one WE pass in) through the
         ordinary per-kind signals. By the time `session_loaded` fires, that
         model already IS the resumed transcript.
+
+        `session_meta` — same `claude_session_meta(...)` `do_new_session`
+        gets, and needed here too: `claude-agent-acp`'s own `loadSession`
+        forwards `params._meta` into the identical session-creation path
+        `session/new` uses (`getOrCreateSession` -> `createSession`,
+        confirmed by reading the adapter, docs/facts/acp-sdk.md §30) — a
+        resumed session must not silently regain the host's MCP servers or
+        skills just because it came back through this call instead.
         """
         if self._conn is None:
             self.session_load_failed.emit(session_id, "no connection to the agent")
@@ -992,7 +1046,7 @@ class AcpWorker(QtCore.QThread):
         try:
             servers = _build_mcp_servers(mcp_servers)
             response = await self._conn.load_session(
-                cwd=cwd, session_id=session_id, mcp_servers=servers
+                cwd=cwd, session_id=session_id, mcp_servers=servers, **(session_meta or {})
             )
         except acp.RequestError as exc:
             _log.warning("session/load failed: session=%s error=%s", session_id, exc)
@@ -1511,15 +1565,24 @@ class AcpClient(QtCore.QObject):
         out."""
         self._submit(lambda w: w.do_logout())
 
-    def new_session(self, *, cwd: str, mcp_servers: list[dict]) -> None:
-        self._submit(lambda w: w.do_new_session(cwd, mcp_servers))
+    def new_session(
+        self, *, cwd: str, mcp_servers: list[dict], session_meta: dict[str, Any] | None = None
+    ) -> None:
+        self._submit(lambda w: w.do_new_session(cwd, mcp_servers, session_meta))
 
-    def load_session(self, *, session_id: str, cwd: str, mcp_servers: list[dict]) -> None:
+    def load_session(
+        self,
+        *,
+        session_id: str,
+        cwd: str,
+        mcp_servers: list[dict],
+        session_meta: dict[str, Any] | None = None,
+    ) -> None:
         """Resume a session the agent may still remember — only meaningful
         when `agent_info().supports_load_session` and `session_id` is one
         this same agent actually issued (see `ui/panel.py::AgentPanel.
         _adopt_or_resume`, the only caller)."""
-        self._submit(lambda w: w.do_load_session(session_id, cwd, mcp_servers))
+        self._submit(lambda w: w.do_load_session(session_id, cwd, mcp_servers, session_meta))
 
     def prompt(self, session_id: str, blocks: list[dict]) -> None:
         self._submit(lambda w: w.do_prompt(session_id, blocks))

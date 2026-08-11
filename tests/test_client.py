@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from houdini_agent_panel.client import AcpClient
+from houdini_agent_panel.client import AcpClient, claude_session_meta
+from houdini_agent_panel.settings import Settings
 from houdini_agent_panel.ui.qt import QtCore
 
 FAKE_AGENT = Path(__file__).parent / "fake_agent.py"
@@ -282,6 +283,126 @@ def test_load_session_failure_is_reported_not_silent(qapp, make_client, tmp_path
     assert not loaded.calls
     assert load_failed.calls[0][0] == session_id
     assert load_failed.calls[0][1]  # a real message, not an empty string
+
+
+# --- claude_session_meta ------------------------------------------------------
+#
+# `_meta.claudeCode.options` for `session/new`/`session/load` —
+# `Settings.claude_show_host_mcp_servers`/`claude_show_host_skills`
+# (both on by default) turned into the two options `claude-agent-acp`
+# reads, per the owner's live-corrected design: two independent switches
+# over what the agent can SEE, replacing the earlier `isolate_agent_config`
+# (redirecting `CLAUDE_CONFIG_DIR`), which broke real sign-in on a real
+# machine because credentials for a real `claude login` live in that same
+# directory.
+
+
+def test_claude_session_meta_is_none_at_defaults():
+    """Both toggles on (the default) sends nothing — preserving today's
+    behavior exactly, rather than re-asserting the SDK's own default."""
+    assert claude_session_meta("claude-acp", Settings()) is None
+
+
+def test_claude_session_meta_mcp_off_sends_strict_mcp_config():
+    meta = claude_session_meta(
+        "claude-acp", Settings(claude_show_host_mcp_servers=False)
+    )
+    assert meta == {"claudeCode": {"options": {"strictMcpConfig": True}}}
+
+
+def test_claude_session_meta_skills_off_keeps_project_scope():
+    """NOT an empty list: dropping only `user` is what still lets
+    `AGENTS.md`/`CLAUDE.md` (`context_files.py`, project-scoped, written
+    next to the scene) reach the agent while the account-wide marketplace
+    is left out — the exact distinction the owner asked for by name."""
+    meta = claude_session_meta("claude-acp", Settings(claude_show_host_skills=False))
+    assert meta == {"claudeCode": {"options": {"settingSources": ["project", "local"]}}}
+    assert "user" not in meta["claudeCode"]["options"]["settingSources"]
+    assert "project" in meta["claudeCode"]["options"]["settingSources"]
+
+
+def test_claude_session_meta_both_off_combine_in_one_options_dict():
+    meta = claude_session_meta(
+        "claude-acp",
+        Settings(claude_show_host_mcp_servers=False, claude_show_host_skills=False),
+    )
+    assert meta == {
+        "claudeCode": {
+            "options": {"strictMcpConfig": True, "settingSources": ["project", "local"]}
+        }
+    }
+
+
+def test_claude_session_meta_is_a_no_op_for_any_other_agent():
+    """design.md: the agent doesn't support it — the control doesn't get
+    drawn extends to what we SEND, not only what we draw. Neither toggle
+    is verified for any agent but claude-acp."""
+    settings = Settings(claude_show_host_mcp_servers=False, claude_show_host_skills=False)
+    assert claude_session_meta("codex-acp", settings) is None
+    assert claude_session_meta("some-other-agent", settings) is None
+
+
+# --- claude_session_meta actually reaches the wire ----------------------------
+#
+# The tests above prove the function; these prove `do_new_session`/`do_load_
+# session` actually FORWARD what it builds — through a real ACP round trip
+# with `fake_agent.py`, not a mock of `self._conn`. `fake_agent.py`'s
+# `new_session`/`load_session` fold `**kwargs` (exactly `_meta` unpacked,
+# `acp/router.py`) back into something the test can read, since there is no
+# other observable for "what actually crossed the wire" versus "what the
+# client thought it sent".
+
+
+def test_new_session_forwards_claude_session_meta_to_the_wire(qapp, make_client, tmp_path):
+    client = make_client()
+    _connect(qapp, client, "stream", tmp_path)
+
+    started = _Recorder(client.session_started)
+    meta = claude_session_meta("claude-acp", Settings(claude_show_host_mcp_servers=False))
+    client.new_session(cwd=str(tmp_path), mcp_servers=[], session_meta=meta)
+    _pump_until(qapp, lambda: started.calls, "session/new to answer")
+
+    session_id, _state = started.calls[0]
+    assert '"strictMcpConfig": true' in session_id.split("|meta=", 1)[1]
+
+
+def test_new_session_sends_nothing_extra_when_session_meta_is_none(qapp, make_client, tmp_path):
+    """The default path — `session_meta=None`, same as every other caller
+    in this file — must not grow a `|meta=` suffix at all."""
+    client = make_client()
+    _connect(qapp, client, "stream", tmp_path)
+
+    started = _Recorder(client.session_started)
+    client.new_session(cwd=str(tmp_path), mcp_servers=[], session_meta=None)
+    _pump_until(qapp, lambda: started.calls, "session/new to answer")
+
+    session_id, _state = started.calls[0]
+    assert "|meta=" not in session_id
+
+
+def test_load_session_forwards_claude_session_meta_to_the_wire(qapp, make_client, tmp_path):
+    client = make_client()
+    _connect(qapp, client, "load", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    messages = _Recorder(client.message_chunk)
+    meta = claude_session_meta("claude-acp", Settings(claude_show_host_skills=False))
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[], session_meta=meta)
+    # Waits for the meta chunk itself, not `session_loaded` — the two are
+    # separate queued cross-thread signals for separate JSON-RPC messages
+    # (a notification, then the response), and waiting on the wrong one
+    # raced: `session_loaded` could observably fire before this chunk's own
+    # queued delivery reached the recorder, even though the agent sends
+    # both notifications before ever answering (per spec, and per fake_
+    # agent.py's own two sequential `await session_update` calls).
+    _pump_until(
+        qapp,
+        lambda: any(c[0] == session_id and "meta=" in c[2] for c in messages.calls),
+        "the meta replay chunk to arrive",
+    )
+
+    replayed = [c for c in messages.calls if c[0] == session_id and "meta=" in c[2]]
+    assert '"settingSources": ["project", "local"]' in replayed[0][2]
 
 
 # --- auth_required -----------------------------------------------------------

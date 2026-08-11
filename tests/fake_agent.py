@@ -29,6 +29,7 @@ Behavior is selected via the ``FAKE_AGENT_SCENARIO`` environment variable:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import acp
@@ -132,6 +133,15 @@ class FakeAgent:
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
         self._session_counter += 1
         session_id = f"sess-{self._session_counter}"
+        # `**kwargs` here is exactly `_meta` unpacked (acp/router.py:104-107:
+        # `params.update(meta)`) — the ONLY way a test can see what actually
+        # crossed the wire, as opposed to what the client THOUGHT it sent.
+        # Folded into the session_id, which every scenario already returns
+        # and every test already reads, rather than a new signal: appended
+        # only when kwargs is non-empty, so no scenario that never sends any
+        # (the vast majority) changes shape.
+        if kwargs:
+            session_id += f"|meta={json.dumps(kwargs, sort_keys=True)}"
         modes = None
         if SCENARIO in ("modes", "modes-no-echo"):
             modes = SessionModeState(
@@ -159,6 +169,16 @@ class FakeAgent:
         await self._client.session_update(
             session_id=session_id, update=_message_chunk("earlier: rotor pyro setup", "replay-1")
         )
+        if kwargs:
+            # Same reasoning as `new_session` above — `session/load` has no
+            # spare response field to fold this into (`LoadSessionResponse`
+            # only carries `modes`/`config_options`), so an extra chunk in
+            # the replay it already sends is the observable this test double
+            # has. Only emitted when kwargs is non-empty, same as above.
+            await self._client.session_update(
+                session_id=session_id,
+                update=_message_chunk(f"meta={json.dumps(kwargs, sort_keys=True)}", "replay-meta"),
+            )
         return acp.LoadSessionResponse()
 
     async def set_session_mode(self, session_id, mode_id, **kwargs):

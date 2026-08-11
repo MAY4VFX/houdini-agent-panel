@@ -20,7 +20,8 @@ def test_reload_reflects_defaults(qapp):
     assert view._check_updates_checkbox.isChecked() is True
     assert view._show_announcements_checkbox.isChecked() is True
     assert view._telemetry_checkbox.isChecked() is False
-    assert view._isolate_agent_config_checkbox.isChecked() is False
+    assert view._claude_host_mcp_checkbox.isChecked() is True
+    assert view._claude_host_skills_checkbox.isChecked() is True
     assert view._whisper_edit.text() == ""
     assert view._proxy_edit.text() == ""
     assert view._no_proxy_edit.text() == ""
@@ -79,15 +80,19 @@ def test_toggling_checkbox_persists_and_emits_changed(qapp):
     assert settings_module.load().telemetry is True
 
 
-def test_isolate_agent_config_persists_and_survives_reload(qapp):
+def test_claude_host_visibility_checkboxes_persist_and_survive_reload(qapp):
     view = SettingsView()
 
-    view._isolate_agent_config_checkbox.setChecked(True)
+    view._claude_host_mcp_checkbox.setChecked(False)
+    view._claude_host_skills_checkbox.setChecked(False)
 
-    assert settings_module.load().isolate_agent_config is True
+    current = settings_module.load()
+    assert current.claude_show_host_mcp_servers is False
+    assert current.claude_show_host_skills is False
 
     reloaded = SettingsView()
-    assert reloaded._isolate_agent_config_checkbox.isChecked() is True
+    assert reloaded._claude_host_mcp_checkbox.isChecked() is False
+    assert reloaded._claude_host_skills_checkbox.isChecked() is False
 
 
 def test_whisper_endpoint_persists(qapp):

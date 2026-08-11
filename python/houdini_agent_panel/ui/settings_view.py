@@ -521,30 +521,40 @@ class SettingsView(QtWidgets.QWidget):
         )
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
-        # `Settings.isolate_agent_config` — see runtime.py::
-        # _with_config_isolation. Off by default: today's behavior (every
-        # agent sees the artist's own account config, MCP servers included,
-        # same as a terminal launch) is what artists already have.
-        self._isolate_agent_config_checkbox = QtWidgets.QCheckBox(
-            "Launch agents with a config of their own (Claude only, for now)", self
+        # `Settings.claude_show_host_mcp_servers` / `claude_show_host_skills`
+        # — see `client.py::claude_session_meta`. Both on by default:
+        # today's behavior (Claude sees the artist's own account config,
+        # same as a terminal launch) is what artists already have. Replaces
+        # the earlier `isolate_agent_config` (redirecting the whole
+        # `CLAUDE_CONFIG_DIR`), which the owner rejected live — it took
+        # sign-in down with it, since a real `claude login`'s credentials
+        # live in that same directory. These two touch only what the agent
+        # can SEE, never where it authenticates from.
+        self._claude_host_mcp_checkbox = QtWidgets.QCheckBox(
+            "Let Claude see your own MCP servers", self
         )
-        self._isolate_agent_config_checkbox.toggled.connect(self._on_field_changed)
-        self._isolate_agent_config_caption = QtWidgets.QLabel(
-            "Off: an agent sees your own account config exactly like it would "
-            "from a terminal — its MCP servers, settings, marketplace skills. "
-            "On: it gets an empty config of its own instead, reserved for this "
-            "panel, so a personal MCP server (or one sharing fxhoudini's own "
-            "name) can never sit in front of the panel's tools. Sign-in this "
-            "panel captured through “Sign in…” still works either way — "
-            "a `claude login` done in a real terminal does not carry over, and "
-            "needs signing in again inside the isolated config. Currently only "
-            "Claude (claude-acp) honors this; every other agent ignores it and "
-            "keeps working exactly as before. Applies the next time that agent "
-            "starts.",
+        self._claude_host_mcp_checkbox.toggled.connect(self._on_field_changed)
+        self._claude_host_skills_checkbox = QtWidgets.QCheckBox(
+            "Let Claude see your own skills", self
+        )
+        self._claude_host_skills_checkbox.toggled.connect(self._on_field_changed)
+        self._claude_host_caption = QtWidgets.QLabel(
+            "Both on by default — Claude sees your account exactly like it "
+            "would from a terminal. MCP servers off: Claude connects only to "
+            "fxhoudini, ignoring any other server your account has configured "
+            "— the fix for a personal server (or one sharing fxhoudini's own "
+            "name) sitting in front of this panel's own tools. Skills off: "
+            "Claude stops reading your personal skill/plugin marketplace, but "
+            "still reads this scene's own AGENTS.md/CLAUDE.md — that file is "
+            "project-scoped, not account-scoped, so it keeps knowing it's "
+            "running inside Houdini either way. Neither touches sign-in — a "
+            "token this panel captured through “Sign in…” keeps working "
+            "regardless. Claude only, for now; every other agent ignores "
+            "both. Applies the next time that agent starts.",
             self,
         )
-        self._isolate_agent_config_caption.setWordWrap(True)
-        self._isolate_agent_config_caption.setStyleSheet("color: palette(disabled, text);")
+        self._claude_host_caption.setWordWrap(True)
+        self._claude_host_caption.setStyleSheet("color: palette(disabled, text);")
 
         # A bare scheme+host (no path) gets `/v1/audio/transcriptions`
         # appended by `ui/voice.py::_normalize_whisper_endpoint` — the
@@ -749,8 +759,9 @@ class SettingsView(QtWidgets.QWidget):
         # Collapsed by default, same rank as Network/Privacy/Data: a niche
         # switch most artists never need to touch.
         agent_config_section = _Section("Agent config", self, expanded=False, grid=grid_metrics)
-        agent_config_section.add_checkbox(self._isolate_agent_config_checkbox)
-        agent_config_section.add_widget(self._isolate_agent_config_caption)
+        agent_config_section.add_checkbox(self._claude_host_mcp_checkbox)
+        agent_config_section.add_checkbox(self._claude_host_skills_checkbox)
+        agent_config_section.add_widget(self._claude_host_caption)
 
         # Kept as attributes (not just locals) so a test can reach a given
         # section's grid directly, the same way `test_ui_settings.py`
@@ -918,7 +929,8 @@ class SettingsView(QtWidgets.QWidget):
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
             self._ca_bundle_edit.setText(current.ca_bundle)
-            self._isolate_agent_config_checkbox.setChecked(current.isolate_agent_config)
+            self._claude_host_mcp_checkbox.setChecked(current.claude_show_host_mcp_servers)
+            self._claude_host_skills_checkbox.setChecked(current.claude_show_host_skills)
             self._refresh_version_labels()
             # A reload is a fresh read of what's on disk, not an edit — the
             # invitation to restart only belongs to an edit THIS screen just
@@ -951,7 +963,8 @@ class SettingsView(QtWidgets.QWidget):
         current.proxy_url = self._proxy_edit.text().strip()
         current.no_proxy = self._no_proxy_edit.text().strip()
         current.ca_bundle = self._ca_bundle_edit.text().strip()
-        current.isolate_agent_config = self._isolate_agent_config_checkbox.isChecked()
+        current.claude_show_host_mcp_servers = self._claude_host_mcp_checkbox.isChecked()
+        current.claude_show_host_skills = self._claude_host_skills_checkbox.isChecked()
         settings_module.save(current)
         return current
 

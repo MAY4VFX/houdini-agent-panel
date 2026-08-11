@@ -1852,7 +1852,10 @@ class AgentPanel(QtWidgets.QWidget):
             self._note(problem, error=True)
         self._composer.set_boot_phase(PHASE_SESSION)
         client.load_session(
-            session_id=agent_session_id, cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers()
+            session_id=agent_session_id,
+            cwd=scene.hip_dir(),
+            mcp_servers=scene.mcp_servers(),
+            session_meta=acp_client.claude_session_meta(self._agent_id, self._settings),
         )
 
     def _on_session_loaded(self, session_id: str, state: Any) -> None:
@@ -2612,7 +2615,11 @@ class AgentPanel(QtWidgets.QWidget):
         # running agent is a different, much shorter wait that the busy
         # indicator already covers.
         self._composer.set_boot_phase(PHASE_SESSION)
-        client.new_session(cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers())
+        client.new_session(
+            cwd=scene.hip_dir(),
+            mcp_servers=scene.mcp_servers(),
+            session_meta=acp_client.claude_session_meta(self._agent_id, self._settings),
+        )
         QtCore.QTimer.singleShot(
             _NEW_SESSION_GRACE_MS, lambda: self._report_stalled_new_session(before)
         )
