@@ -1811,6 +1811,9 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client(self._agent_id)
         self._adopting_restored = restored_key
         self._loading_session_id = agent_session_id
+        problem = scene.mcp_python_status()
+        if problem:
+            self._note(problem, error=True)
         self._composer.set_boot_phase(PHASE_SESSION)
         client.load_session(
             session_id=agent_session_id, cwd=scene.hip_dir(), mcp_servers=scene.mcp_servers()
@@ -2476,6 +2479,9 @@ class AgentPanel(QtWidgets.QWidget):
                 self._open_agent_management()
             return
         before = {state.session_id for state in self._pool.all()}
+        problem = scene.mcp_python_status()
+        if problem:
+            self._note(problem, error=True)
         # Fourth phase, and the slow one — the agent starts its MCP servers
         # here. Only reported while a boot is on screen: pressing "+" in a
         # running agent is a different, much shorter wait that the busy

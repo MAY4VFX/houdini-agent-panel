@@ -8,6 +8,8 @@ Houdini on disk is simulated by the `_fake_houdini` fixture.
 from __future__ import annotations
 
 import json
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ import pytest
 from houdini_agent_panel import deps as deps_mod
 from houdini_agent_panel import houdini_package
 from houdini_agent_panel import install as install_mod
+from houdini_agent_panel import mcp_runtime
 from houdini_agent_panel import paths
 
 
@@ -73,6 +76,97 @@ def test_install_writes_package_json_with_correct_deps_path(fake_houdini, monkey
         "env": [{"FXHOUDINIMCP": f"{expected_deps}/fxhoudinimcp/houdini"}],
         "path": "$FXHOUDINIMCP",
     }
+
+
+def test_install_records_the_installers_python_with_a_reason(fake_houdini, monkeypatch):
+    """Point 4 of the ephemeral-python fix: what got written into HAP_PYTHON,
+    and why, must show up in the installer's own output — the owner's real
+    incident was only diagnosed by inspecting a live process's arguments,
+    because the log said nothing."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    assert any("HAP_PYTHON" in line and sys.executable in line for line in logged)
+
+
+# --- ephemeral installer python (e.g. `uvx --no-cache`) ---------------
+
+
+def _ephemeral_path(name: str) -> Path:
+    return Path(tempfile.gettempdir()) / name / "archive-v0" / "deadbeef" / "bin" / "python"
+
+
+def test_install_ephemeral_installer_python_falls_back_to_plain_cpython(
+    fake_houdini, monkeypatch
+):
+    """`uvx --no-cache` unpacks its whole run into a directory under the
+    system temp root and deletes it the instant this command exits —
+    `sys.executable` inside that run is a path already known to be gone.
+    Recording it would leave the panel installed with a HAP_PYTHON that
+    never existed by the time Houdini opens. Houdini's own plain CPython —
+    the same remedy already used for the `hython` case — is permanent and
+    must be preferred instead."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod.sys, "executable", str(_ephemeral_path(".tmpdsyxSk")))
+    plain = Path("/fake/hfs20.5/python/bin/python3.11")
+    monkeypatch.setattr(mcp_runtime, "find", lambda *a, **k: plain)
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    package_path = fake_houdini / "packages" / houdini_package.PACKAGE_NAME
+    payload = json.loads(package_path.read_text("utf-8"))
+    assert {"HAP_PYTHON": plain.as_posix()} in payload["env"]
+    assert any("temporary directory" in line for line in logged)
+
+
+def test_install_ephemeral_installer_python_without_fallback_skips_this_houdini(
+    fake_houdini, monkeypatch
+):
+    """No plain CPython to fall back to, and the installer's own python
+    won't survive this command either — the installer must refuse to write
+    a package file that records a path already known to be gone, rather
+    than report success while leaving the panel without any Houdini tools
+    (discovered, in the real incident, only when the agent said it had
+    none)."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod.sys, "executable", str(_ephemeral_path(".tmpYYYYYY")))
+    monkeypatch.setattr(mcp_runtime, "find", lambda *a, **k: None)
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 1
+    assert not (fake_houdini / "packages" / houdini_package.PACKAGE_NAME).exists()
+    assert any("refus" in line.lower() for line in logged)
+
+
+def test_install_ephemeral_installer_python_dry_run_does_not_probe_for_a_fallback(
+    fake_houdini, monkeypatch
+):
+    """Same as the ordinary hython dry-run path: --dry-run only announces
+    intent, it never actually searches disk for Houdini's plain CPython."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: [])
+    monkeypatch.setattr(install_mod.sys, "executable", str(_ephemeral_path(".tmpZZZZZZ")))
+
+    def _boom(*a, **k):
+        raise AssertionError("mcp_runtime.find must not run on a dry run")
+
+    monkeypatch.setattr(mcp_runtime, "find", _boom)
+    logged = []
+
+    code = install_mod.install(dry_run=True, out=logged.append)
+
+    assert code == 0
+    assert not (fake_houdini / "packages" / houdini_package.PACKAGE_NAME).exists()
 
 
 def test_install_skip_deps_still_writes_package_json_without_installing(fake_houdini, monkeypatch):

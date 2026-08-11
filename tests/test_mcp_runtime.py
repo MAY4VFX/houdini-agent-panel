@@ -16,9 +16,44 @@ starts in 0.09s (0.05s on Linux) and runs the same server in 1.5s.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 from houdini_agent_panel import mcp_runtime
+
+
+# --- is_ephemeral ------------------------------------------------------
+
+
+def test_is_ephemeral_true_for_a_path_under_the_system_temp_dir():
+    """The real incident: `uvx --no-cache` unpacks its whole run into a
+    directory under the OS temp root and deletes it the instant the
+    command exits. `sys.executable` at that point is a path inside it —
+    e.g. on macOS `/var/folders/.../T/.tmpXXXXXX/archive-v0/<hash>/bin/python`."""
+    temp_root = Path(tempfile.gettempdir())
+    doomed = temp_root / ".tmpdsyxSk" / "archive-v0" / "7gsPQrjI8Kdrz5MEiY1ZF" / "bin" / "python"
+
+    assert mcp_runtime.is_ephemeral(doomed) is True
+
+
+def test_is_ephemeral_false_for_an_ordinary_installed_python():
+    assert mcp_runtime.is_ephemeral("/opt/homebrew/bin/python3.12") is False
+    assert mcp_runtime.is_ephemeral("/usr/bin/python3") is False
+
+
+def test_is_ephemeral_resolves_symlinks_before_comparing(monkeypatch, tmp_path):
+    """macOS's own TMPDIR (and /tmp itself) are symlinks into /private —
+    comparing unresolved paths would silently never match on the one
+    platform the bug was actually found on."""
+    real_temp = tmp_path / "real_temp"
+    real_temp.mkdir()
+    link = tmp_path / "temp_link"
+    link.symlink_to(real_temp)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(link))
+
+    inside_via_real_path = real_temp / "some" / "python"
+
+    assert mcp_runtime.is_ephemeral(inside_via_real_path) is True
 
 
 def test_hython_is_recognised_on_every_platform_spelling():

@@ -184,6 +184,47 @@ def test_fx_python_falls_back_to_sys_executable(monkeypatch):
     assert scene.fx_python() == sys.executable
 
 
+# --- mcp_python_status -------------------------------------------------
+
+
+def test_mcp_python_status_none_when_hap_python_unset(monkeypatch):
+    """Absence of HAP_PYTHON is not flagged — routine outside an installed
+    panel (dev mode, tests, a hand-built package json)."""
+    monkeypatch.delenv("HAP_PYTHON", raising=False)
+    assert scene.mcp_python_status() is None
+
+
+def test_mcp_python_status_none_when_the_recorded_interpreter_exists(monkeypatch, tmp_path):
+    python = tmp_path / "python3.11"
+    python.touch()
+    monkeypatch.setenv("HAP_PYTHON", str(python))
+    assert scene.mcp_python_status() is None
+
+
+def test_mcp_python_status_flags_a_vanished_interpreter(monkeypatch, tmp_path):
+    """The recorded interpreter existed at install time and does not any
+    more — a pruned uv cache, a recreated venv, a Houdini reinstalled to a
+    new path."""
+    gone = tmp_path / "no-longer-here" / "python3.11"
+    monkeypatch.setenv("HAP_PYTHON", str(gone))
+
+    status = scene.mcp_python_status()
+
+    assert status is not None
+    assert str(gone) in status
+
+
+def test_mcp_servers_logs_a_vanished_interpreter(monkeypatch, tmp_path, caplog):
+    gone = tmp_path / "no-longer-here" / "python3.11"
+    monkeypatch.setenv("HAP_PYTHON", str(gone))
+    monkeypatch.setattr(scene, "fx_port", lambda: 8100)
+
+    with caplog.at_level("ERROR", logger="houdini_agent_panel.scene"):
+        scene.mcp_servers()
+
+    assert str(gone) in caplog.text
+
+
 # --- hip_dir ---------------------------------------------------------------
 
 

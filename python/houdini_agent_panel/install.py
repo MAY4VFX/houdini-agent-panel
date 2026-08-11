@@ -85,7 +85,7 @@ def _requirement_for(target: Path, panel_version: str) -> str:
 
 def _mcp_python(
     hython: Path, pyver: tuple[int, int], target: Path, installer_python: str, *, out, dry_run: bool
-) -> tuple[str, Path | None]:
+) -> tuple[str, Path | None] | None:
     """The interpreter to record as `HAP_PYTHON`, and where it finds the server.
 
     The installer's own Python, unless that is Houdini's embedded one.
@@ -103,14 +103,44 @@ def _mcp_python(
 
     Falls back to `hython` if that interpreter is missing or cannot import
     the server: slow beats broken, and the installer says which it chose.
+
+    A second, unrelated reason to reject the installer's own Python:
+    `mcp_runtime.is_ephemeral` — it can be a path inside a temporary
+    directory that is deleted the instant this command exits (`uvx
+    --no-cache`, measured for real: the panel came up, but the fx MCP
+    server's process never appeared, because `HAP_PYTHON` named an
+    interpreter that no longer existed). Houdini's plain CPython is the
+    same remedy as the `hython` case above — it lives inside the Houdini
+    install, not in temp — but here there is no slow-but-working fallback
+    to drop back to: recording the ephemeral path would write something
+    already known to be broken. Returning `None` tells the caller to skip
+    this Houdini entirely rather than commit to that.
     """
-    if not mcp_runtime.is_houdini_python(installer_python):
+    ephemeral = mcp_runtime.is_ephemeral(installer_python)
+    if not mcp_runtime.is_houdini_python(installer_python) and not ephemeral:
+        out(f"  HAP_PYTHON: {installer_python} (the installer's own python)")
         return installer_python, None
+
+    if ephemeral:
+        out(
+            f"  installer python is inside a temporary directory ({installer_python}) "
+            "and will not exist once this command exits — looking for Houdini's own "
+            "plain CPython instead"
+        )
     if dry_run:
         out("  [dry-run] would look for Houdini's plain CPython for the MCP server")
         return installer_python, None
     found = mcp_runtime.find(hython, pyver, target, out=out)
     if found is None:
+        if ephemeral:
+            out(
+                "  Houdini's plain CPython was not found either, and the installer's "
+                "own python will not survive this command — refusing to record a "
+                "HAP_PYTHON that is already known to be gone. Re-run without "
+                "`--no-cache` (or `pip install houdini-agent-panel` normally) so a "
+                "permanent interpreter exists to record."
+            )
+            return None
         out(
             "  Houdini's plain CPython not found — the MCP server will run on "
             "hython, which adds about 10s to opening a conversation"
@@ -241,9 +271,16 @@ def install(
                 if installed and installed != panel_version:
                     self_updated_to = installed
 
-        mcp_python, mcp_path = _mcp_python(
-            hython, pyver, target, installer_python, out=out, dry_run=dry_run
-        )
+        mcp_result = _mcp_python(hython, pyver, target, installer_python, out=out, dry_run=dry_run)
+        if mcp_result is None:
+            # No permanent interpreter could be found for the MCP server, and
+            # the installer's own python is ephemeral — writing a package
+            # file here would leave the panel installed but silently unable
+            # to reach any Houdini tool, discovered only when the agent says
+            # so. Skip this Houdini the same way a missing hython or a
+            # failed dependency install does, above.
+            continue
+        mcp_python, mcp_path = mcp_result
         payload = houdini_package.package_json(
             deps=target, installer_python=mcp_python, source=source, mcp_path=mcp_path
         )

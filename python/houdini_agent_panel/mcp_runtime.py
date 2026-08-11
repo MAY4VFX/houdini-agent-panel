@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import childproc
@@ -69,6 +70,52 @@ def is_houdini_python(executable: str | os.PathLike[str]) -> bool:
     SideFX ships it under on any platform.
     """
     return Path(executable).name.lower().startswith("hython")
+
+
+def is_ephemeral(executable: str | os.PathLike[str]) -> bool:
+    """Does this interpreter live inside the system temp directory — gone the
+    moment whatever put it there cleans up, possibly before this very
+    process exits?
+
+    Found for real: `uvx --no-cache --from houdini-agent-panel==X python -m
+    houdini_agent_panel install` unpacks the whole run into a directory
+    under the OS temp root and deletes it the instant the command returns.
+    `sys.executable` at that point is a path inside it — e.g. on macOS
+    `/var/folders/.../T/.tmpXXXXXX/archive-v0/<hash>/bin/python`. The
+    installer used to record that path as `HAP_PYTHON` unconditionally, so
+    it was already gone before Houdini was ever launched: the panel logged
+    the right host and port, but the fx MCP server's own process never
+    appeared, because the interpreter named in `mcpServers[0].command`
+    didn't exist. Confirmed live: the SAME command run without `--no-cache`
+    writes `~/.cache/uv/archive-v0/<hash>/bin/python`, which survives, and
+    everything works.
+
+    Checked by path, not by asking the OS "is this on a tmpfs" or similar —
+    `tempfile.gettempdir()` is exactly what every tool that creates a
+    throwaway directory (`uvx`, `pip`'s own build isolation, `mkdtemp`)
+    already asks for, on every platform this panel supports, so matching
+    against it catches the actual mechanism rather than guessing at a
+    filesystem property that doesn't reliably correlate with "temporary" at
+    all (a real `/tmp` can be a persistent bind mount; a persistent-looking
+    path can still be under `%TEMP%`). Both sides are resolved before
+    comparing: macOS's `TMPDIR` and `/tmp` itself are symlinks
+    (`/private/var/folders/...`, `/private/tmp`), and comparing unresolved
+    paths would silently never match on the one platform the bug was found
+    on.
+    """
+    try:
+        resolved = Path(executable).resolve()
+    except OSError:
+        resolved = Path(executable)
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(temp_root)
+    except ValueError:
+        return False
+    return True
 
 
 def plain_python_candidates(hython: Path, pyver: tuple[int, int]) -> list[Path]:
@@ -153,4 +200,4 @@ def find(
     return None
 
 
-__all__ = ["SHADOWING_VARS", "find", "is_houdini_python", "plain_python_candidates"]
+__all__ = ["SHADOWING_VARS", "find", "is_ephemeral", "is_houdini_python", "plain_python_candidates"]

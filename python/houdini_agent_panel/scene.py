@@ -120,6 +120,31 @@ def fx_python() -> str:
     return os.environ.get("HAP_PYTHON") or sys.executable
 
 
+def mcp_python_status() -> str | None:
+    """None when a `HAP_PYTHON` the installer recorded still points at a
+    real file, a message for the artist otherwise.
+
+    Only the "recorded, then vanished" case is checked — a uv cache pruned,
+    a venv recreated, a Houdini reinstalled to a new path. install.py now
+    refuses to record an interpreter it already knows won't survive the
+    install itself (see its ephemeral-python handling), so that's the one
+    way a bad `HAP_PYTHON` can still reach a *running* panel: it was good
+    the day it was written and stopped being good later. `HAP_PYTHON` being
+    entirely absent is not flagged here — routine outside an installed
+    panel (dev mode, tests, a hand-built package json for `$HSITE`), and
+    `fx_python()`'s own fallback to `sys.executable` already covers that
+    case without complaint.
+    """
+    recorded = os.environ.get("HAP_PYTHON")
+    if not recorded or Path(recorded).is_file():
+        return None
+    return (
+        f"The Houdini MCP server's interpreter is gone (HAP_PYTHON={recorded}) — "
+        "Houdini tools will not be available this session. Run `python -m "
+        "houdini_agent_panel install` again to fix it."
+    )
+
+
 #: How the fx server is started, instead of a plain `-m fxhoudinimcp`.
 #:
 #: `hython` installs `haio.HoudiniEventLoopPolicy` as asyncio's default, and
@@ -161,6 +186,9 @@ def mcp_servers() -> list[dict]:
     range and might connect to someone else's open Houdini. `env` is a list
     of {name, value} (`McpServerStdio.env: list[EnvVariable]`), not a dict.
     """
+    problem = mcp_python_status()
+    if problem:
+        _log.error("mcp_servers: %s", problem)
     env = [{"name": "HOUDINI_HOST", "value": fx_host()}]
     port = fx_port()
     if port is not None:

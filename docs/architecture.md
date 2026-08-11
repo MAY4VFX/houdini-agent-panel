@@ -266,6 +266,15 @@ def fx_python() -> str
     without HAP_PYTHON the MCP server can't come up; this state should be
     shown to the human, not crash."""
 
+def mcp_python_status() -> str | None
+    """None when a recorded HAP_PYTHON still points at a real file; a
+    message for the artist when it was recorded and has since vanished
+    (pruned uv cache, recreated venv, Houdini reinstalled elsewhere).
+    HAP_PYTHON being entirely absent is not flagged — routine outside an
+    installed panel, and fx_python()'s own sys.executable fallback covers
+    it. Logged by mcp_servers() on every call; ui/panel.py additionally
+    surfaces it as an error note when starting/loading a session."""
+
 def mcp_servers() -> list[dict]
     """Exactly what goes into session/new as mcpServers.
 

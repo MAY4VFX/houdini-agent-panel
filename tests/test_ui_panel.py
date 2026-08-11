@@ -2330,6 +2330,55 @@ def test_a_stalled_session_offers_login_for_an_agent_whose_no_methods_advice_is_
     widget.shutdown()
 
 
+def test_starting_a_session_warns_when_the_mcp_interpreter_is_gone(qapp, monkeypatch):
+    """Point 3 of the ephemeral-python fix: even a correctly-installed
+    HAP_PYTHON can rot later (a pruned uv cache, a recreated venv). The
+    panel used to stay completely silent about it — the agent just came up
+    without any Houdini tools, and the artist only found out when it said
+    so itself."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(
+        panel_mod.scene,
+        "mcp_python_status",
+        lambda: "The Houdini MCP server's interpreter is gone (HAP_PYTHON=/gone/python)",
+    )
+
+    widget._start_new_session()
+
+    entries = widget._model("__idle__").entries()
+    assert entries, "the artist was told nothing at all"
+    assert entries[-1].kind == "error"
+    assert "gone" in entries[-1].text
+    widget.shutdown()
+
+
+def test_starting_a_session_stays_quiet_when_the_mcp_interpreter_is_fine(qapp, monkeypatch):
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    before = list(widget._model("__idle__").entries())
+
+    widget._start_new_session()
+
+    assert widget._model("__idle__").entries() == before, "a note was added despite no problem"
+    widget.shutdown()
+
+
 def test_a_half_written_prompt_is_never_overwritten(qapp):
     """Offering a command is help; losing what someone was typing to make
     room for it is not."""
