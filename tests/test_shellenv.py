@@ -138,6 +138,43 @@ def test_the_shell_does_not_inherit_houdinis_own_environment(monkeypatch):
     assert "HAP_PYTHON" not in spawn_env
 
 
+def test_a_real_shell_still_reads_the_artists_profile_and_keeps_path(monkeypatch, tmp_path):
+    """The other half of the same fix, proven against a REAL shell, not a
+    mock: `_SPAWN_BASE_KEYS` must not turn into a second, worse version of
+    the original bug (`319a410` — an npx agent lost the login shell's PATH
+    entirely). A minimal spawn env is fine as long as the shell itself still
+    gets to run `~/.zshenv`/`path_helper` and hand back what a real login
+    shell would — this launches an actual `/bin/zsh -ilc`, pointed at a
+    throwaway `$HOME` with its own `.zshenv`, and checks both halves at
+    once: a variable the PROFILE exports comes back, and an ambient one
+    that is neither in the profile nor in `_SPAWN_BASE_KEYS`
+    (`PYTHONPATH`/`HAP_DEPS`, the exact leak this module now blocks) does
+    not.
+    """
+    import shutil
+
+    if shutil.which("zsh") is None:
+        pytest.skip("no zsh on this machine")
+
+    (tmp_path / ".zshenv").write_text('export FROM_PROFILE="hello-from-profile"\n')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    # Simulates exactly what Houdini's own package json puts in os.environ —
+    # neither in `_SPAWN_BASE_KEYS` nor exported by the fake profile above,
+    # so it must not appear in the result no matter what.
+    monkeypatch.setenv("PYTHONPATH", "/should/not/leak")
+    monkeypatch.setenv("HAP_DEPS", "/should/not/leak/either")
+
+    env = shellenv.capture(force=True)
+
+    assert env.get("FROM_PROFILE") == "hello-from-profile", (
+        f"the shell's own profile was not read at all: {env!r}"
+    )
+    assert env.get("PATH"), "PATH must survive the round trip — this is the 319a410 regression"
+    assert "PYTHONPATH" not in env
+    assert "HAP_DEPS" not in env
+
+
 def test_hap_prefixed_variables_never_survive_even_if_the_shell_prints_them(monkeypatch):
     """Second line of defense, independent of the spawn-env fix above: a
     variable the shell itself echoes back (e.g. because some future code
