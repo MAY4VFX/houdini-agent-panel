@@ -18,6 +18,8 @@ from typing import Sequence
 
 from fxhoudinimcp.install import printable_argv
 
+from . import childproc
+
 #: Timeout for a one-off hython run — just printing the Python version.
 #:
 #: Not the couple of seconds "print one line" suggests: hython loads the
@@ -174,7 +176,7 @@ def python_version_of(hython: Path, *, timeout: float = _VERSION_TIMEOUT) -> tup
     """
     argv = [str(hython), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"]
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        result = childproc.run(argv, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DepsError(f"failed to run {hython}: {exc}") from exc
 
@@ -230,7 +232,7 @@ def install_deps(
     target.mkdir(parents=True, exist_ok=True)
     out(f"Installing dependencies: {printable_argv(argv)}")
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
+        result = childproc.run(argv, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DepsError(f"pip install failed to start: {exc}") from exc
 

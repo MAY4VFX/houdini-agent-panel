@@ -483,3 +483,100 @@ def test_extraction_works_when_the_destination_path_has_a_symlink(tmp_path):
     runtime.extract_archive(archive, link)
 
     assert (real / "opencode").is_file(), "a safe archive was rejected via a symlinked path"
+
+
+# --- an archive whose payload sits inside one wrapping directory ---------------
+
+
+def _build_wrapped_agent_tar(dest: Path, *, wrapper: str, cmd_name: str = "myagent") -> bytes:
+    """The shape GitHub release tooling produces for a Rust/Go binary:
+    everything under one directory named after the release, while the
+    registry still says `cmd: "./myagent"`."""
+    archive_path = dest / "wrapped.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        _add_tar_file(tf, f"{wrapper}/{cmd_name}", b"#!/bin/sh\necho hi\n", mode=0o755)
+        _add_tar_file(tf, f"{wrapper}/README.md", b"docs\n")
+    return archive_path.read_bytes()
+
+
+def test_install_agent_unwraps_a_single_top_level_directory(tmp_path, fetcher, monkeypatch):
+    """Without this the install "succeeded" and produced a launch command
+    pointing at a file that was never there — the artist only found out
+    minutes later, as a bare "agent did not start"."""
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    archive_bytes = _build_wrapped_agent_tar(tmp_path, wrapper="myagent-1.0.0-x86_64-linux")
+    entry = AgentEntry(
+        id="wrapped-agent",
+        name="Wrapped Agent",
+        version="1.0.0",
+        binaries={
+            "fake-platform": BinaryDistribution(
+                archive="https://example.test/wrapped.tar.gz",
+                cmd="./myagent",
+                args=["acp"],
+                sha256=hashlib.sha256(archive_bytes).hexdigest(),
+            )
+        },
+    )
+    fetcher.add_bytes(entry.binaries["fake-platform"].archive, archive_bytes)
+
+    spec = runtime.install_agent(entry, fetch=fetcher)
+
+    version_dir = paths.agent_dir(entry.id) / entry.version
+    assert Path(spec.command) == version_dir / "myagent"
+    assert Path(spec.command).exists()
+    # The rest of the archive comes along; only the wrapper is stripped.
+    assert (version_dir / "README.md").exists()
+
+
+def test_install_agent_refuses_an_archive_without_the_command(tmp_path, fetcher, monkeypatch):
+    """A missing cmd is an INSTALL failure, said here, and not a silent
+    manifest for an agent that can never launch."""
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    archive_bytes = _build_agent_tar(tmp_path, cmd_name="something-else")
+    entry = AgentEntry(
+        id="mismatched-agent",
+        name="Mismatched Agent",
+        version="1.0.0",
+        binaries={
+            "fake-platform": BinaryDistribution(
+                archive="https://example.test/mismatched.tar.gz",
+                cmd="./myagent",
+                args=[],
+                sha256=hashlib.sha256(archive_bytes).hexdigest(),
+            )
+        },
+    )
+    fetcher.add_bytes(entry.binaries["fake-platform"].archive, archive_bytes)
+
+    with pytest.raises(runtime.InstallError, match="did not contain"):
+        runtime.install_agent(entry, fetch=fetcher)
+
+    # Nothing on record: the next attempt must be a real one, not a no-op
+    # against a version the manifest already claims is installed.
+    assert not runtime.is_installed(entry)
+    assert not (paths.agent_dir(entry.id) / entry.version).exists()
+
+
+def test_npx_launch_spec_reports_the_node_directory_for_the_agents_path(tmp_path, monkeypatch):
+    """`env["PATH"]` alone cannot be the whole answer: it is built from
+    Houdini's PATH, and `client._agent_path` has to rebuild it against the
+    artist's login-shell PATH. It needs the directories, not the string."""
+    fake_node = tmp_path / "node" / "bin" / "node"
+    fake_node.parent.mkdir(parents=True)
+    fake_node.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("houdini_agent_panel.node.ensure_node", lambda **k: fake_node)
+    monkeypatch.setattr(
+        "houdini_agent_panel.node.npx_argv",
+        lambda node_bin, package, args: [str(node_bin), "/fake/npx-cli.js", package, *args],
+    )
+    entry = AgentEntry(
+        id="npx-agent",
+        name="Npx Agent",
+        version="1.0.0",
+        npx=NpxDistribution(package="@test/agent@1.0.0"),
+    )
+
+    spec = runtime.install_agent(entry)
+
+    assert spec.path_prepend == (str(fake_node.parent),)

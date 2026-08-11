@@ -47,7 +47,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import paths
+from . import childproc, paths
 
 _FILENAME = "running_agents.json"
 
@@ -159,7 +159,7 @@ def _process_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            completed = subprocess.run(
+            completed = childproc.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5,
             )
@@ -203,10 +203,10 @@ def _command_line_posix(pid: int) -> "tuple[str, str] | None":
     # macOS has no /proc — shell out, same as the investigation that found
     # this bug in the first place (`ps`/`lsof`, both standard on macOS).
     try:
-        cmd = subprocess.run(
+        cmd = childproc.run(
             ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5
         )
-        cwd_info = subprocess.run(
+        cwd_info = childproc.run(
             ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=5
         )
     except (OSError, subprocess.SubprocessError):
@@ -227,7 +227,7 @@ def _command_line_windows(pid: int) -> "tuple[str, str] | None":
     command line and the process's own idea of its start directory in one
     call, which `tasklist` does not."""
     try:
-        completed = subprocess.run(
+        completed = childproc.run(
             [
                 "powershell", "-NoProfile", "-Command",
                 f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\") | "
@@ -277,7 +277,7 @@ def _terminate(pid: int) -> None:
     session that no longer exists."""
     if os.name == "nt":
         with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=5)
+            childproc.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=5)
         return
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGTERM)

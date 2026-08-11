@@ -304,6 +304,30 @@ def _resolve_cmd(root: Path, cmd: str) -> Path:
     return root / cleaned
 
 
+def _unwrap_single_directory(extract_root: Path, cmd: str) -> Path:
+    """The directory the archive's `cmd` is actually relative to.
+
+    Normally the archive is flat and that is `extract_root` itself
+    (opencode's zips: `opencode` at the top level). But a GitHub release
+    tarball built by the usual Rust/Go release tooling wraps everything in
+    one directory named after the release —
+    `kimi-1.49.0-x86_64-unknown-linux-gnu/kimi` — while the registry still
+    says `cmd: "./kimi"`. `install_node` has always unwrapped exactly this
+    shape; agents went without, so such an archive installed "successfully"
+    and produced a launch command pointing at a file that was never there.
+
+    Only ever unwraps when it FIXES something: the cmd must be missing at
+    the top level and present inside the single directory. An archive that
+    resolves as-is is never second-guessed.
+    """
+    if _resolve_cmd(extract_root, cmd).exists():
+        return extract_root
+    entries = list(extract_root.iterdir())
+    if len(entries) == 1 and entries[0].is_dir() and _resolve_cmd(entries[0], cmd).exists():
+        return entries[0]
+    return extract_root
+
+
 def _make_executable(path: Path) -> None:
     if sys.platform == "win32":
         return
@@ -403,13 +427,27 @@ def install_agent(
         extract_root = tmp_dir / "extracted"
         extract_root.mkdir()
         extract_archive(archive_path, extract_root)
+        payload_root = _unwrap_single_directory(extract_root, dist.cmd)
 
         if version_dir.exists():
             shutil.rmtree(version_dir)
         version_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(extract_root), str(version_dir))
+        shutil.move(str(payload_root), str(version_dir))
 
     cmd_path = _resolve_cmd(version_dir, dist.cmd)
+    if not cmd_path.exists():
+        # Fail HERE, where there is still something to say, rather than at
+        # launch. Without this the manifest got written for an agent whose
+        # command does not exist, `_make_executable` swallowed the resulting
+        # OSError, and the only symptom reached the artist minutes later as
+        # a bare "agent did not start" from a `Popen` that never had a file
+        # to run. The install is rolled back so the next attempt is a fresh
+        # one rather than a no-op against a version already on record.
+        shutil.rmtree(version_dir, ignore_errors=True)
+        raise InstallError(
+            f"{entry.name} {entry.version}: the archive did not contain {dist.cmd!r} "
+            f"(expected it at {cmd_path})"
+        )
     _make_executable(cmd_path)
     _write_manifest(entry, kind="binary")
     spec = _binary_launch_spec(version_dir, dist)

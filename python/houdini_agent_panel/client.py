@@ -79,7 +79,7 @@ from acp.schema import (
     TextContentBlock,
 )
 
-from . import __version__, shellenv
+from . import __version__, childproc, shellenv
 from .logbook import logger as _logbook_logger
 from .sessions import SessionMode as _SessionMode
 from .sessions import SessionState
@@ -673,13 +673,13 @@ class AcpWorker(QtCore.QThread):
                 _proxy_module.sanitize(_proxy_address) if _proxy_address else "none",
             )
 
-            process = subprocess.Popen(
-                [spec.command, *spec.args],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=cwd,
+            # NOT a bare `subprocess.Popen`: on Windows the pipes handed to
+            # `connect_read_pipe`/`connect_write_pipe` below have to be
+            # opened for overlapped I/O or the proactor loop cannot read
+            # them at all (`childproc.py`, point 2), and the agent must not
+            # get a console window of its own (point 1).
+            process = childproc.spawn_with_asyncio_pipes(
+                [spec.command, *spec.args], env=env, cwd=cwd
             )
             self._process = process
             # From this line on, a Houdini that dies without warning
@@ -1222,7 +1222,10 @@ class AcpWorker(QtCore.QThread):
             return
         except asyncio.TimeoutError:
             pass
-        process.terminate()
+        # The tree, not just the process we hold: an npx agent runs the real
+        # agent as a grandchild, and on Windows nothing forwards a
+        # termination to it (`childproc.terminate_tree`).
+        childproc.terminate_tree(process)
         try:
             await asyncio.wait_for(self._await_process(process), timeout=2.0)
             self._forget_process(process)

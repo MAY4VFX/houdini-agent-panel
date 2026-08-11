@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from . import childproc
 from . import paths
 from . import runtime
 from .network import Fetcher, urlopen_fetch
@@ -64,7 +65,7 @@ def _find_system_node_uncached(minimum: tuple[int, int, int]) -> Path | None:
         return None
     path = Path(found)
     try:
-        result = subprocess.run(
+        result = childproc.run(
             [str(path), "--version"], capture_output=True, text=True, timeout=5
         )
     except (OSError, subprocess.SubprocessError):

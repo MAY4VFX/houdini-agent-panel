@@ -93,7 +93,7 @@ import platform
 import re
 import subprocess
 
-from .. import orphans, shellenv, token_check
+from .. import childproc, orphans, shellenv, token_check
 from ..logbook import logger as _logbook_logger
 from .qt import Signal
 from .worker import Worker, WorkerStopped
@@ -925,6 +925,12 @@ class TerminalLoginWorker(Worker):
                 cwd=self._cwd,
                 text=True,
                 bufsize=1,
+                # The login's output belongs in the panel, which is already
+                # reading it off these pipes. Without this, Windows also
+                # opens a console window for it — an empty black one, since
+                # everything the child prints has been redirected here
+                # (`childproc.py`).
+                **childproc.hidden_window_kwargs(),
             )
             reader = process.stdout
         self._process = process
