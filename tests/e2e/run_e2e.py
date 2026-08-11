@@ -32,6 +32,16 @@ real `settings.json` with `autostart_agent=True` gets a real agent launched
 against the real API on the very first `app.processEvents()`, which is
 exactly how this project once ran a real Claude session for 30+ minutes and
 clobbered real install records on a developer's own machine.
+
+One convention every check here follows: a check that returns without
+actually verifying its own claim (nothing on this machine/agent to check
+against — see `check_sign_in_reachable`, `check_captured_token_signs_in_
+alone`) says so by starting its returned string with `_SKIP_PREFIX`,
+`"skipped — "` — never a sentence that merely sounds like a passing
+result. `main` prints that as SKIP, not ok, and counts it apart from
+`passed` in the final tally. A check that invents a different way to say
+"nothing to verify here" defeats the one thing that makes a summary line
+worth trusting.
 """
 
 from __future__ import annotations
@@ -99,6 +109,20 @@ from houdini_agent_panel.ui import panel as panel_mod  # noqa: E402
 #: minute there is normal rather than a failure.
 CONNECT_TIMEOUT_MS = 240_000
 TURN_TIMEOUT_MS = 240_000
+
+#: The one honest way for a check to say "there was nothing here to verify"
+#: — a machine/agent that doesn't have what this check needs (no auth
+#: methods to exercise, no token in the environment to inject), as opposed
+#: to a check that ran and found the thing it was checking for true. `main`
+#: below prints this as SKIP, not ok, and counts it separately in the final
+#: tally. Found the hard way: `check_sign_in_reachable`'s early return used
+#: to read "agent needs no sign-in (already authenticated)" — a sentence
+#: that sounds like a result, on the exact machine state every OTHER check
+#: already requires to run at all, so it was printing "ok" for a check that
+#: had verified nothing, every single run. A check that returns without
+#: verifying its own claim says so with this prefix — nothing else invents
+#: a third way to mean the same thing.
+_SKIP_PREFIX = "skipped — "
 
 
 class Failure(AssertionError):
@@ -456,12 +480,20 @@ def check_modes(agent_id: str) -> str:
 
 
 def check_sign_in_reachable(agent_id: str) -> str:
-    """An agent that declares sign-in methods must always be reachable."""
+    """An agent that declares sign-in methods must always be reachable.
+
+    Only actually exercises that on a machine/agent state where there ARE
+    methods to reach — which is never true on any machine that can also
+    run the checks above it (`open_session()` requires the agent already
+    authenticated, or every one of those fails). On the far more common
+    machine state this never gets past the first line: says so with
+    `_SKIP_PREFIX`, not a sentence that reads like a verified result.
+    """
     with Harness(agent_id) as h:
         h.connect()
         info = h.events["connected"]
         if not info.auth_methods:
-            return "agent needs no sign-in (already authenticated)"
+            return f"{_SKIP_PREFIX}agent already authenticated, no methods to reach"
         h.panel._offer_sign_in()
         _app.processEvents()
         if h.panel._pages.currentIndex() != panel_mod.AgentPanel.PAGE_AUTH:
@@ -508,12 +540,12 @@ def check_captured_token_signs_in_alone(agent_id: str) -> str:
     """
     if agent_id != "claude-acp":
         return (
-            "skipped — CLAUDE_CODE_OAUTH_TOKEN/isolate_agent_config are "
+            f"{_SKIP_PREFIX}CLAUDE_CODE_OAUTH_TOKEN/isolate_agent_config are "
             "claude-acp-specific; nothing verified here applies to this agent"
         )
     token = os.environ.get("HAP_E2E_CLAUDE_TOKEN")
     if not token:
-        return "skipped — HAP_E2E_CLAUDE_TOKEN is not set, nothing to inject"
+        return f"{_SKIP_PREFIX}HAP_E2E_CLAUDE_TOKEN is not set, nothing to inject"
 
     original = settings_mod.load()
     isolated = settings_mod.Settings(
@@ -766,11 +798,16 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 72)
 
     failures = 0
+    skipped = 0
     for name in selected:
         started = time.monotonic()
         try:
             detail = CHECKS[name](args.agent)
-            status, extra = "ok", detail
+            if detail.startswith(_SKIP_PREFIX):
+                skipped += 1
+                status, extra = "SKIP", detail
+            else:
+                status, extra = "ok", detail
         except Failure as exc:
             failures += 1
             status, extra = "FAIL", str(exc)
@@ -781,7 +818,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name:10} {status:6} {time.monotonic() - started:5.1f}s  {extra}")
 
     print("-" * 72)
-    print(f"{len(selected) - failures}/{len(selected)} passed")
+    passed = len(selected) - failures - skipped
+    summary = f"{passed}/{len(selected)} passed"
+    if skipped:
+        summary += f", {skipped} skipped"
+    print(summary)
     return 1 if failures else 0
 
 
