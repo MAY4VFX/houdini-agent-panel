@@ -159,6 +159,7 @@ def test_fx_pending_false_when_plugin_not_loaded():
 def test_mcp_servers_pins_port_when_known(monkeypatch):
     monkeypatch.setattr(scene, "fx_port", lambda: 8101)
     monkeypatch.setattr(scene, "fx_python", lambda: "/opt/python3.12")
+    monkeypatch.delenv("HAP_MCP_PATH", raising=False)
 
     servers = scene.mcp_servers()
 
@@ -170,9 +171,40 @@ def test_mcp_servers_pins_port_when_known(monkeypatch):
             "env": [
                 {"name": "HOUDINI_HOST", "value": "127.0.0.1"},
                 {"name": "HOUDINI_PORT", "value": "8101"},
+                {"name": "PYTHONPATH", "value": ""},
             ],
         }
     ]
+
+
+def test_mcp_servers_clears_pythonpath_when_no_mcp_path_is_recorded(monkeypatch):
+    """The belt-and-suspenders half of the `shellenv.py` fix: even if some
+    other leak someday hands PYTHONPATH to the process this server is
+    spawned under, an explicit empty override here neutralizes it for THIS
+    child specifically — an interpreter with `HAP_MCP_PATH` unset is
+    assumed to carry its own matching `fxhoudinimcp` (`install.py::
+    _mcp_python`), and a leaked, differently-versioned PYTHONPATH is
+    exactly what breaks that assumption."""
+    monkeypatch.setattr(scene, "fx_port", lambda: 8100)
+    monkeypatch.delenv("HAP_MCP_PATH", raising=False)
+
+    entry = scene.mcp_servers()[0]
+
+    pythonpaths = [item["value"] for item in entry["env"] if item["name"] == "PYTHONPATH"]
+    assert pythonpaths == [""]
+
+
+def test_mcp_servers_still_sets_hap_mcp_path_when_recorded(monkeypatch):
+    """The override above must not shadow the real, intentional case: an
+    interpreter that DOES need telling (Houdini's own plain CPython) still
+    gets its actual deps tree, not the empty override."""
+    monkeypatch.setattr(scene, "fx_port", lambda: 8100)
+    monkeypatch.setenv("HAP_MCP_PATH", "/deps/py3.13")
+
+    entry = scene.mcp_servers()[0]
+
+    pythonpaths = [item["value"] for item in entry["env"] if item["name"] == "PYTHONPATH"]
+    assert pythonpaths == ["/deps/py3.13"]
 
 
 def test_mcp_servers_env_is_a_list_not_a_dict(monkeypatch):

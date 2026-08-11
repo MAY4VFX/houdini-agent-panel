@@ -239,6 +239,26 @@ def mcp_servers() -> list[dict]:
     mcp_path = os.environ.get("HAP_MCP_PATH")
     if mcp_path:
         env.append({"name": "PYTHONPATH", "value": mcp_path})
+    else:
+        # Explicit, not merely absent: an entry here OVERRIDES whatever
+        # PYTHONPATH the agent process this server is spawned under
+        # happens to carry — the agent inherits its own env into every
+        # stdio MCP child it starts, on top of only what we list here.
+        # `fx_python()` in this branch is assumed to already have its own
+        # matching `fxhoudinimcp` (see `install.py::_mcp_python`), and
+        # that assumption is exactly what a leaked PYTHONPATH from
+        # elsewhere breaks — measured for real: Houdini's own package json
+        # writes `PYTHONPATH=$HAP_DEPS` for the PANEL's benefit, and one
+        # unrelated bug (`shellenv.py`, since fixed) was enough for that to
+        # reach this exact process and point a completely different
+        # Python's compiled extensions at it. An empty value neutralizes
+        # PYTHONPATH the same way leaving it unset would (verified:
+        # `PYTHONPATH=""` and no `PYTHONPATH` at all produce an identical
+        # `sys.path`) — this is a floor under `HAP_MCP_PATH`'s own
+        # contract, not a new behavior, so nothing here needs to survive
+        # this exact leak recurring some other way to keep the fx server
+        # working.
+        env.append({"name": "PYTHONPATH", "value": ""})
     return [
         {
             "name": FX_SERVER_NAME,
