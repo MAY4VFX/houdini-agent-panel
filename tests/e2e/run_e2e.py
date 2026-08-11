@@ -245,6 +245,59 @@ def check_prompt(agent_id: str) -> str:
         return f"replied {reply.strip()[:40]!r}"
 
 
+def check_answer_reaches_the_feed(agent_id: str) -> str:
+    """Not "the agent replied" — "the artist can read the reply".
+
+    `check_prompt` above watches `message_chunk` on the client, and that is
+    exactly the blind spot that let a real bug ship: opencode sends its
+    reasoning and its answer under ONE `messageId`, both entries took that id
+    as their own, and `TranscriptView` resolves an id by taking the first
+    entry carrying it — so every chunk of the answer was drawn into the
+    thought's row. The chunks arrived, the client signals fired, every
+    signal-level check passed, and the panel showed the agent thinking and
+    never showed what it said.
+
+    So this one reads the panel's own feed and its own rows: reasoning and
+    answer must be separate entries, no two entries may share an id, and
+    every answer must have a widget of its own on screen. Run it per agent —
+    this is the check that says whether THAT agent's streaming actually
+    renders.
+    """
+    with Harness(agent_id) as h:
+        h.connect()
+        session_id = h.open_session()
+        h.say("Think briefly, then reply with the single word OK and nothing else.")
+
+        entries = h.panel._model(session_id).entries()
+        answers = [e for e in entries if e.kind == "agent" and e.text.strip()]
+        thoughts = [e for e in entries if e.kind == "thought" and e.text.strip()]
+        if not answers:
+            kinds = [(e.kind, e.text[:20]) for e in entries]
+            raise Failure(f"the turn produced no readable answer entry; feed was {kinds}")
+
+        ids = [e.id for e in entries]
+        duplicated = {i for i in ids if ids.count(i) > 1}
+        if duplicated:
+            raise Failure(
+                f"two feed entries share an id ({sorted(duplicated)[:3]}) — "
+                "only the first of them can ever be redrawn"
+            )
+
+        # Queued chunk renders are drained by the event loop; ask for them
+        # now rather than race it.
+        h.panel._flush_transcript()
+        _app.processEvents()
+        rows = h.panel._transcript._rows
+        undrawn = [e.id for e in answers if e.id not in rows]
+        if undrawn:
+            raise Failure(f"answer entries with no row on screen: {undrawn}")
+
+        return (
+            f"{len(answers)} answer entr{'y' if len(answers) == 1 else 'ies'}, "
+            f"{len(thoughts)} thought(s), all drawn"
+        )
+
+
 def check_mcp(agent_id: str) -> str:
     """The whole point of the panel: the agent can see the scene."""
     with Harness(agent_id) as h:
@@ -581,6 +634,7 @@ CHECKS = {
     "connect": check_connect,
     "session": check_session,
     "prompt": check_prompt,
+    "feed": check_answer_reaches_the_feed,
     "mcp": check_mcp,
     "switch": check_agent_switch_keeps_conversations,
     "persist": check_conversations_persist_across_restart,

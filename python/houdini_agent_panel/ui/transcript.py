@@ -320,10 +320,6 @@ class TranscriptView(QtWidgets.QScrollArea):
 
     # --- auto-scroll -------------------------------------------------------
 
-    def _is_at_bottom(self) -> bool:
-        bar = self.verticalScrollBar()
-        return bar.value() >= bar.maximum() - _BOTTOM_EPSILON
-
     def _scroll_to_bottom(self) -> None:
         bar = self.verticalScrollBar()
         self._scrolling_ourselves = True

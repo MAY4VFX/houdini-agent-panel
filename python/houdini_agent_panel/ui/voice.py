@@ -586,10 +586,14 @@ class VoiceButton(QtWidgets.QToolButton):
         self.setVisible(True)
 
     def is_available(self) -> bool:
+        """Whether the backend actually constructed — independent of
+        `_apply_availability`'s own visibility decision above, which stays
+        off while `_VOICE_INPUT_AVAILABLE` is unconditionally False. Kept
+        (unlike its sibling `unavailable_reason`, dropped as unused
+        elsewhere): `test_voice.py` still asserts on this directly as the
+        sanity check that a backend was wired even though the button
+        itself never becomes visible."""
         return self._backend is not None
-
-    def unavailable_reason(self) -> str:
-        return self._unavailable_reason
 
     # --- recording -------------------------------------------------------
 
