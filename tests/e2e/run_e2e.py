@@ -847,25 +847,62 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source: {_SOURCE} — {os.path.dirname(panel_mod.__file__)}")
     print("-" * 72)
 
+    # This run drives the REAL `conversations.json` — `Harness.__enter__`'s
+    # own docstring says why, and it is the whole point. What it may not do
+    # is leave anything behind in it: `check_prompt`, `check_mcp`,
+    # `check_answer_reaches_the_feed` and others each open a real session
+    # and send a real message, and a real `panel.shutdown()` in `Harness.
+    # __exit__` persists that conversation exactly the way closing Houdini
+    # for real would. Found for real, on the owner's own machine: 36 stray
+    # conversations ("Reply with the single word OK", "E2E conversation",
+    # "Across restart", ...) accumulated across repeated runs — every
+    # `--only` subset, every re-run while iterating on a fix, one more
+    # conversation nobody asked for.
+    #
+    # Two of the checks below (`check_session_close_on_delete`,
+    # `check_conversations_scoped_to_scene`) already clean up their own
+    # conversation in their own `finally:` — narrow, per-check, and correct
+    # as far as it goes. What was missing is the general case: EVERY check
+    # that opens a session leaves one behind, and most never clean up at
+    # all. A snapshot-and-sweep here, once, covers all of them without
+    # touching each check individually — anything that exists at the start
+    # of this run is the owner's; anything new by the end is this run's,
+    # and gets removed, whether the run passed or crashed.
+    #
+    # This does not race the two "must survive" checks (`switch`, `persist`)
+    # — both read `conversations_store.load()` and assert on it BEFORE this
+    # sweep ever runs, from inside their own `try` in the loop below; the
+    # sweep only runs after every check has already had its turn.
+    before_ids = {c.id for c in conversations_store.load()}
+    before_active = conversations_store.load_active_id()
+
     failures = 0
     skipped = 0
-    for name in selected:
-        started = time.monotonic()
-        try:
-            detail = CHECKS[name](args.agent)
-            if detail.startswith(_SKIP_PREFIX):
-                skipped += 1
-                status, extra = "SKIP", detail
-            else:
-                status, extra = "ok", detail
-        except Failure as exc:
-            failures += 1
-            status, extra = "FAIL", str(exc)
-        except Exception as exc:  # noqa: BLE001 - a broken check is a failed check
-            failures += 1
-            status, extra = "ERROR", f"{type(exc).__name__}: {exc}"
-            traceback.print_exc()
-        print(f"{name:10} {status:6} {time.monotonic() - started:5.1f}s  {extra}")
+    try:
+        for name in selected:
+            started = time.monotonic()
+            try:
+                detail = CHECKS[name](args.agent)
+                if detail.startswith(_SKIP_PREFIX):
+                    skipped += 1
+                    status, extra = "SKIP", detail
+                else:
+                    status, extra = "ok", detail
+            except Failure as exc:
+                failures += 1
+                status, extra = "FAIL", str(exc)
+            except Exception as exc:  # noqa: BLE001 - a broken check is a failed check
+                failures += 1
+                status, extra = "ERROR", f"{type(exc).__name__}: {exc}"
+                traceback.print_exc()
+            print(f"{name:10} {status:6} {time.monotonic() - started:5.1f}s  {extra}")
+    finally:
+        after = conversations_store.load()
+        kept = [c for c in after if c.id in before_ids]
+        removed = len(after) - len(kept)
+        if removed:
+            conversations_store.save(kept, active_id=before_active)
+        print(f"swept {removed} conversation(s) this run created")
 
     print("-" * 72)
     passed = len(selected) - failures - skipped
