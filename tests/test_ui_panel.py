@@ -670,11 +670,63 @@ def test_last_tab_closing_also_clears_that_agents_dead_sessions(qapp):
 
 
 def test_shutdown_is_idempotent(qapp):
-    """Houdini may call onDestroyInterface twice; the second call must
-    neither crash nor take someone else's client down."""
+    """Houdini may call onDestroyInterface twice; the second call must not
+    crash. (What the FIRST call does to a sibling tab sharing the same
+    agent is a separate claim, covered on its own by
+    test_shutdown_does_not_stop_a_sibling_tabs_shared_client below — this
+    test used to bundle both into one docstring with only the first one
+    actually checked.)"""
     widget = _make_panel(qapp)
     widget.shutdown()
     widget.shutdown()
+
+
+def test_shutdown_does_not_stop_a_sibling_tabs_shared_client(qapp):
+    """`shutdown`'s own docstring (`ui/panel.py`): "The agent connection
+    only goes down once the last tab closes: while any tab is still alive,
+    the conversation must keep going." Two tabs on the same agent id share
+    one `AcpClient` (`shared_client`, `test_two_panels_on_the_same_agent_
+    share_one_client_and_one_pool`) — closing one of them must not stop
+    it out from under the other, and the survivor must still be able to
+    do real work afterward, not just report `is_running()` truthfully.
+    """
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    first = _make_panel(qapp)
+    second = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    assert panel_mod.shared_client(first._agent_id) is client
+    assert panel_mod.shared_client(second._agent_id) is client
+    client._running = True
+    stop_calls: list[bool] = []
+    orig_stop = client.stop
+    client.stop = lambda: (stop_calls.append(True), orig_stop())[1]
+
+    first.shutdown()
+
+    assert not stop_calls, "closing one of two tabs must not stop their shared client"
+    assert client.is_running() is True
+    assert panel_mod.shared_client(second._agent_id) is client, (
+        "the survivor's own client must not have been dropped/replaced either"
+    )
+
+    # The survivor is not just alive by report — a real session_started for
+    # THIS agent still reaches it, proving its own signal wiring (torn down
+    # in `shutdown`, per-tab, not per-client) is intact.
+    client.session_started.emit(
+        "s1",
+        sessions.SessionState(session_id="s1", title="New conversation", cwd="/tmp", created_at=0.0),
+    )
+    qapp.processEvents()
+    assert second._pool.get("s1") is not None, (
+        "the surviving tab must still be able to receive live updates from the shared client"
+    )
+
+    second.shutdown()
+    assert stop_calls, "the LAST tab closing must still stop the now-unshared client"
 
 
 def test_shutdown_releases_the_settings_and_composers_own_workers(qapp, monkeypatch):

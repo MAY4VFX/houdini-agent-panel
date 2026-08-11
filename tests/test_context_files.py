@@ -27,15 +27,35 @@ def _tempdir_does_not_overlap_tmp_path(monkeypatch, tmp_path):
 # --- the no-op cases ---------------------------------------------------------
 
 
-def test_none_directory_writes_nothing():
+def test_none_directory_writes_nothing(caplog):
     """`scene.real_hip_dir()` returns `None` for an unsaved scene — this
-    must be a deliberate no-op, not a fall-through to some other path."""
+    must be a deliberate no-op, not a fall-through to some other path.
+
+    There is nowhere on disk to check for absence — `None` never becomes a
+    `Path` at all, by design (`ensure_context_files`'s own `if not
+    directory: return`, before anything else runs). What CAN be checked,
+    and wasn't: that this is the specific branch actually taken, not some
+    other path that also happens not to write anything and not to raise —
+    `ensure_context_files`'s own `except Exception` would swallow a real
+    regression here just as quietly. The early-return branch logs its own
+    reason; its absence would mean something else ran instead.
+    """
+    caplog.set_level("INFO", logger="houdini_agent_panel.context_files")
     context_files.ensure_context_files(None)
-    # Nothing to assert on disk; the only failure mode here is an exception.
+    assert any("nothing written" in r.message for r in caplog.records), (
+        "the early-return branch for a falsy directory must be the one that ran"
+    )
 
 
-def test_empty_string_directory_writes_nothing(tmp_path):
+def test_empty_string_directory_writes_nothing(tmp_path, caplog):
+    """Same reasoning as `test_none_directory_writes_nothing` — `""` is
+    just as falsy as `None` to `ensure_context_files`'s own check, and
+    deserves the same proof it took the SAME branch, not a coincidence."""
+    caplog.set_level("INFO", logger="houdini_agent_panel.context_files")
     context_files.ensure_context_files("")
+    assert any("nothing written" in r.message for r in caplog.records), (
+        "the early-return branch for a falsy directory must be the one that ran"
+    )
 
 
 @pytest.mark.parametrize(

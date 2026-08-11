@@ -43,9 +43,21 @@ def test_setup_twice_does_not_double_every_line(data_dir):
     assert text.count("boom") == 1
 
 
-def test_logging_never_raises_when_the_directory_is_unusable(monkeypatch):
-    """A log that breaks the panel is worse than no log."""
+def test_logging_never_raises_when_the_directory_is_unusable(data_dir, monkeypatch):
+    """A log that breaks the panel is worse than no log — and the panel
+    writes it precisely when something is wrong, which is exactly when
+    `logs_dir()` itself might be the thing that's broken (a volume still
+    mounting, a permissions problem at launch).
+
+    Two claims, both checked: `setup()`/a later `.error()` call must not
+    raise while the directory stays broken (the failure this used to check
+    on its own), AND the earlier failure must not leave anything wedged —
+    once the directory becomes usable again, a forced re-`setup()` must
+    actually start writing, not stay silently disabled forever because
+    `_configured` was already set True on the failed attempt.
+    """
     _reset()
+    real_logs_dir = logbook.paths.logs_dir
 
     def explode():
         raise OSError("read-only filesystem")
@@ -53,7 +65,19 @@ def test_logging_never_raises_when_the_directory_is_unusable(monkeypatch):
     monkeypatch.setattr(logbook.paths, "logs_dir", explode)
     logbook.setup()  # must not raise
 
-    logbook.logger("houdini_agent_panel.test").error("still fine")
+    logbook.logger("houdini_agent_panel.test").error("still fine")  # must not raise either
+
+    # The directory becomes usable again — same process, same session, the
+    # transient problem that caused `explode` above has cleared.
+    monkeypatch.setattr(logbook.paths, "logs_dir", real_logs_dir)
+    logbook.setup(force=True)
+    logbook.logger("houdini_agent_panel.test").error("recovered")
+
+    text = logbook.log_path().read_text("utf-8")
+    assert "recovered" in text, (
+        "logging must actually resume once the directory is usable again — "
+        "not stay disabled forever because the earlier failure left `_configured` set"
+    )
 
 
 def test_disabled_by_env_writes_nothing(data_dir, monkeypatch):
