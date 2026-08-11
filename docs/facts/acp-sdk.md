@@ -2879,3 +2879,67 @@ flow that shipped because the code was measured against a stand-in rather
 than the real build. The stand-in read `sys.stdin.readline()`, which is
 canonical-mode and perfectly happy with `\n`. The test passed for months
 and proved nothing about the program it was standing in for.
+
+## 29. §23's billing conclusion, updated — the change it relied on was paused before it shipped
+
+Checked 2026-08-11, for issue #41's remaining "billing line in the
+sign-in UI" item, before writing any UI copy — §23 already concluded one
+should exist ("that fact belongs in front of the artist at the sign-in
+step"), but its own sourcing ("secondary context, explicitly NOT a
+primary source": a February 2026 press statement and an April 2026
+announcement) turned out to be stale by the time it was written, not
+just weak. A directly relevant, more authoritative, more recent source
+existed and wasn't found: Anthropic's own support article,
+`support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-
+your-claude-plan`, page itself dated "Last Updated: June 16, 2026" —
+eight days before §23's own "checked 2026-08-07".
+
+**What that page says, verbatim:** Anthropic proposed, for June 15,
+2026, exactly the mechanism §23 concluded was already true — "Claude
+Agent SDK and `claude -p` usage no longer counts toward your Claude
+plan's usage limits" — but then paused it on the day it was due to take
+effect: **"Update June 15: We're pausing the changes to Claude Agent SDK
+usage described below."** And, load-bearing for this project specifically:
+**"For now, nothing has changed: Claude Agent SDK, `claude -p`, and
+third-party app usage still draw from your subscription's usage
+limits."** The promised monthly credit ("Agent SDK credit": $20 Pro,
+$100 Max 5x, $200 Max 20x) explicitly "isn't available" as a result.
+Anthropic says it is "working to update the plan" and will "share
+updates before anything takes effect" — no relaunch date given.
+
+Corroborated independently by press covering the same pause, not just
+the original announcement: Zed's own blog (`zed.dev/blog/anthropic-
+subscription-changes` — Zed ships another ACP client in the same
+position this panel is in, and states the June 15 mechanism would have
+applied to "Claude Code through ACP, in Zed or anywhere else," i.e. this
+project too, had it shipped), TechCrunch, VentureBeat, and The New
+Stack. One secondary search summary claimed the change "went live July
+10" — traced back to no actual article content on re-fetch (the page
+returned only navigation chrome, no article body), contradicted by every
+source that DID yield real content including Anthropic's own, and not
+trusted here for exactly the reason this section exists: an unverified
+claim is not a fact because it appears confident.
+
+**What this means for #41's checklist item:** the specific claim briefed
+("a subscription used through a third-party client like this one spends
+metered extra usage instead of the flat subscription rate") is not
+something the best currently-available evidence supports as true RIGHT
+NOW — the mechanism that would have made it true was announced, then
+explicitly paused before taking effect, with no confirmed date since.
+§23's own reasoning for surfacing this in the UI at all — "silently
+moving a subscriber onto metered billing is not acceptable" — still
+holds if and when Anthropic actually ships something like it; it just
+was not, as of this check, currently true to state as settled fact in
+front of an artist about to sign in.
+
+Not established: whether the April 2026 OpenClaw-specific enforcement
+(cutting that one product's Pro/Max coverage, ahead of and separate from
+the May/June "Agent SDK credit" proposal for everyone) is still in
+effect for OpenClaw specifically, or whether it generalizes to any
+third-party harness independent of the paused mechanism above — the
+sources found describe it as a targeted action against one named
+product, not a general policy statement with its own text to quote.
+Anthropic's billing stance here has changed more than once in a few
+months; treat anything written here as dated the moment it's read, and
+re-check the support article directly (not secondary coverage of it)
+before relying on this again.
