@@ -258,6 +258,13 @@ FX_SERVER_NAME = "fxhoudini"
 def fx_port() -> int | None
     """The fx server's port in THIS Houdini process. None — the server isn't up."""
 
+def fx_pending() -> bool
+    """True while `fxhoudinimcp_server.startup.is_starting()` says the
+    plugin's own async auto-start readiness poll is in flight — worth a
+    bounded wait (ui/panel.py's `_poll_fx_wait`) because a port answer is
+    seconds away. False for every other case, including no plugin at all —
+    those will never produce a port no matter how long anyone waits."""
+
 def fx_host() -> str                       # "127.0.0.1"
 
 def fx_python() -> str

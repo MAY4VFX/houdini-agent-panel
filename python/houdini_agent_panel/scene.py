@@ -94,6 +94,29 @@ def fx_port() -> int | None:
     return port
 
 
+def fx_pending() -> bool:
+    """True when `fxhoudinimcp_server`'s own auto-start readiness poll is
+    IN FLIGHT in this process right now — worth a bounded wait, because a
+    port answer is likely seconds away. False for every other case,
+    including "no plugin at all": there is nothing there to wait ON.
+
+    `startup.is_starting()` is the precise signal for this — set the
+    instant `uiready.py` hands its readiness poll to a worker thread, and
+    cleared the moment that poll settles either way (up to `startup.
+    _READINESS_TIMEOUT` = 15s, measured in the installed package). This is
+    deliberately NOT `not fx_port()`: that's also true once the poll has
+    already given up, or when autostart never ran at all (autostart_agent
+    off, or the plugin isn't loaded) — none of those will ever produce a
+    port no matter how long anyone waits, so treating them as "pending"
+    would just be a fixed delay for no reason.
+    """
+    try:
+        import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - see the module docstring
+    except ImportError:
+        return False
+    return startup.is_starting()
+
+
 def _cached_scan_for_any_fx_port() -> int | None:
     global _scanned_port
     if _scanned_port is not None:

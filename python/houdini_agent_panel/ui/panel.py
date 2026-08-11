@@ -305,6 +305,21 @@ def _text_of_blocks(blocks: list[dict]) -> str:
 #: what an artist reports when nothing at all appears after a click.
 _NEW_SESSION_GRACE_MS = 20_000
 
+#: How often `_poll_fx_wait` re-checks `scene.fx_pending()`. Cheap (an
+#: in-process attribute read via `fxhoudinimcp_server.startup.is_starting()`
+#: — no HTTP, no `hou`), so there is nothing to gain by polling less often;
+#: this only has to be short enough that the session doesn't linger for a
+#: whole extra interval once the port is actually known.
+_FX_WAIT_POLL_MS = 500
+
+#: Ceiling for that wait, before the panel gives up and opens the session
+#: without Houdini tools rather than leave the artist looking at nothing.
+#: Matches `fxhoudinimcp_server.startup`'s own readiness-poll ceiling (15s,
+#: see `scene.fx_pending`'s docstring) — that poll will have settled one way
+#: or the other by then, so waiting any longer only delays a session that
+#: was never going to get a port this time.
+_FX_WAIT_CEILING_MS = 15_000
+
 #: A live failure on the owner's own Linux box (docs/facts/acp-sdk.md §18):
 #: a browser tab reached "you're all set up," the spawned `claude setup-
 #: token` was still running minutes later, and the panel never moved past
@@ -2467,6 +2482,23 @@ class AgentPanel(QtWidgets.QWidget):
         the artist clicks "+", nothing appears, and the only available
         conclusion is that the button is broken. So the request is announced
         when it goes out and chased up if the answer never comes.
+
+        One thing has to happen even earlier than any of that: `scene.
+        mcp_servers()` bakes the fx server's port into THIS session's config
+        once, right here, and `fxhoudinimcp`'s own auto-start is
+        asynchronous — its readiness poll can still be in flight the
+        instant this runs (measured: on the owner's own machine, port found
+        24 times out of 120, "found 10s later" being the typical miss). A
+        session opened into that gap pins no port and stays toolless for
+        its whole life, fixable only by starting a new conversation. `scene.
+        fx_pending()` is what tells the difference between "worth a bounded
+        wait" and "nothing here will ever produce a port no matter how long
+        anyone waits" — see its own docstring. Applied to every call site of
+        this method, autostart's own first session included: a manual "+"
+        pressed in that same narrow window right after Houdini's own launch
+        is exactly the same bug for an artist who has autostart turned off,
+        and `fx_pending()` already keeps the wait from ever firing outside
+        that window, click or no click.
         """
         client = shared_client(self._agent_id)
         if not client.is_running():
@@ -2478,6 +2510,78 @@ class AgentPanel(QtWidgets.QWidget):
             else:
                 self._open_agent_management()
             return
+        if scene.fx_pending():
+            self._begin_fx_wait()
+            return
+        self._open_new_session()
+
+    def _begin_fx_wait(self) -> None:
+        """Entered once, right before the first `_poll_fx_wait` tick — the
+        one place that announces the wait, so a poll firing every
+        `_FX_WAIT_POLL_MS` doesn't repeat itself in the feed.
+
+        The boot strip already covers this for an autostart boot (`_start_
+        agent` → `begin_boot` set `_active` before this ever runs) — its
+        PHASE_SESSION step just gets a truer detail string below. A manual
+        "+" on an agent that's already running shows no strip at all
+        (`BootStatus.set_phase`'s own guard), so that case needs its own
+        word in the feed or the wait looks like nothing is happening.
+        """
+        _log.info(
+            "new session: fx server hasn't confirmed ready yet — waiting up to %sms "
+            "before opening without it",
+            _FX_WAIT_CEILING_MS,
+        )
+        if not self._composer.boot_status().is_booting():
+            self._note("Waiting for Houdini's MCP server to finish starting…")
+        self._poll_fx_wait(_FX_WAIT_CEILING_MS)
+
+    def _poll_fx_wait(self, remaining_ms: int) -> None:
+        """One tick of the bounded wait `_begin_fx_wait` started.
+
+        Never `sleep`/`while`/`processEvents` — this is a `QTimer.
+        singleShot` chain riding the event loop that is already running,
+        exactly like `_report_stalled_new_session`'s own grace timer just
+        below. Houdini stays responsive for the whole wait.
+        """
+        if self._closed:
+            return  # the tab went away while this was waiting
+        if not scene.fx_pending():
+            # Either the port is in by now, or fxhoudinimcp's own poll gave
+            # up on its own — either way there is nothing left to wait FOR.
+            _log.info("new session: fx wait ended, port=%s", scene.fx_port())
+            self._open_new_session()
+            return
+        if remaining_ms <= 0:
+            _log.warning(
+                "new session: fx server still hasn't confirmed ready after %sms — "
+                "opening the session without Houdini tools",
+                _FX_WAIT_CEILING_MS,
+            )
+            self._note(
+                "Houdini's MCP server is taking longer than usual to start — "
+                "this conversation won't have Houdini tools. Start a new "
+                "chat once it's ready.",
+                error=True,
+            )
+            self._open_new_session()
+            return
+        self._composer.set_boot_phase(
+            PHASE_SESSION, "Waiting for Houdini's MCP server to finish starting…"
+        )
+        QtCore.QTimer.singleShot(
+            _FX_WAIT_POLL_MS, lambda: self._poll_fx_wait(remaining_ms - _FX_WAIT_POLL_MS)
+        )
+
+    def _open_new_session(self) -> None:
+        """The actual `session/new` round trip — split out of `_start_new_
+        session` so a wait for the fx server (`_poll_fx_wait`) can land here
+        however it ends, with `scene.mcp_servers()` read fresh at THIS
+        moment rather than whatever it said before the wait began.
+        """
+        client = shared_client(self._agent_id)
+        if not client.is_running():
+            return  # the agent went away while this was waiting on fx
         before = {state.session_id for state in self._pool.all()}
         problem = scene.mcp_python_status()
         if problem:

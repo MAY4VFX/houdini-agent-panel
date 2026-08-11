@@ -23,11 +23,12 @@ def _clean_fake_modules():
         sys.modules.pop(name, None)
 
 
-def _install_fake_startup(*, running: bool, port: int) -> None:
+def _install_fake_startup(*, running: bool, port: int, starting: bool = False) -> None:
     package = types.ModuleType("fxhoudinimcp_server")
     startup = types.ModuleType("fxhoudinimcp_server.startup")
     startup.is_running = lambda: running
     startup.get_port = lambda: port
+    startup.is_starting = lambda: starting
     package.startup = startup
     sys.modules["fxhoudinimcp_server"] = package
     sys.modules["fxhoudinimcp_server.startup"] = startup
@@ -114,6 +115,42 @@ def test_fx_port_scan_does_not_rescan_once_a_port_is_found(monkeypatch):
     assert scene.fx_port() == 8103
     assert scene.fx_port() == 8103
     assert len(calls) == 1
+
+
+# --- fx_pending ------------------------------------------------------------
+
+
+def test_fx_pending_true_while_the_readiness_poll_is_in_flight():
+    """The exact race the first-session bug is about: the plugin is loaded,
+    auto-start already kicked off `uiready.py`'s async worker thread, and
+    that thread hasn't confirmed readiness yet. Worth waiting for — the
+    port is likely to appear within `fxhoudinimcp_server.startup`'s own
+    15s ceiling."""
+    _install_fake_startup(running=False, port=8100, starting=True)
+    assert scene.fx_pending() is True
+
+
+def test_fx_pending_false_once_the_server_is_up():
+    """Nothing left to wait for — `fx_port()` already has an answer."""
+    _install_fake_startup(running=True, port=8100, starting=False)
+    assert scene.fx_pending() is False
+
+
+def test_fx_pending_false_when_the_poll_never_started():
+    """Autostart off, or the plugin loaded too late to have kicked off its
+    worker thread yet — `is_starting()` is False and so is `is_running()`.
+    There is no poll in flight to wait on, so waiting here would just be a
+    fixed delay for no reason."""
+    _install_fake_startup(running=False, port=8100, starting=False)
+    assert scene.fx_pending() is False
+
+
+def test_fx_pending_false_when_plugin_not_loaded():
+    """No `fxhoudinimcp_server` in this process at all (fixture guarantees
+    it's absent) — the HTTP-scan fallback path, not the in-process one.
+    Nothing here will ever set `is_starting()`, so there's nothing to wait
+    for."""
+    assert scene.fx_pending() is False
 
 
 # --- mcp_servers ---------------------------------------------------------

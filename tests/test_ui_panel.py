@@ -2379,6 +2379,153 @@ def test_starting_a_session_stays_quiet_when_the_mcp_interpreter_is_fine(qapp, m
     widget.shutdown()
 
 
+# --- waiting for a fx server that hasn't confirmed ready yet ---------------
+#
+# The race this answers: `fxhoudinimcp_server`'s own auto-start is
+# asynchronous (`uiready.py` polls readiness on a worker thread), and
+# `autostart_agent` can create a session before that poll finishes. A
+# session opened at that moment pins no port and is toolless for its whole
+# life (`scene.mcp_servers()`'s own comment). `scene.fx_pending()` is the
+# signal that says "the poll is in flight, worth a bounded wait" — these
+# tests are about `_start_new_session` actually acting on it.
+
+
+def test_new_session_does_not_wait_when_fx_is_not_pending(qapp, monkeypatch):
+    """The common case — either the port is already known, or there is
+    nothing to wait FOR (no plugin). No poll timer, no wait note."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    widget._start_new_session()
+
+    assert calls, "session/new was never sent"
+    widget.shutdown()
+
+
+def test_new_session_waits_for_a_pending_fx_server_then_opens_it(qapp, monkeypatch):
+    """The fx server confirms ready midway through the wait — the session
+    is opened with the by-then-current `mcp_servers()`, not the stale one
+    from the moment `_start_new_session` was first called."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    pending = [True]
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: pending[0])
+    monkeypatch.setattr(
+        panel_mod.scene,
+        "mcp_servers",
+        lambda: [{"name": "fxhoudini", "command": "python", "args": [], "env": [{"name": "HOUDINI_PORT", "value": "8100"}]}],
+    )
+
+    widget._start_new_session()
+    assert not calls, "the session was opened before waiting for the fx server at all"
+
+    pending[0] = False  # the readiness poll settled, port now known
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS)
+
+    assert calls, "the session was never opened once the fx server became ready"
+    assert calls[-1]["mcp_servers"][0]["env"] == [{"name": "HOUDINI_PORT", "value": "8100"}]
+    widget.shutdown()
+
+
+def test_new_session_gives_up_waiting_at_the_ceiling(qapp, monkeypatch):
+    """The fx server never confirms ready within the wait's ceiling — the
+    session opens anyway (never leaving the artist with a dead panel), and
+    the feed says plainly why there are no Houdini tools this time."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: True)  # never resolves
+
+    widget._start_new_session()
+    assert not calls
+
+    widget._poll_fx_wait(0)  # the ceiling has been reached
+
+    assert calls, "the session was never opened once the ceiling was hit"
+    entries = widget._model("__idle__").entries()
+    assert entries, "the artist was told nothing about the missing Houdini tools"
+    assert entries[-1].kind == "error"
+    assert "Houdini" in entries[-1].text
+    widget.shutdown()
+
+
+def test_new_session_wait_is_announced_when_no_boot_strip_is_on_screen(qapp, monkeypatch):
+    """A manual "+" on an already-running agent shows no boot strip
+    (`BootStatus.set_phase`'s own guard) — the busy indicator covers the
+    ordinary `session/new` wait, but nothing covers THIS extra one ahead of
+    it, so it needs its own word in the feed."""
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: True)
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    assert widget._composer.boot_status().is_booting() is False
+
+    widget._start_new_session()
+
+    entries = widget._model("__idle__").entries()
+    assert entries, "the artist was left with no explanation for the delay"
+    assert "Houdini" in entries[-1].text
+    widget.shutdown()
+
+
+def test_new_session_wait_reuses_the_boot_strip_when_one_is_already_up(qapp, monkeypatch):
+    """During an autostart boot the strip is already on screen — the wait
+    speaks through its existing "Opening a conversation" step instead of
+    also dropping a redundant note into the feed."""
+    from houdini_agent_panel.ui import boot_status as boot_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("codex-acp")
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: True)
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    widget._composer.begin_boot("Codex")
+    before = list(widget._model("__idle__").entries())
+
+    widget._start_new_session()
+
+    assert widget._model("__idle__").entries() == before, (
+        "a redundant feed note was added while the boot strip already said it"
+    )
+    strip = widget._composer.boot_status()
+    assert strip.phase() == boot_mod.PHASE_SESSION
+    assert strip.text() != "Opening a conversation", "the wait must say more than the generic step"
+    widget.shutdown()
+
+
 def test_a_half_written_prompt_is_never_overwritten(qapp):
     """Offering a command is help; losing what someone was typing to make
     room for it is not."""
