@@ -521,6 +521,31 @@ class SettingsView(QtWidgets.QWidget):
         )
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
+        # `Settings.isolate_agent_config` — see runtime.py::
+        # _with_config_isolation. Off by default: today's behavior (every
+        # agent sees the artist's own account config, MCP servers included,
+        # same as a terminal launch) is what artists already have.
+        self._isolate_agent_config_checkbox = QtWidgets.QCheckBox(
+            "Launch agents with a config of their own (Claude only, for now)", self
+        )
+        self._isolate_agent_config_checkbox.toggled.connect(self._on_field_changed)
+        self._isolate_agent_config_caption = QtWidgets.QLabel(
+            "Off: an agent sees your own account config exactly like it would "
+            "from a terminal — its MCP servers, settings, marketplace skills. "
+            "On: it gets an empty config of its own instead, reserved for this "
+            "panel, so a personal MCP server (or one sharing fxhoudini's own "
+            "name) can never sit in front of the panel's tools. Sign-in this "
+            "panel captured through “Sign in…” still works either way — "
+            "a `claude login` done in a real terminal does not carry over, and "
+            "needs signing in again inside the isolated config. Currently only "
+            "Claude (claude-acp) honors this; every other agent ignores it and "
+            "keeps working exactly as before. Applies the next time that agent "
+            "starts.",
+            self,
+        )
+        self._isolate_agent_config_caption.setWordWrap(True)
+        self._isolate_agent_config_caption.setStyleSheet("color: palette(disabled, text);")
+
         # A bare scheme+host (no path) gets `/v1/audio/transcriptions`
         # appended by `ui/voice.py::_normalize_whisper_endpoint` — the
         # documented service (and most OpenAI-compatible self-hosted
@@ -721,6 +746,12 @@ class SettingsView(QtWidgets.QWidget):
         data_section.add_row("Bug report endpoint", self._bugreport_endpoint_edit)
         data_section.add_action_row(self._report_bug_button)
 
+        # Collapsed by default, same rank as Network/Privacy/Data: a niche
+        # switch most artists never need to touch.
+        agent_config_section = _Section("Agent config", self, expanded=False, grid=grid_metrics)
+        agent_config_section.add_checkbox(self._isolate_agent_config_checkbox)
+        agent_config_section.add_widget(self._isolate_agent_config_caption)
+
         # Kept as attributes (not just locals) so a test can reach a given
         # section's grid directly, the same way `test_ui_settings.py`
         # already reaches `view._autostart_checkbox` etc. — see
@@ -730,6 +761,7 @@ class SettingsView(QtWidgets.QWidget):
         self._updates_section = updates_section
         self._voice_section = voice_section
         self._privacy_section = privacy_section
+        self._agent_config_section = agent_config_section
         self._network_section = network_section
         self._data_section = data_section
 
@@ -750,6 +782,7 @@ class SettingsView(QtWidgets.QWidget):
             voice_section,
             privacy_section,
             network_section,
+            agent_config_section,
             data_section,
         ):
             rail_layout.addWidget(widget)
@@ -885,6 +918,7 @@ class SettingsView(QtWidgets.QWidget):
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
             self._ca_bundle_edit.setText(current.ca_bundle)
+            self._isolate_agent_config_checkbox.setChecked(current.isolate_agent_config)
             self._refresh_version_labels()
             # A reload is a fresh read of what's on disk, not an edit — the
             # invitation to restart only belongs to an edit THIS screen just
@@ -917,6 +951,7 @@ class SettingsView(QtWidgets.QWidget):
         current.proxy_url = self._proxy_edit.text().strip()
         current.no_proxy = self._no_proxy_edit.text().strip()
         current.ca_bundle = self._ca_bundle_edit.text().strip()
+        current.isolate_agent_config = self._isolate_agent_config_checkbox.isChecked()
         settings_module.save(current)
         return current
 

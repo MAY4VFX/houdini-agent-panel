@@ -72,6 +72,17 @@ def agent_dir(agent_id: str) -> Path:
     return _sub("agents", agent_id)
 
 
+def agent_config_dir(agent_id: str) -> Path:
+    """A fresh, panel-owned directory to hand an agent as its OWN account
+    config directory (Claude's `CLAUDE_CONFIG_DIR` — see `settings.py::
+    Settings.isolate_agent_config`), instead of whatever the artist's real
+    account already has (personal MCP servers, a marketplace, `settings.json`
+    permissions). Created empty; the agent populates it on first use, same as
+    it would `~/.claude` on a machine that never ran it before.
+    """
+    return _sub("agent-config", agent_id)
+
+
 def node_dir() -> Path:
     return _sub("node")
 

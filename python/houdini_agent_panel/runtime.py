@@ -401,10 +401,11 @@ def install_agent(
         node_bin = node_module.ensure_node(progress=progress, fetch=fetch)
         _write_manifest(entry, kind="npx")
         spec = _npx_launch_spec(node_bin, dist)
+        env = _with_config_isolation(_with_proxy(spec.env, settings), entry.id, settings)
         return LaunchSpec(
             command=spec.command,
             args=spec.args,
-            env=_with_proxy(spec.env, settings),
+            env=env,
             path_prepend=spec.path_prepend,
         )
 
@@ -511,6 +512,51 @@ def _with_oauth_tokens(env: dict[str, str], agent_id: str, settings_obj) -> dict
     return merged
 
 
+#: Agents known to honor `CLAUDE_CONFIG_DIR` — verified by reading
+#: `claude-agent-acp`'s own bundled `dist/acp-agent.js`
+#: (`process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude")`)
+#: and the Claude Agent SDK it wraps, not assumed from the name. Every other
+#: registry/custom agent has no verified equivalent, so
+#: `_with_config_isolation` is a no-op for them — see `Settings.
+#: isolate_agent_config`'s own docstring.
+_CONFIG_DIR_ENV_VAR = {"claude-acp": "CLAUDE_CONFIG_DIR"}
+
+
+def _with_config_isolation(env: dict[str, str], agent_id: str, settings_obj) -> dict[str, str]:
+    """Point a supported agent at a panel-owned config directory instead of
+    the artist's real one, when `Settings.isolate_agent_config` is on.
+
+    Ordered like `_with_proxy`/`_with_oauth_tokens`: the agent's own env
+    (`env`) wins if it already sets the same variable a different way — an
+    artist who exported `CLAUDE_CONFIG_DIR` themselves on a Custom Agent
+    made a deliberate choice this must not override.
+
+    Does NOT touch sign-in captured through this panel
+    (`Settings.agent_oauth_tokens` / `CLAUDE_CODE_OAUTH_TOKEN`): that is read
+    by the Claude CLI straight from the environment, never from a file under
+    the config directory (verified in the SDK's own bundle — the same
+    `!process.env.CLAUDE_CODE_OAUTH_TOKEN` check runs whether or not
+    `CLAUDE_CONFIG_DIR` is set). An artist signed in through a REAL `claude
+    login` on their own machine, with no captured token on file, does start
+    signed out inside the isolated directory — same as any other setting
+    this panel does not carry over — and needs `/login` again from inside a
+    conversation, or Sign in with the token flow this panel already offers.
+    """
+    from . import settings as settings_module
+
+    resolved = settings_module.load() if settings_obj is None else settings_obj
+    if not resolved.isolate_agent_config:
+        return env
+    var = _CONFIG_DIR_ENV_VAR.get(agent_id)
+    if var is None:
+        return env
+    from . import paths as paths_module
+
+    merged = {var: str(paths_module.agent_config_dir(agent_id))}
+    merged.update(env)
+    return merged
+
+
 def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
     """The launch command for an already-installed agent.
 
@@ -540,7 +586,9 @@ def launch_spec(entry: AgentEntry, *, settings=None) -> LaunchSpec:
         version_dir = paths.agent_dir(entry.id) / entry.version
         spec = _binary_launch_spec(version_dir, dist)
 
-    env = _with_oauth_tokens(_with_proxy(spec.env, settings), entry.id, settings)
+    env = _with_config_isolation(
+        _with_oauth_tokens(_with_proxy(spec.env, settings), entry.id, settings), entry.id, settings
+    )
     return LaunchSpec(
         command=spec.command, args=spec.args, env=env, path_prepend=spec.path_prepend
     )

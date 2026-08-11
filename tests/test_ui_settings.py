@@ -20,6 +20,7 @@ def test_reload_reflects_defaults(qapp):
     assert view._check_updates_checkbox.isChecked() is True
     assert view._show_announcements_checkbox.isChecked() is True
     assert view._telemetry_checkbox.isChecked() is False
+    assert view._isolate_agent_config_checkbox.isChecked() is False
     assert view._whisper_edit.text() == ""
     assert view._proxy_edit.text() == ""
     assert view._no_proxy_edit.text() == ""
@@ -76,6 +77,17 @@ def test_toggling_checkbox_persists_and_emits_changed(qapp):
 
     assert received == [True]
     assert settings_module.load().telemetry is True
+
+
+def test_isolate_agent_config_persists_and_survives_reload(qapp):
+    view = SettingsView()
+
+    view._isolate_agent_config_checkbox.setChecked(True)
+
+    assert settings_module.load().isolate_agent_config is True
+
+    reloaded = SettingsView()
+    assert reloaded._isolate_agent_config_checkbox.isChecked() is True
 
 
 def test_whisper_endpoint_persists(qapp):

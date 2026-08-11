@@ -175,6 +175,17 @@ class Settings:
     #: Codex/Gemini/Grok/Kimi — not yet established either way) has
     #: somewhere to go without a second field.
     agent_oauth_tokens: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Launch agents against a panel-owned config directory instead of the
+    #: artist's real one (`runtime.py::_with_config_isolation`,
+    #: `paths.agent_config_dir`). Off by default: today's behavior — every
+    #: agent sees the artist's own account config exactly as a terminal
+    #: launch would — is what artists already have and expect, and turning
+    #: it off is the surprising direction. Currently only `claude-acp` has a
+    #: documented variable for this (`CLAUDE_CONFIG_DIR`); every other agent
+    #: ignores the setting entirely rather than have us guess at a mechanism
+    #: we haven't verified (design.md: "the agent doesn't support it — the
+    #: control doesn't get drawn").
+    isolate_agent_config: bool = False
 
     # --- serialization
 
