@@ -106,6 +106,54 @@ def test_the_shell_is_only_asked_once(monkeypatch):
     assert len(calls) == 1
 
 
+def test_the_shell_does_not_inherit_houdinis_own_environment(monkeypatch):
+    """The regression this module now guards against: Houdini's package json
+    writes `PYTHONPATH`/`HAP_DEPS`/`HAP_PYTHON` into Houdini's own process
+    environment for the panel's own benefit (`houdini_package.py`). Spawning
+    the "login shell" from that environment relays those straight through —
+    `env -0` cannot tell "the profile set this" from "this was already
+    there" — and a deps tree built for one Python's ABI ended up on
+    `PYTHONPATH` for a completely different interpreter the fx MCP server
+    was launched with, breaking `pydantic_core` and killing the connection
+    in under a second. `subprocess.run` must be given an explicit `env=`
+    that does NOT include these, no matter what the real `os.environ` has.
+    """
+    monkeypatch.setenv("PYTHONPATH", "/Users/artist/Library/Application Support/HoudiniAgentPanel/deps/py3.13")
+    monkeypatch.setenv("HAP_DEPS", "/Users/artist/Library/Application Support/HoudiniAgentPanel/deps/py3.13")
+    monkeypatch.setenv("HAP_PYTHON", "/some/interpreter")
+    seen_env: list[dict] = []
+
+    def _record(*_args, **kwargs):
+        seen_env.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"A=1\0", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", _record)
+    shellenv.capture()
+
+    assert seen_env, "subprocess.run was never called"
+    spawn_env = seen_env[0]
+    assert spawn_env is not None, "env= was not passed — the shell would inherit the full parent environment"
+    assert "PYTHONPATH" not in spawn_env
+    assert "HAP_DEPS" not in spawn_env
+    assert "HAP_PYTHON" not in spawn_env
+
+
+def test_hap_prefixed_variables_never_survive_even_if_the_shell_prints_them(monkeypatch):
+    """Second line of defense, independent of the spawn-env fix above: a
+    variable the shell itself echoes back (e.g. because some future code
+    path widens the spawn env again) is still not "the artist's
+    environment" if it is one of ours."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_run(b"HAP_DEPS=/leaked\0HAP_PYTHON=/leaked\0REAL_KEY=kept\0"),
+    )
+    env = shellenv.capture()
+    assert "HAP_DEPS" not in env
+    assert "HAP_PYTHON" not in env
+    assert env["REAL_KEY"] == "kept"
+
+
 def test_the_shell_is_asked_interactively(monkeypatch):
     """Not a style choice, and got wrong here first.
 

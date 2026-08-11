@@ -27,6 +27,27 @@ thread Houdini paints with.
 What this does NOT do is decide anything about the values. Nothing is
 logged, nothing is filtered by name, nothing is "recognised" as a secret and
 treated specially — the panel is a courier here, not a reader.
+
+One thing IS filtered, and this paragraph is the exception to the one above:
+`subprocess.run` inherits the calling process's FULL environment unless told
+otherwise, and the calling process is Houdini — carrying `PYTHONPATH`,
+`HAP_DEPS`, `HAP_PYTHON` because our OWN installer wrote them into Houdini's
+package json for the panel's own benefit (`houdini_package.py`). Spawning the
+"login shell" straight from `os.environ` doesn't ask the artist's `.zprofile`
+for those — it just relays what was already there before the shell even
+started, and a plain `env -0` can't tell the difference. Measured for real:
+`fx_python()`'s own interpreter (deliberately NOT on `HAP_MCP_PATH`, chosen
+because it carries its own matching `fxhoudinimcp` install — see
+`install.py::_mcp_python`) received our `PYTHONPATH=$HAP_DEPS` anyway,
+pointed at a deps tree built for a different Python's ABI, and
+`pydantic_core`'s compiled extension failed to import — closing the MCP
+connection in under a second. Nothing downstream (`merged()`, `client.py`)
+had a reason to strip `PYTHONPATH`; it looked exactly like a value the
+artist's own profile had set. So `capture()` starts the shell from a bare
+minimum instead of the calling process's environment — the same six
+variables the ACP SDK itself trims a subprocess to (see above) — and drops
+anything named `HAP_*` from the result as a second, cheap line of defense
+against this exact class of leak recurring some other way.
 """
 
 from __future__ import annotations
@@ -51,6 +72,34 @@ _SHELL_OWN = frozenset(
         "TERM_PROGRAM_VERSION",
     }
 )
+
+#: The ONLY variables the login-shell subprocess starts with — the same six
+#: the ACP SDK itself trims a subprocess to (`acp.transports.
+#: DEFAULT_INHERITED_ENV_VARS`, see the module docstring). Deliberately NOT
+#: `os.environ` in full: the caller is Houdini, and Houdini's own
+#: environment carries `PYTHONPATH`/`HAP_DEPS`/`HAP_PYTHON` — written there
+#: by our OWN installer for the panel's own benefit
+#: (`houdini_package.py::package_json`), not by anything the artist's
+#: `.zprofile`/`.zshrc` ever set. `subprocess.run` inherits the full parent
+#: environment unless told otherwise, and `env -0` cannot tell "the shell's
+#: profile set this" from "this was already here before the shell started" —
+#: so without this, capturing "the artist's real terminal" actually captures
+#: "Houdini's own process env, plus whatever the profile adds on top",
+#: quietly handing Houdini-internal variables to every agent the panel
+#: launches. This is not a style choice: it is exactly how a deps tree built
+#: for one Python's ABI ended up on `PYTHONPATH` for a DIFFERENT interpreter
+#: the fx MCP server was deliberately launched with instead — the import
+#: failed, the connection closed in under a second, and nothing in the
+#: panel's own log said why (`docs/facts/acp-sdk.md`, MCP servers).
+_SPAWN_BASE_KEYS = ("HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER")
+
+#: Second, cheap line of defense: whatever the shell prints, a variable
+#: named `HAP_*` is ours (the installer's own marker prefix — see
+#: `houdini_package.py`) and can never legitimately be "the artist's
+#: environment". Catches this exact leak even if some other future code path
+#: starts the capture subprocess with a wider base env than
+#: `_SPAWN_BASE_KEYS` again.
+_OURS_PREFIX = "HAP_"
 
 #: How long to wait for the shell. An interactive login shell is normally
 #: well under two seconds (measured: 0.26–1.19s on a machine with a prompt
@@ -106,11 +155,18 @@ def capture(*, force: bool = False) -> dict[str, str]:
         # NUL-separated: values legitimately contain newlines (a proxy
         # exclusion list, a multi-line key), and splitting on newlines would
         # quietly truncate them into nonsense.
+        #
+        # `env=` is deliberately a small, fixed dict, not `os.environ` —
+        # see `_SPAWN_BASE_KEYS`. Starting the shell from our own full
+        # environment would let Houdini's `PYTHONPATH`/`HAP_*` ride along as
+        # if the artist's profile had set them.
+        spawn_env = {k: os.environ[k] for k in _SPAWN_BASE_KEYS if k in os.environ}
         result = subprocess.run(
             [_shell(), "-ilc", "env -0"],
             capture_output=True,
             timeout=_TIMEOUT,
             check=False,
+            env=spawn_env,
         )
         if result.returncode == 0:
             for chunk in result.stdout.split(b"\0"):
@@ -128,6 +184,8 @@ def capture(*, force: bool = False) -> dict[str, str]:
         captured = {}
 
     for key in _SHELL_OWN:
+        captured.pop(key, None)
+    for key in [k for k in captured if k.startswith(_OURS_PREFIX)]:
         captured.pop(key, None)
 
     with _lock:
