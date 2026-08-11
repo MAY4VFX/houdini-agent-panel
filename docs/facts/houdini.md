@@ -873,3 +873,86 @@ Consequence: anything asyncio-based that the panel launches through a
 Houdini interpreter needs the stock policy restored first. This is not
 hypothetical — `HAP_PYTHON` is whatever python ran the installer, and
 running it through `hython` is the documented way to update.
+
+---
+
+## 18. `hou.hipFile` event types — what actually fires, measured, not read off the enum's names
+
+Measured 2026-08-11 on Houdini 22.0.368 (macOS), under `hython`, entirely
+against scratch `.hip` files — no interaction with any artist's own open
+Houdini or real scene. `hou.hipFileEventType` has nine members:
+`BeforeClear`, `AfterClear`, `BeforeLoad`, `AfterLoad`, `BeforeSave`,
+`AfterSave`, `BeforeMerge`, `AfterMerge`, `BeforeQuit`. A callback
+registered via `hou.hipFile.addEventCallback(cb)` is invoked as
+`cb(event_type)`, one positional argument, no keywords — confirmed by
+reading the real values back through it, not from documentation.
+
+This was needed to fix a real, owner-reproduced bug: an artist's already-
+open conversation stayed on screen (and "current") after opening a
+DIFFERENT saved scene into the same Houdini session, because nothing ever
+told the difference between "the scene got a new/first path via Save"
+(the conversation should follow) and "a genuinely different scene just
+opened" (it should not) — see `ui/panel.py::AgentPanel._on_hip_dir_
+changed`, `scene.py::watch_hip_dir_changes`.
+
+### The probe
+
+```python
+import hou
+
+def on_event(event_type):
+    print(event_type, hou.hipFile.path(), hou.hipFile.isNewFile())
+
+hou.hipFile.addEventCallback(on_event)
+```
+Then, in order, on scratch files A and B: `clear()`, `save(A)` (first
+save of a new scene), `save(B)` (Save As), `clear()` (File > New),
+`load(A)` (File > Open a saved scene), `save()` with no args (plain Save,
+already-saved file), `merge(B)`.
+
+### What fired, per operation
+
+| Operation | Events, in order | `path()` | `isNewFile()` |
+|---|---|---|---|
+| `clear()` on an already-new scene | `BeforeClear` → `AfterClear` | `untitled.hip` throughout | `True` throughout |
+| `save(A)` — first save of a new scene | `BeforeSave` → `AfterSave` | **A already, in `BeforeSave` too** | `False` already, in `BeforeSave` too |
+| `save(B)` — Save As | `BeforeSave` → `AfterSave` | B already, in `BeforeSave` too | `False` |
+| `clear()` — File > New, from a saved scene | `BeforeClear` (path=old) → `AfterClear` (path=`untitled.hip`) | old → `untitled.hip` | old value → `True` |
+| `load(A)` — File > Open a saved scene | `BeforeLoad` → `BeforeClear` → `AfterClear` → `AfterLoad` | stays old through `BeforeLoad`/`BeforeClear`, **A already at the inner `AfterClear`** | old value through `BeforeClear`, **`False` already at the inner `AfterClear`** |
+| `save()`, no args — plain Save | `BeforeSave` → `AfterSave` | A (unchanged) | `False` |
+| `merge(B)` | `BeforeMerge` → `AfterMerge` | A throughout (unaffected) | `False` throughout |
+
+### The two facts that made the fix possible
+
+1. **`Save` (including the very first save of a new scene, and Save As)
+   never fires `Clear` or `Load` at all** — just `BeforeSave`/`AfterSave`,
+   and `hou.hipFile.path()` already reports the NEW target path even
+   inside `BeforeSave`, before the write has happened. This is what makes
+   `AfterSave` a clean, unambiguous signal for "the scene got a new/first
+   real path" — nothing else needs filtering out.
+
+2. **`load()` fires a NESTED `BeforeClear`/`AfterClear` pair partway
+   through**, and by the time that inner `AfterClear` fires,
+   `hou.hipFile.path()` already names the file BEING LOADED (not
+   `untitled.hip`) and `isNewFile()` already reads `False` — the opposite
+   of what a genuine File > New's `AfterClear` looks like (`untitled.hip`,
+   `isNewFile()` `True`). A callback that reacted to every `AfterClear` the
+   same way would fire an extra, premature "new scene" signal on every
+   single File > Open, ahead of the `AfterLoad` that actually means the
+   load finished. Checking `isNewFile()` at the moment `AfterClear` fires
+   is what tells the two apart — `event_type` alone cannot, both are
+   `AfterClear`.
+
+Consequence for the callback contract `scene.watch_hip_dir_changes` now
+exposes: three outcomes, not nine events — `"saved"` (`AfterSave`),
+`"loaded"` (`AfterLoad`), `"new"` (`AfterClear`, gated on `isNewFile()`
+being `True` at that exact moment, which excludes the inner one a Load
+fires). Everything else (every `Before*`, `AfterMerge`) is swallowed —
+nothing downstream currently needs a "before" signal, and a merge loads
+geometry into the CURRENT scene without touching `$HIP` at all (measured:
+`path()` never changed across `merge()`).
+
+Not established: whether `BeforeQuit` ever reaches a registered callback
+in practice under the panel's own usage (Houdini closing tends to race
+`shutdown()`'s own unregister first) — not measured here, and nothing
+currently depends on it.

@@ -125,10 +125,117 @@ def test_scene_change_rescopes_the_header_and_restores_its_conversations(qapp, m
 
     # The artist opens the real scene into this same Houdini session.
     current_cwd["value"] = new_cwd
-    captured[0]()
+    captured[0]("loaded")
 
     assert widget._header._cwd_label.text() == new_cwd
     assert "Rotor pyro" in [s.title for s in widget._pool.all()]
+    widget.shutdown()
+
+
+def test_opening_a_different_scene_removes_the_old_scenes_live_conversation(qapp, monkeypatch, tmp_path):
+    """The bug the owner reproduced: a conversation stays open (and
+    `current`) after File > Open swaps the scene underneath it — even
+    though its own `SessionState.cwd` now names a folder that isn't open
+    any more. `kind="loaded"`/`"new"` sweep it out of the pool; a
+    conversation genuinely scoped to the NEW folder is left untouched."""
+    old_cwd = str(tmp_path / "old_shot")
+    new_cwd = str(tmp_path / "new_shot")
+    current_cwd = {"value": old_cwd}
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: current_cwd["value"])
+    captured: list = []
+    monkeypatch.setattr(
+        panel_mod.scene, "watch_hip_dir_changes", lambda callback: captured.append(callback) or callback
+    )
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._boot()
+    old_state = sessions.SessionState(
+        session_id="old-live", title="Old shot work", cwd=old_cwd, created_at=0.0
+    )
+    other_state = sessions.SessionState(
+        session_id="new-live", title="Already the new shot", cwd=new_cwd, created_at=0.0
+    )
+    widget._pool.add(old_state)
+    widget._pool.add(other_state)
+    widget._set_current_session("old-live")
+
+    current_cwd["value"] = new_cwd
+    captured[0]("loaded")
+
+    ids = [s.session_id for s in widget._pool.all()]
+    assert "old-live" not in ids, "the old scene's conversation must not survive opening a new one"
+    assert "new-live" in ids, "a conversation already scoped to the new scene must not be swept too"
+    assert widget._current_session_id != "old-live"
+    widget.shutdown()
+
+
+def test_opening_a_different_scene_never_closes_the_swept_sessions_agent_session(
+    qapp, monkeypatch, tmp_path
+):
+    """The non-negotiable part: sweeping a stale conversation out of the
+    pool must never send `session/cancel` or `session/close` — the agent
+    keeps running it, untouched, exactly as `_on_hip_dir_changed`'s own
+    docstring promises. Only `SessionPool.remove` (a local bookkeeping
+    change) is allowed; `_release_session`/`close_session` is not."""
+    old_cwd = str(tmp_path / "old_shot")
+    new_cwd = str(tmp_path / "new_shot")
+    current_cwd = {"value": old_cwd}
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: current_cwd["value"])
+    captured: list = []
+    monkeypatch.setattr(
+        panel_mod.scene, "watch_hip_dir_changes", lambda callback: captured.append(callback) or callback
+    )
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._boot()
+    widget._pool.add(
+        sessions.SessionState(session_id="old-live", title="Busy", cwd=old_cwd, created_at=0.0, busy=True)
+    )
+    widget._set_current_session("old-live")
+
+    closed: list = []
+    monkeypatch.setattr(panel_mod.shared_client("claude-acp"), "close_session", closed.append)
+
+    current_cwd["value"] = new_cwd
+    captured[0]("loaded")
+
+    assert closed == [], "a still-running turn must keep running — its session must not be closed"
+    widget.shutdown()
+
+
+def test_saving_to_a_new_path_rebinds_the_live_conversation_instead_of_removing_it(
+    qapp, monkeypatch, tmp_path
+):
+    """`kind="saved"`: the scene got a new/first real path. The conversation
+    that was open when it happened MOVES with it — same session, same
+    pool entry, `cwd` updated in place — rather than being swept the way
+    an actual File > Open/New would."""
+    old_cwd = str(tmp_path / "untitled_fallback")
+    new_cwd = str(tmp_path / "shots" / "shot010")
+    current_cwd = {"value": old_cwd}
+    monkeypatch.setattr(panel_mod.scene, "hip_dir", lambda: current_cwd["value"])
+    captured: list = []
+    monkeypatch.setattr(
+        panel_mod.scene, "watch_hip_dir_changes", lambda callback: captured.append(callback) or callback
+    )
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._boot()
+    widget._pool.add(
+        sessions.SessionState(session_id="live-1", title="Untitled work", cwd=old_cwd, created_at=0.0)
+    )
+    widget._set_current_session("live-1")
+
+    current_cwd["value"] = new_cwd
+    captured[0]("saved")
+
+    ids = [s.session_id for s in widget._pool.all()]
+    assert "live-1" in ids, "a saved scene's conversation must not be removed"
+    assert widget._pool.get("live-1").cwd == new_cwd
+    assert widget._current_session_id == "live-1"
     widget.shutdown()
 
 

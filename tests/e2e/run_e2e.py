@@ -748,7 +748,24 @@ def check_session_close_on_delete(agent_id: str) -> str:
 def check_conversations_scoped_to_scene(agent_id: str) -> str:
     """A conversation belongs to the scene ($HIP) it happened in — opening
     a different scene must not show it (see the `fa349f3`/scene-scoping
-    fix)."""
+    fix).
+
+    Only ever proved this at BOOT time — scene A's `Harness`/panel was torn
+    down before scene B's was even constructed, so this checked `_boot()`'s
+    own fresh-scoped `_restore_conversations()`, never `_on_hip_dir_
+    changed()` at all. The bug this was actually meant to guard against
+    (owner-reported, reproduced live) lives entirely in the SECOND path: a
+    conversation stays open and current in an ALREADY-RUNNING panel after
+    the artist opens a different scene into the SAME Houdini session — a
+    fresh panel construction can never exercise that, no matter how many
+    scenes it's pointed at one after another. Same class of gap as
+    `check_sign_in_reachable`'s old shape: green for a reason that has
+    nothing to do with what it's named for.
+
+    Rewritten to change `$HIP` underneath ONE already-booted panel and fire
+    the real callback `scene.watch_hip_dir_changes` would have (`"loaded"`),
+    the way `hou.hipFile`'s own `AfterLoad` does — not a second panel.
+    """
     real_hip_dir = scene.hip_dir
     original_active_id = conversations_store.load_active_id()
     scene_a = "/tmp/hap-e2e-scene-a"
@@ -761,16 +778,19 @@ def check_conversations_scoped_to_scene(agent_id: str) -> str:
             session_id = h.open_session()
             h.panel._pool.get(session_id).title = stored_title
             h.panel._model(session_id).append_user("only visible in scene A")
-            h.panel._persist_conversations()
+            h.panel._current_hip_dir = scene_a
 
-        scene.hip_dir = lambda: scene_b
-        with Harness(agent_id) as h2:
-            h2.connect()
-            h2.open_session()
-            titles = [s.title for s in h2.panel._pool.all()]
-            if stored_title in titles:
-                raise Failure("a conversation saved in a different scene was visible here")
-            return "a conversation saved in one scene stays hidden when $HIP points elsewhere"
+            scene.hip_dir = lambda: scene_b
+            h.panel._on_hip_dir_changed("loaded")
+
+            ids = [s.session_id for s in h.panel._pool.all()]
+            if session_id in ids:
+                raise Failure(
+                    "the scene A conversation stayed in the pool after opening scene B"
+                )
+            if h.panel._current_session_id == session_id:
+                raise Failure("the scene A conversation was still the current one")
+            return "an already-open conversation is dropped when the live scene changes"
     finally:
         scene.hip_dir = real_hip_dir
         remaining = [c for c in conversations_store.load() if c.title != stored_title]

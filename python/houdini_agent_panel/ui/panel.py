@@ -507,6 +507,13 @@ class AgentPanel(QtWidgets.QWidget):
         #: can remove it — `None` before `_boot()` registers it, and once
         #: more after. See `_on_hip_dir_changed` for what it's for.
         self._hip_watch_handle: Any = None
+        #: `scene.hip_dir()` as of the last time this tab actually looked —
+        #: set once in `_boot()`, updated at the end of every
+        #: `_on_hip_dir_changed`. `_on_hip_dir_changed` needs the OLD value
+        #: to tell "rebind to this new path" (Save) from "this belonged to
+        #: a scene we just left" (Open/New) — `scene.hip_dir()` itself only
+        #: ever answers with the CURRENT one.
+        self._current_hip_dir: str = ""
         self._launch_worker: _LaunchPrepWorker | None = None
         self._registry_entries: list = []
         self._pending_agent_label: str = ""
@@ -1067,7 +1074,8 @@ class AgentPanel(QtWidgets.QWidget):
             self._rejoin_agent(agent_id)
 
         self._restore_conversations()
-        self._header.set_cwd(scene.hip_dir())
+        self._current_hip_dir = scene.hip_dir()
+        self._header.set_cwd(self._current_hip_dir)
         self._write_context_files()
         # `_restore_conversations` and the header's cwd label are both
         # scoped to `scene.hip_dir()` AT THIS MOMENT, and nothing above
@@ -1124,23 +1132,94 @@ class AgentPanel(QtWidgets.QWidget):
             return
         self._start_agent(agent_id)
 
-    def _on_hip_dir_changed(self) -> None:
+    def _on_hip_dir_changed(self, kind: str) -> None:
         """The scene underneath this tab may have just moved — File > Open,
-        File > New, a merge, a load — see `scene.watch_hip_dir_changes`'s
-        own docstring for the bug this closes. Re-does exactly what
-        `_boot()` did once, using `scene.hip_dir()`'s CURRENT answer:
-        `_restore_conversations` already reads it fresh and is already
-        idempotent (skips anything already in `self._pool`), so nothing
-        about what it does needed to change, only how often it runs.
-        `context_files.ensure_context_files` is the same story — it's a
-        no-op past the first real scene folder it ever sees, so calling it
-        again here is what actually gets AGENTS.md/CLAUDE.md written the
-        first time the artist opens a REAL scene into a tab that booted
-        against an unsaved one.
+        File > New, or a Save that gave it a new/first path —
+        `scene.watch_hip_dir_changes`'s own docstring has the measured
+        event mechanics and what `kind` ("saved"/"loaded"/"new") means.
+
+        Two bugs lived here before this: the header/`AGENTS.md`/restored-
+        conversations scoping never re-ran after boot (fixed by re-running
+        them every time this fires, unconditionally, below); and — the one
+        `kind` exists to fix — whatever conversation was CURRENT when the
+        scene changed just stayed on screen and stayed the current session,
+        even once it plainly belonged to a scene that was no longer open.
+        `_persist_conversations()` already attributes a conversation to the
+        scene it actually happened in correctly (via the live `SessionState.
+        cwd` captured at `session/new` time, not whatever `scene.hip_dir()`
+        says NOW) — the gap was entirely on the display side.
+
+        The fix does not touch the agent's own process or any session on
+        the wire — never `cancel`, never `close_session`. Every ACP session
+        already carries its own `cwd`, fixed at the moment it was opened
+        (`session/new`'s own `cwd` argument); the agent process itself was
+        never "in the wrong directory", only this tab's OWN pointer to
+        which session belongs on screen was. A `"saved"` scene keeps its
+        conversation exactly because the session and its tools are still
+        correctly rooted where the artist just saved TO — nothing about the
+        live agent needs to change, only where this panel considers that
+        conversation to live from now on.
+
+        - `"saved"`: the scene got a new (or first) real path. Every
+          session in the pool that was scoped to the OLD path (this tab's
+          own `self._current_hip_dir`, about to be replaced below) moves
+          WITH it — `state.cwd` updated in place, `SessionPool.mark_
+          changed` so the drawer picks it up, then persisted immediately
+          rather than left to whatever the next unrelated trigger happens
+          to be. Nothing is removed from the pool; nothing stops being
+          current.
+        - `"loaded"` / `"new"`: a genuinely different scene is now open (or
+          none, for a fresh unsaved file — same `$HOME` fallback
+          `hip_dir()` always used). Every pool session scoped to a
+          DIFFERENT folder than the one now open — live ones and the
+          read-only `_RESTORED_PREFIX` placeholders `_restore_conversations`
+          already added for the scene being left alike — is dropped from
+          the POOL only (`SessionPool.remove`, never `_release_session`):
+          this already fires the pool's own `removed` signal, which `_on_
+          pool_session_removed` already handles correctly for every tab
+          sharing this agent's pool (falls back to another open session, or
+          to none) — the exact mechanism `_switch_agent_process` already
+          relies on for the same shape of problem when switching agents
+          mid-conversation. A live session dropped this way keeps running
+          on the wire untouched; if a turn was in flight, it finishes
+          in the background as an ordinary background session
+          (`_touch`'s own `self._pool.get(session_id) is None` branch
+          already handles updates for a session with no pool entry without
+          raising). The one thing that does NOT survive a genuinely
+          different scene opening is staying on screen as "current" —
+          `_restore_conversations` below repopulates the pool with
+          whatever the NEWLY open scene already has stored.
+
+        Not established (an existing limitation, not one this introduces):
+        two DIFFERENT unsaved scenes opened back to back both resolve to
+        the SAME `$HOME` fallback (`hip_dir()`'s own approximation, no real
+        per-file identity for an unsaved scene) — a conversation from the
+        first stays visible through a File > New into the second, since
+        old and new cwd are identical strings. `AfterClear` alone cannot
+        distinguish "a different never-saved scene" from "the same one,
+        cleared again" — nothing in the event stream carries that fact.
         """
-        self._header.set_cwd(scene.hip_dir())
+        old_hip = self._current_hip_dir
+        new_hip = scene.hip_dir()
+        self._header.set_cwd(new_hip)
         self._write_context_files()
+
+        if kind == "saved":
+            moved = False
+            for state in self._pool.all():
+                if state.cwd == old_hip and state.cwd != new_hip:
+                    state.cwd = new_hip
+                    self._pool.mark_changed(state.session_id)
+                    moved = True
+            if moved:
+                self._persist_conversations()
+        else:
+            for state in list(self._pool.all()):
+                if state.cwd and state.cwd != new_hip:
+                    self._pool.remove(state.session_id)
+
         self._restore_conversations()
+        self._current_hip_dir = new_hip
 
     def _write_context_files(self) -> None:
         """AGENTS.md/CLAUDE.md, written once into the real scene folder (if

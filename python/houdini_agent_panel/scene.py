@@ -301,9 +301,9 @@ def real_hip_dir() -> str | None:
     return str(directory)
 
 
-def watch_hip_dir_changes(callback: Callable[[], None]) -> object:
+def watch_hip_dir_changes(callback: Callable[[str], None]) -> object:
     """Call `callback` whenever the scene underneath an already-open panel
-    might have moved — File > Open, File > New, a merge, a load. From the
+    might have moved — File > Open, File > New, a Save/Save As. From the
     main thread ONLY, same as `hip_dir()` itself: Houdini fires
     `hipFile` events synchronously on the thread that did the File > Open,
     which is always the main one.
@@ -321,16 +321,54 @@ def watch_hip_dir_changes(callback: Callable[[], None]) -> object:
     because a NEW message reads `hip_dir()` fresh; nothing ever went back
     and re-scoped the restore step.
 
+    `callback` now receives WHAT KIND of change this was — `"saved"`,
+    `"loaded"`, or `"new"` — one of the three outcomes `_on_hip_event`
+    turns Houdini's raw `hou.hipFileEventType` into. Measured on 22.0.368,
+    not assumed from the enum's own names (`docs/facts/houdini.md`,
+    "hipFile event types"): a conversation that just followed the scene to
+    a new/first path via Save is a different fact from one left behind by
+    opening or clearing a DIFFERENT scene, and `AgentPanel._on_hip_dir_
+    changed` needs to tell them apart to avoid closing a conversation the
+    artist only just saved.
+
+    - `"saved"` — `AfterSave`. `hou.hipFile.path()` already reports the
+      NEW path by the time this fires (even inside `BeforeSave`).
+    - `"loaded"` — `AfterLoad`. Measured: `hou.hipFile.load()` ALSO fires
+      a nested `BeforeClear`/`AfterClear` pair partway through — that
+      inner `AfterClear`'s own path already shows the file being loaded
+      (not "untitled") and `isNewFile()` is already `False` there. It is
+      deliberately NOT reported on its own (see next point); `AfterLoad`
+      right after it is the one signal that means the load actually
+      finished, with the correct final state.
+    - `"new"` — `AfterClear`, but ONLY when `hou.hipFile.isNewFile()` is
+      still `True` at that moment: File > New / Clear, as opposed to the
+      nested `AfterClear` a Load fires on its way to a real file (where
+      `isNewFile()` reads `False`, the case excluded above).
+
+    `BeforeSave`/`BeforeLoad`/`BeforeClear`/`AfterMerge`/`BeforeMerge`/
+    `BeforeQuit` are not reported at all: nothing here needs a "before"
+    signal yet, and a merge loads geometry into the CURRENT scene without
+    changing `$HIP` (measured: the path stays exactly where it was
+    throughout `hou.hipFile.merge()`).
+
     Returns the actual registered callback, which `unwatch_hip_dir_changes`
     needs back to remove the right one — `hou.hipFile.removeEventCallback`
     takes the exact callable that was added, and `callback` itself isn't
     it (it's wrapped, to swallow whatever this Houdini version passes an
-    event handler).
+    event handler and translate it into the three outcomes above).
     """
     import hou  # noqa: PLC0415
 
-    def _on_hip_event(*_args, **_kwargs) -> None:
-        callback()
+    def _on_hip_event(event_type=None, *_args, **_kwargs) -> None:
+        if event_type == hou.hipFileEventType.AfterSave:
+            callback("saved")
+        elif event_type == hou.hipFileEventType.AfterLoad:
+            callback("loaded")
+        elif event_type == hou.hipFileEventType.AfterClear and hou.hipFile.isNewFile():
+            callback("new")
+        # Anything else (a Before* event, AfterMerge, the nested AfterClear
+        # inside a Load) is deliberately not forwarded — see the docstring
+        # above for why each one is excluded.
 
     hou.hipFile.addEventCallback(_on_hip_event)
     return _on_hip_event
