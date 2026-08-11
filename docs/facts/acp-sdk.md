@@ -2418,6 +2418,16 @@ instead. Two independent sources agree on this: the April 2026
 announcement, and a shipping product that documents exactly that billing
 shape to its own users.
 
+> **Superseded — billing only. See §29.** The paragraph above is wrong as
+> of 2026-08-11: the mechanism it describes was announced and paused on
+> the same day (2026-06-15) and has not returned, so a Pro/Max
+> subscription used here still draws from that subscription's ordinary
+> limits — confirmed in practice by the owner, on their own account.
+> Nothing about billing goes in the sign-in UI on our initiative; the
+> owner did not ask for it and does not want it (`9674fdf` reverts the
+> one attempt). §23's other conclusion — the login path itself — is
+> untouched by this.
+
 This narrows the asymmetry above without erasing it. The permission
 question remains as written. The **billing** question, however, is now
 settled enough to act on, and it is the one that actually reaches an
