@@ -24,6 +24,18 @@ Behavior is selected via the ``FAKE_AGENT_SCENARIO`` environment variable:
 - ``load-fail`` — declares `loadSession: true`, but `session/load` always
   errors with `resource_not_found` — the "the agent said yes and then
   couldn't" case a real restart can produce.
+- ``load-slow`` — declares `loadSession: true`; `session/load` replays two
+  chunks with real delays between them and before answering, wide enough a
+  window to observe replay-vs-response ordering for real rather than
+  assume it from protocol wording.
+- ``steer`` — advertises `_meta.steering.supported` on `initialize` (the
+  extension `claude-agent-acp` carries, docs/facts/acp-sdk.md §31) and
+  implements `_session/steering` for real: while a `prompt` is in flight,
+  `ext_method("session/steering", ...)` records the injected text and lets
+  the prompt continue with a reply built from it, returning `{"outcome":
+  "injected"}`; with nothing in flight it answers `{"outcome":
+  "promptRequired", "reason": "noRunningTurn"}` when opted in, matching the
+  real adapter's own two documented outcomes for this codebase's client.
 """
 
 from __future__ import annotations
@@ -86,6 +98,10 @@ class FakeAgent:
         self._sessions: dict[str, str | None] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._session_counter = 0
+        # ``steer`` scenario only — see `_prompt_steer`/`ext_method`.
+        self._turns_in_flight: set[str] = set()
+        self._steer_events: dict[str, asyncio.Event] = {}
+        self._steer_injected: dict[str, str] = {}
 
     # --- ACP Agent protocol --------------------------------------------
 
@@ -112,12 +128,16 @@ class FakeAgent:
         return acp.InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
-                load_session=SCENARIO in ("load", "load-fail"),
+                load_session=SCENARIO in ("load", "load-fail", "load-slow"),
                 prompt_capabilities=prompt_caps,
                 auth=auth_caps,
             ),
             auth_methods=auth_methods,
             agent_info=Implementation(name="fake-agent", version="0.0.1"),
+            # Top-level `_meta`, sibling of `agent_capabilities` — exactly
+            # where `claude-agent-acp` advertises it (docs/facts/acp-sdk.md
+            # §31), not part of the typed schema.
+            field_meta={"steering": {"supported": True}} if SCENARIO == "steer" else None,
         )
 
     async def authenticate(self, method_id, **kwargs):
@@ -162,10 +182,29 @@ class FakeAgent:
         conversation is replayed as `session_update` notifications BEFORE
         this ever answers, so the client can rebuild the exact same
         transcript a live turn would have produced.
+
+        ``load-slow`` is the same replay, deliberately spread out with real
+        `asyncio.sleep`s between chunks and before the response — wide
+        enough a window for a test to observe whether replay notifications
+        are genuinely visible before `session_loaded` fires, not just
+        assumed to be from protocol wording alone.
         """
         if SCENARIO == "load-fail":
             raise RequestError.resource_not_found(session_id)
         self._sessions[session_id] = None
+        if SCENARIO == "load-slow":
+            await asyncio.sleep(0.2)
+            await self._client.session_update(
+                session_id=session_id,
+                update=_message_chunk("earlier: rotor pyro setup", "replay-1"),
+            )
+            await asyncio.sleep(0.2)
+            await self._client.session_update(
+                session_id=session_id,
+                update=_message_chunk("earlier: second reply", "replay-2"),
+            )
+            await asyncio.sleep(0.2)
+            return acp.LoadSessionResponse()
         await self._client.session_update(
             session_id=session_id, update=_message_chunk("earlier: rotor pyro setup", "replay-1")
         )
@@ -205,8 +244,37 @@ class FakeAgent:
             "permission": self._prompt_permission,
             "plan": self._prompt_plan,
             "slow": self._prompt_slow,
+            "steer": self._prompt_steer,
         }.get(SCENARIO, self._prompt_stream)
         return await handler(session_id, text)
+
+    async def ext_method(self, method: str, params: dict) -> dict:
+        """`_session/steering`, for real — the `steer` scenario only.
+        `ext_method` being defined at all auto-wires it for EVERY scenario
+        (`acp.agent.router.build_agent_router`, since `Agent` protocol
+        declares `ext_method` — `acp/agent/router.py:105-107`), so every
+        other scenario has to actively refuse it here to still stand in for
+        "this agent never advertised the extension at all," the same as a
+        real agent lacking it entirely would."""
+        if SCENARIO != "steer" or method != "session/steering":
+            raise RequestError.method_not_found(f"_{method}")
+        session_id = params.get("sessionId")
+        prompt = params.get("prompt") or []
+        text = "".join(
+            block.get("text", "")
+            for block in prompt
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+        idle_behavior = ((params.get("_meta") or {}).get("steering") or {}).get("idleBehavior")
+        if session_id not in self._turns_in_flight:
+            if idle_behavior == "promptRequired":
+                return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+            return {"outcome": "startedNewTurn"}
+        self._steer_injected[session_id] = text
+        event = self._steer_events.get(session_id)
+        if event is not None:
+            event.set()
+        return {"outcome": "injected"}
 
     # --- scenarios --------------------------------------------------------
 
@@ -263,6 +331,43 @@ class FakeAgent:
         except asyncio.TimeoutError:
             return acp.PromptResponse(stop_reason="end_turn")
         finally:
+            self._cancel_events.pop(session_id, None)
+
+    async def _prompt_steer(self, session_id: str, text: str):
+        """Stays "in flight" (per `ext_method`'s own check) until either a
+        steer lands or a cancel/timeout ends it — long enough for a test to
+        call `_session/steering` mid-turn, the way §31 was measured against
+        the real adapter."""
+        self._turns_in_flight.add(session_id)
+        steer_event = asyncio.Event()
+        self._steer_events[session_id] = steer_event
+        cancel_event = asyncio.Event()
+        self._cancel_events[session_id] = cancel_event
+        try:
+            await self._client.session_update(
+                session_id=session_id, update=_message_chunk("working...", "m1")
+            )
+            done, _pending = await asyncio.wait(
+                [asyncio.ensure_future(steer_event.wait()), asyncio.ensure_future(cancel_event.wait())],
+                timeout=30,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_event.is_set():
+                return acp.PromptResponse(stop_reason="cancelled")
+            injected = self._steer_injected.pop(session_id, "")
+            if injected:
+                await self._client.session_update(
+                    session_id=session_id,
+                    update=_message_chunk(f"steered-reply: {injected}", "m2"),
+                )
+            else:
+                await self._client.session_update(
+                    session_id=session_id, update=_message_chunk("done", "m1")
+                )
+            return acp.PromptResponse(stop_reason="end_turn")
+        finally:
+            self._turns_in_flight.discard(session_id)
+            self._steer_events.pop(session_id, None)
             self._cancel_events.pop(session_id, None)
 
 

@@ -148,6 +148,76 @@ def test_no_stored_session_id_falls_back_to_a_new_session(qapp, monkeypatch):
     widget.shutdown()
 
 
+# --- re-entrant adoption: typing before the first attempt resolves --------
+
+
+def test_a_second_adopt_while_the_first_is_still_in_flight_does_not_call_load_twice(
+    qapp, monkeypatch
+):
+    """Reported for real: the boot-time background resume
+    (`_adopt_running_client`'s own call to `_adopt_or_resume`) is already
+    in flight when the artist types and sends — `current_session()` is
+    still the restored placeholder at that point, so `_on_submitted`'s
+    restored branch calls `_adopt_or_resume` again for the SAME
+    conversation. Before the fix this sent a second, concurrent
+    `session/load` for the same session id — the same class of race §15
+    already measured for `session/prompt`, one protocol method over. Only
+    one call may ever reach the wire per outstanding adoption."""
+    conversation = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-9")
+    store.save([conversation])
+
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _info(supports_load_session=True)
+    client._running = True
+
+    calls = []
+    monkeypatch.setattr(client, "load_session", lambda **kw: calls.append(kw))
+
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._set_current_session(key)
+
+    # The boot-time attempt (unrelated to any typing).
+    widget._adopt_or_resume(key)
+    assert len(calls) == 1
+
+    # The artist types and sends before that attempt has resolved —
+    # `current_session()` is still the restored placeholder.
+    widget._on_submitted([{"type": "text", "text": "and more dust"}])
+
+    assert len(calls) == 1, "a second session/load for the same in-flight resume must never be sent"
+    assert widget._pending_prompt == [{"type": "text", "text": "and more dust"}], (
+        "the newly typed message must still be waiting for the one in-flight resume"
+    )
+    widget.shutdown()
+
+
+def test_a_second_adopt_for_a_different_key_is_unaffected(qapp, monkeypatch):
+    """The guard is keyed by restored session id, not a blanket "one resume
+    at a time" — a genuinely different conversation must resume normally."""
+    a = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-a")
+    b = _stored("Water sim", "splash more", agent_session_id="agent-sess-b")
+    store.save([a, b])
+
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _info(supports_load_session=True)
+    client._running = True
+
+    calls = []
+    monkeypatch.setattr(client, "load_session", lambda **kw: calls.append(kw["session_id"]))
+
+    key_a = panel_mod._RESTORED_PREFIX + a.id
+    key_b = panel_mod._RESTORED_PREFIX + b.id
+    widget._adopt_or_resume(key_a)
+    widget._adopt_or_resume(key_b)
+
+    assert calls == ["agent-sess-a", "agent-sess-b"]
+    widget.shutdown()
+
+
 # --- a successful resume --------------------------------------------------
 
 

@@ -269,6 +269,39 @@ def test_load_session_replays_history_under_the_same_session_id(qapp, make_clien
     assert replayed and "rotor pyro" in replayed[0][2]
 
 
+def test_load_session_replay_lands_before_session_loaded_even_when_slow(
+    qapp, make_client, tmp_path
+):
+    """The panel's own `ui/panel.py::_on_session_loaded` assumes replay is
+    fully visible by the time it runs (its own docstring says so, quoting
+    the spec). Measured for real rather than trusted: `tests/fake_agent.py`'s
+    ``load-slow`` scenario spreads two replay chunks and the response itself
+    across real `asyncio.sleep`s (0.2s apart, ~0.6s total) — wide enough a
+    window that a genuine reordering would show up as a chunk arriving
+    AFTER `session_loaded`, not merely as a suspiciously-fast test. It
+    doesn't: every replay chunk is fully recorded before `session_loaded`
+    fires, confirmed 3x in manual measurement before this was written as a
+    permanent test — see docs/facts's session-resume section for the
+    full account of the bug this measurement ruled out (a single
+    `session/load` is NOT the source of the race; a second, concurrent one
+    was — `ui/panel.py::_adopt_or_resume`'s own guard against that)."""
+    client = make_client()
+    _connect(qapp, client, "load-slow", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    loaded = _Recorder(client.session_loaded)
+    messages = _Recorder(client.message_chunk)
+
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
+    _pump_until(qapp, lambda: loaded.calls, "session/load to answer", timeout=5.0)
+
+    replayed = [c for c in messages.calls if c[0] == session_id]
+    assert [c[2] for c in replayed] == [
+        "earlier: rotor pyro setup",
+        "earlier: second reply",
+    ], "both replay chunks must have already landed by the time session_loaded fires"
+
+
 def test_load_session_failure_is_reported_not_silent(qapp, make_client, tmp_path):
     client = make_client()
     _connect(qapp, client, "load-fail", tmp_path)
@@ -615,6 +648,82 @@ def test_plan_and_tool_call_events(qapp, make_client, tmp_path):
     assert tool_call.calls[0][1].status == "in_progress"
 
     assert tool_call_update.calls[0][1].status == "completed"
+
+
+# --- steering (docs/facts/acp-sdk.md §31) ---------------------------------
+
+
+def test_connect_reports_steering_support_from_field_meta(qapp, make_client, tmp_path):
+    client = make_client()
+    connected = _connect(qapp, client, "steer", tmp_path)
+    assert connected.calls[0][0].supports_steering is True
+
+    other = make_client()
+    connected2 = _connect(qapp, other, "stream", tmp_path)
+    assert connected2.calls[0][0].supports_steering is False
+
+
+def test_steer_injects_into_a_running_turn(qapp, make_client, tmp_path):
+    """Against a real agent process implementing `_session/steering`
+    (`tests/fake_agent.py`'s `steer` scenario): a message steered in while a
+    turn is running comes back `injected`, and the turn's own reply reflects
+    the steered content — the same two facts §31 measured against the real
+    `claude-agent-acp`."""
+    client = make_client()
+    _connect(qapp, client, "steer", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    chunks = _Recorder(client.message_chunk)
+    finished = _Recorder(client.turn_finished)
+    client.prompt(session_id, [{"type": "text", "text": "hi"}])
+    _pump_until(qapp, lambda: chunks.calls, "the turn to start streaming")
+
+    steered = _Recorder(client.steered)
+    client.steer(session_id, "entry-1", [{"type": "text", "text": "steer me in"}])
+    _pump_until(qapp, lambda: steered.calls, "a steer() result")
+    assert steered.calls[0] == (session_id, "entry-1", "injected")
+
+    # `turn_finished` is a resolved RPC response; the steered reply is a
+    # notification dispatched independently — same non-guarantee already
+    # noted in test_plan_and_tool_call_events above: wait for both facts,
+    # not for one to imply the other already landed.
+    _pump_until(
+        qapp,
+        lambda: finished.calls and any("steered-reply" in c[2] for c in chunks.calls),
+        "the steered turn to finish and its reply to arrive",
+    )
+    assert finished.calls[0] == (session_id, "end_turn")
+    texts = "".join(call[2] for call in chunks.calls)
+    assert "steered-reply: steer me in" in texts
+
+
+def test_steer_while_idle_reports_prompt_required(qapp, make_client, tmp_path):
+    """No turn running — the mandatory `idleBehavior: promptRequired` opt-in
+    (docs/facts/acp-sdk.md §31) must come back as content the caller still
+    owns, never a silently-started turn."""
+    client = make_client()
+    _connect(qapp, client, "steer", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    steered = _Recorder(client.steered)
+    client.steer(session_id, "entry-1", [{"type": "text", "text": "nothing running"}])
+    _pump_until(qapp, lambda: steered.calls, "a steer() result")
+    assert steered.calls[0] == (session_id, "entry-1", "prompt_required")
+
+
+def test_steer_against_an_agent_that_never_advertised_it_fails_cleanly(qapp, make_client, tmp_path):
+    """`FAKE_AGENT_SCENARIO=stream` never registers an `_session/steering`
+    handler at all — `AcpClient.steer` must still resolve (never hang the
+    caller), reporting `"failed"` so `ui/panel.py::_on_steered` falls back
+    to the ordinary queued path."""
+    client = make_client()
+    _connect(qapp, client, "stream", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    steered = _Recorder(client.steered)
+    client.steer(session_id, "entry-1", [{"type": "text", "text": "no steering here"}])
+    _pump_until(qapp, lambda: steered.calls, "a steer() result")
+    assert steered.calls[0] == (session_id, "entry-1", "failed")
 
 
 # --- cancel --------------------------------------------------------------------

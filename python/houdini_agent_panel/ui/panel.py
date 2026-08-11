@@ -519,6 +519,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_agent_label: str = ""
         #: Blocks typed before any session existed, waiting for `session/new`.
         self._pending_prompt: list | None = None
+        #: Blocks for a queued message currently mid-`_session/steering`
+        #: attempt, keyed by entry id (flat across sessions — same key
+        #: space `SessionState.queued`/`entry_id` already uses elsewhere).
+        #: `_on_steered` needs these to recreate a "sent" row when the
+        #: message was genuinely injected but its "queued" row is already
+        #: gone (docs/facts/acp-sdk.md §31, `_on_steered`'s own docstring).
+        self._steering_blocks: dict[str, list[dict]] = {}
         #: Arrow-key history state for THIS tab's own composer — see
         #: `_on_history_navigate`. `-1` means "not currently browsing," the
         #: same as an empty index has no meaning to walk back from.
@@ -1417,6 +1424,7 @@ class AgentPanel(QtWidgets.QWidget):
             (client.turn_finished, self._on_turn_finished),
             (client.error, self._on_error),
             (client.permission_requested, self._on_permission_requested),
+            (client.steered, self._on_steered),
         )
         for signal, slot in wiring:
             signal.connect(slot)
@@ -1894,7 +1902,35 @@ class AgentPanel(QtWidgets.QWidget):
         We invent nothing on top of what the agent tells us: no capability,
         no stored session id, or no live connection yet at all (`info is
         None`) all fall straight through to the old behavior, unchanged.
+
+        Reported for real: the artist opens a scene, lands back on a past
+        conversation (the boot-time background resume already in flight,
+        `_adopt_running_client`'s own call here — nothing about it blocks
+        the composer, see `_start_loaded_session`'s own note), and types a
+        reply before that first attempt has resolved. `current_session()`
+        is still the restored placeholder at that point (nothing has
+        swapped it out yet), so `_on_submitted`'s restored branch calls
+        back in here A SECOND TIME for the SAME conversation — measured
+        directly: two identical `session/load` calls land on the wire, not
+        one. Same shape as §15's `session/prompt` finding, one protocol
+        method over: nothing here or in the transport serializes two
+        concurrent calls for one session, so both replay independently,
+        and whichever response the panel reacts to first is not
+        necessarily the one whose replay is what's actually on screen.
+        This one line is what makes that impossible rather than merely
+        unlikely — a second call for the SAME restored key while the first
+        is still outstanding is a no-op. `_pending_prompt` (already
+        overwritten with the latest typed blocks by the caller, above)
+        still holds them; the ALREADY in-flight attempt's own
+        `_on_session_loaded`/`_on_session_started` sends it once resumed,
+        so nothing typed is lost, only the duplicate RPC is.
         """
+        if self._adopting_restored == restored_session_id:
+            _log.info(
+                "adopt_or_resume: agent=%s restored=%s already in flight — not calling again",
+                self._agent_id, restored_session_id,
+            )
+            return
         client = shared_client(self._agent_id)
         info = client.agent_info()
         conversation_id = self._conversation_ids.get(restored_session_id)
@@ -2965,6 +3001,71 @@ class AgentPanel(QtWidgets.QWidget):
         # message lost to a hang before its turn ever comes is exactly the
         # bug `_persist_conversations_soon` was written for.
         self._persist_conversations_soon()
+        if self._can_steer(current):
+            # Try to slot this in between the running turn's own steps
+            # instead of making it wait for `turn_finished` — the queued
+            # row above is the safety net `_on_steered` falls back to if
+            # this doesn't land (docs/facts/acp-sdk.md §31).
+            self._steering_blocks[entry_id] = list(blocks)
+            shared_client(self._agent_id).steer(current.session_id, entry_id, list(blocks))
+
+    def _can_steer(self, state: "sessions.SessionState") -> bool:
+        """Whether `_session/steering` is worth even trying for `state`
+        right now — busy AND the agent advertises support. Not the final
+        word: the adapter can still say `promptRequired` (its own
+        `turnQueue` check can disagree with our `busy` flag at the exact
+        instant a turn starts or ends — measured, docs/facts/acp-sdk.md
+        §31), which `_on_steered` falls back on regardless of why."""
+        if not state.busy:
+            return False
+        info = shared_client(self._agent_id).agent_info()
+        return bool(info and info.supports_steering)
+
+    def _on_steered(self, session_id: str, entry_id: str, outcome: str) -> None:
+        """Result of a `_session/steering` attempt (docs/facts/acp-sdk.md
+        §31) — always one of two branches, no third behavior:
+
+        `"injected"`: the message reached the running turn. Nothing ever
+        echoes it back over `session/update` (measured — the adapter
+        discards the echo before it reaches us), so it is promoted to a
+        sent message right here, the same way `_drain_queue` promotes a
+        batch at `turn_finished`, just immediately instead of waiting.
+
+        `"prompt_required"` (no turn was actually running by the time this
+        reached the agent) or `"failed"` (the attempt itself errored):
+        leave the row exactly as `_on_enqueue_requested` left it — still in
+        `state.queued`, still shown "Queued — waiting to send" — and let
+        the unchanged existing path send it: right now, if the turn has
+        already finished by our own bookkeeping too, or at the next
+        `turn_finished`.
+        """
+        state = self._pool.get(session_id)
+        blocks = self._steering_blocks.pop(entry_id, None)
+        if outcome == "injected":
+            if state is not None:
+                state.queued = [q for q in state.queued if q.id != entry_id]
+                self._pool.mark_changed(session_id)
+            entry = self._model(session_id).promote_queued(entry_id)
+            if entry is None:
+                # The artist clicked Remove in the narrow window between
+                # this steer going out and its answer coming back — the
+                # message was still genuinely delivered and cannot be
+                # unsent. Recreate the row so the feed says what actually
+                # happened, same fallback `_drain_queue` uses for its own
+                # analogous "no matching row" case.
+                text = _text_of_blocks(blocks or [])
+                if text:
+                    _log.warning(
+                        "steered: id=%s session=%s -> no matching row; recreating it",
+                        entry_id, session_id,
+                    )
+                    entry = self._model(session_id).append_user(text)
+            if entry is not None:
+                self._touch(session_id, entry.id)
+            self._persist_conversations_soon()
+            return
+        if state is not None and not state.busy:
+            self._drain_queue(session_id)
 
     def _drain_queue(self, session_id: str) -> None:
         """Whatever is queued goes out together, in ONE `session/prompt` call.

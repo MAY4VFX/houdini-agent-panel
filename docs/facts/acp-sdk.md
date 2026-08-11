@@ -1498,6 +1498,12 @@ completion and content genuinely raced.
    else not seen here. Irrelevant to the design above only because that
    design never puts it to the test.
 
+**This section is about `session/prompt` only.** It does not mean
+interjecting into a running turn is impossible — `claude-agent-acp` has a
+dedicated, unused-until-now extension method for exactly that, which never
+sends a second `session/prompt` and so never triggers the race measured
+above. See §31.
+
 ### Not established
 
 - What any real agent (as opposed to the SDK's reference fake one) does
@@ -3092,3 +3098,481 @@ same scene folder, could reintroduce something the artist meant to turn
 off via `claude_show_host_skills` — plausible, given `project` scope
 covers both, not tested (no such file existed in the verification project
 directory).
+
+## 31. `_session/steering` — interjecting into a running turn, measured against a real agent
+
+§15 stops a client from ever sending a second `session/prompt` while one is
+outstanding, and the project read that as "there is no way to interject
+into a running turn" — hence six months of batching everything typed while
+busy into one `session/prompt` sent only once the turn ends
+(`ui/panel.py::_drain_queue`). That reading was wrong: `claude-agent-acp`
+carries its own extension method for exactly this, never used by this
+codebase before now (`grep steering python/` returned nothing before this
+section was written). This section measures its real wire contract against
+a live agent — not the schema, not the docstring alone.
+
+### The exact adapter mechanism, read directly, not assumed
+
+`claude-agent-acp@0.66.0`'s own `dist/acp-agent.js`
+(`~/.npm/_npx/3eb23f87e75affb3/node_modules/@agentclientprotocol/
+claude-agent-acp/dist/acp-agent.js` — cite the version, per §30's own
+note: line numbers move between releases).
+
+The method name and priority constant (lines 57, 64):
+
+```js
+const STEER_METHOD = "_session/steering";
+// ...
+const STEER_PRIORITY = "now";
+```
+
+Registered as a raw JSON-RPC handler (line 6345):
+
+```js
+.onRequest(STEER_METHOD, { parse: parseSteerRequest }, (ctx) => agent.steer(ctx.params))
+```
+
+Advertised on `initialize`'s response, top-level `_meta`, sibling of
+`agentCapabilities` (lines 733-746):
+
+```js
+// Top-level `_meta` (sibling of `agentCapabilities`), per the existing ACP
+// steering extension contract: advertises the `_session/steering` request
+// so clients know they may inject a follow-up into a running turn.
+_meta: {
+    steering: {
+        supported: true,
+    },
+    goal: { version: GOAL_EXTENSION_VERSION, controlMethod: GOAL_CONTROL_METHOD, actions: [...GOAL_ACTIONS] },
+},
+```
+
+`steer()`'s own docstring and body (lines 1053-1136), quoted in full — this
+is the authoritative source for every behavior below, not a paraphrase of
+it:
+
+```js
+/** Steer the session per the ACP steering wire protocol: inject a follow-up
+ *  message into the turn that is currently running. If that turn already
+ *  settled, the established default starts a new detached turn; Hosts may opt
+ *  into the host-owned `promptRequired` fallback through request `_meta`.
+ *
+ *  When a turn is in flight this injects (returns `injected`): unlike
+ *  `prompt()`, it does NOT create a Turn or enqueue on `turnQueue`; it pushes
+ *  an `SDKUserMessage` onto the same streaming input, which the SDK routes
+ *  into the in-flight turn. The injected message's echo carries a uuid that
+ *  matches no queued turn, so the consumer drops it as an unrelated replay
+ *  without promoting/settling anything. It is delivered at {@link
+ *  STEER_PRIORITY} (`now`) so it pre-empts the current generation (interrupting
+ *  a single-shot response, or slotting in between a multi-step turn's tool
+ *  calls). The steered message's own output streams via `session/update`, not
+ *  this response.
+ *
+ *  Pre-empting means ABORTING: the interrupted cycle emits a `result` of its
+ *  own and the steered message runs as a second one, so the turn is marked
+ *  (`Turn.steeredEchoes`) to settle at the SDK's `idle` instead of that result.
+ *
+ *  When the session is idle, the opt-in path returns `promptRequired` WITHOUT
+ *  calling `prompt()`, pushing SDK input, or mutating `turnQueue`: the content
+ *  stays Host-owned so the Host can submit it through a standard
+ *  `session/prompt`. Without the opt-in, the existing detached `prompt()` and
+ *  `startedNewTurn` result are preserved for compatibility. */
+async steer(params) {
+    const sessionId = params.sessionId;
+    const session = this.sessions[sessionId];
+    if (!session) {
+        throw new Error("Session not found");
+    }
+    if (session.queryClosed) {
+        throw RequestError.internalError(undefined, SESSION_ENDED_MESSAGE);
+    }
+    const turnInFlight = (session.turnQueue ?? []).find((turn) => !turn.settled);
+    if (!turnInFlight) {
+        const promptRequest = { sessionId, prompt: params.prompt };
+        if (params._meta?.steering?.idleBehavior === "promptRequired") {
+            return { outcome: "promptRequired", reason: "noRunningTurn" };
+        }
+        this.prompt(promptRequest).catch((error) => {
+            this.logger.error(`Session ${sessionId}: steered new turn failed: ${error}`);
+        });
+        return { outcome: "startedNewTurn" };
+    }
+    const promptRequest = { sessionId, prompt: params.prompt };
+    const userMessage = promptToClaude(promptRequest);
+    const steeredUuid = randomUUID();
+    userMessage.uuid = steeredUuid;
+    userMessage.priority = STEER_PRIORITY;
+    (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
+    if (turnInFlight.deferredSettle !== undefined) {
+        turnInFlight.steeredSettle = turnInFlight.deferredSettle;
+        turnInFlight.deferredSettle = undefined;
+    }
+    session.input.push(userMessage);
+    const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
+    await this.publishGoalFromPrompt(sessionId, firstText, steeredUuid);
+    return { outcome: "injected" };
+}
+```
+
+Request shape, from `parseSteerRequest` (line 68): `{sessionId, prompt:
+[...content blocks...], _meta: {steering: {idleBehavior:
+"promptRequired"}}}`. `idleBehavior`, if present, must be exactly
+`"promptRequired"` or the request is rejected with `invalidParams`. Reached
+over the wire as `_session/steering` — the Python SDK's own
+`ClientSideConnection.ext_method(method, params)`
+(`acp/client/connection.py:277-282`) prepends the underscore itself
+(`f"_{method}"`), so the caller passes `"session/steering"` with **no**
+leading underscore; passing `"_session/steering"` here sends
+`__session/steering` (double underscore) to the wire and gets "method not
+found."
+
+Three possible outcomes, all confirmed live below: `{"outcome":
+"injected"}` (turn was running, message pushed into it),
+`{"outcome": "promptRequired", "reason": "noRunningTurn"}` (idle, opted in,
+nothing sent — content stays ours to dispatch normally), `{"outcome":
+"startedNewTurn"}` (idle, NOT opted in — the adapter silently starts a
+detached turn of its own; never exercised in this measurement because the
+opt-in was always sent, per the instruction below).
+
+### The measurement
+
+Live, against a real, separately-spawned `claude-agent-acp@0.66.0`
+(`npx --yes @agentclientprotocol/claude-agent-acp@latest`, wrapping the
+real, native `claude` binary) — its own process, its own session, no MCP
+servers, nothing touching the owner's own running panel or scene.
+`HAP_DATA_DIR` set to a throwaway directory before any
+`houdini_agent_panel`/`acp` import, per this project's own rule.
+
+One turn asked the model to make three unrelated `ToolSearch` calls back
+to back; the probe watched `session/update` until the first `tool_call`
+arrived, then called `_session/steering` (always with
+`idleBehavior: "promptRequired"`) while a second `ToolSearch` call was
+already announced but not yet resolved. Raw output, verbatim:
+
+```
+initialize field_meta: {'steering': {'supported': True}, 'goal': {...}}
+steering.supported: True
+session opened: 14c8dc41-cfe4-4352-bcff-16b440347036
+steering while IDLE (opted in): {'outcome': 'promptRequired', 'reason': 'noRunningTurn'}
+  [session_update] agent_message_chunk {'text': 'I', 'message_id': 'msg_011CdwBK8GrchxCvU4i7FphJ'}
+  ...
+  [session_update] tool_call {'title': 'ToolSearch', 'tool_call_id': 'toolu_01Rox7iCaMBoCTRuXpVVBr2X', ...}
+  [session_update] tool_call_update {'status': None, 'tool_call_id': 'toolu_01Rox7iCaMBoCTRuXpVVBr2X', ...}
+  [session_update] tool_call_update {'status': None, 'tool_call_id': 'toolu_01Rox7iCaMBoCTRuXpVVBr2X', ...}
+  [session_update] tool_call {'title': 'ToolSearch', 'tool_call_id': 'toolu_01XEhhNL9s6Khje7eUffNmbQ', ...}
+>>> STEERING NOW (turn in flight) <<<
+steer() result: {'outcome': 'injected'}
+  [session_update] tool_call_update {'status': 'failed', 'tool_call_id': 'toolu_01Rox7iCaMBoCTRuXpVVBr2X', '_meta': {'claudeCode': {'toolName': 'ToolSearch', 'nonExecutionKind': 'cancelled'}}}
+  [session_update] usage_update {'_meta': {'_claude/origin': {'kind': 'human'}}}
+  [session_update] usage_update {}
+  [session_update] agent_message_chunk {'text': '4', 'message_id': 'msg_011CdwBKT2yG5RCuYSfqn9vK'}
+  [session_update] usage_update {}
+  [session_update] usage_update {'_meta': {'_claude/rateLimit': {...}}}
+  [session_update] usage_update {'_meta': {'_claude/origin': {'kind': 'human'}}}
+original prompt() stop_reason: end_turn
+```
+
+The steered content was the text `"STEERED: what is 2+2? Answer with just
+the number."`. It was never echoed anywhere in `session_update` — search
+the full transcript for it, or for any `user_message_chunk` at all, and
+there is none. The `agent_message_chunk` `'4'` above IS the model's answer
+to it, arriving as an entirely ordinary agent reply with its own new
+`message_id` (`msg_...T2yG5RCuYSfqn9vK`, distinct from the interrupted
+turn's original `msg_...8GrchxCvU4i7FphJ`) — nothing on the wire marks it
+as "the reply to a steered message" as opposed to any other reply.
+
+A second probe: a fresh turn ("count from 1 to 20"), steer attempted a few
+events in, then `session/cancel` a second later:
+
+```
+=== cancel-after-steer probe ===
+steer2() result: {'outcome': 'promptRequired', 'reason': 'noRunningTurn'}
+  [session_update] session_info_update {}
+prompt2 stop_reason after cancel: cancelled
+steering while IDLE again (opted in): {'outcome': 'promptRequired', 'reason': 'noRunningTurn'}
+```
+
+### Answering the three questions this was measured for
+
+**1. What actually arrives for the injected message — how do we tell its
+echo apart from an ordinary prompt's echo?** Nothing does — there is
+nothing to tell apart. The docstring says why: "The injected message's
+echo carries a uuid that matches no queued turn, so the consumer drops it
+as an unrelated replay without promoting/settling anything" — the adapter
+itself discards the echo before anything reaches `session/update`. Not
+measured as "hard to find," measured as absent. So the panel cannot show
+"sent" by watching the wire for this message the way `_drain_queue`
+watches for `turn_finished`; it has to render it as sent the moment
+`{"outcome": "injected"}` comes back from the RPC call itself, unconditionally
+— which is exactly what `_on_submitted` already does for every ordinary
+sent message (`ui/panel.py:2888`, `append_user` before `_dispatch_prompt`,
+never waiting for any agent-side echo). The model's REPLY to the steered
+content does arrive, normally, as an ordinary `agent_message_chunk` in the
+same activity stream as the rest of the turn — nothing special has to be
+done for it to render; it is indistinguishable in kind from any other
+reply chunk, and that is fine, because the panel's transcript never
+needed to prove which reply answers which message.
+
+**2. What happens to the "Queued — waiting to send" chip at the moment of
+a successful injection?** It becomes an ordinary sent message via the
+SAME mechanism `_drain_queue` already uses at end-of-turn:
+`TranscriptModel.promote_queued(entry_id)` (`transcript_model.py:260`)
+flips the entry's `kind` from `"queued"` to `"user"` in place, so it stays
+at the same position in the feed. The only change from today is WHEN this
+fires — immediately on `{"outcome": "injected"}`, instead of waiting for
+`turn_finished`. The one new race this creates: `_on_queue_remove_
+requested` lets the artist pull a still-queued message back before it's
+sent, and its window against a steer call in flight is real, if short (a
+plain JSON-RPC round trip, no generation latency) — click Remove after the
+steer request has already gone out but before its `{"outcome":
+"injected"}` reply lands, and `TranscriptModel.remove_entry` (already
+guarded to only delete rows still `kind == "queued"`) deletes the row
+while the message is genuinely, unstoppably about to be delivered (there
+is no "unsteer"). Closed the same way `_drain_queue` already closes an
+analogous gap for its own batch (see that method's own comment): if
+`promote_queued` finds no row to flip, and the message has text, a fresh
+`"user"` row is recreated so the feed still says "sent" — the alternative,
+a message the agent genuinely answered with no visible trace of ever being
+sent, is worse than a row reappearing after Remove was clicked on it.
+
+**3. Does Escape/cancel during a turn with an injected message break the
+accounting?** No, measured clean both ways. First probe: the ENTIRE
+interrupted-then-steered sequence still resolves the ORIGINAL `conn.
+prompt()` call with one ordinary terminal `stop_reason` (`end_turn` here)
+— a steer never produces a second, independent turn-finished event; it
+rides the same prompt future the panel is already awaiting
+(`client.py::do_prompt`, `AcpClient.turn_finished`). So `_on_turn_finished`
+needs no new "was this turn steered" branch — the existing "the turn is
+over" detection already covers it. Second probe: cancelling a turn where
+a steer had just been attempted (which, in this run, itself came back
+`promptRequired` — see below) settled at `stop_reason: cancelled`, same as
+an ordinary cancel — no hang, no stuck busy state, no orphaned resolve.
+
+### A finding not asked for, but load-bearing: `promptRequired` can happen mid-turn, not only at its edges
+
+The second probe's own `state.busy` (the panel's OWN bookkeeping — set the
+moment `_dispatch_prompt` is called) would have said "busy" the whole time,
+yet `steer2()` still came back `promptRequired`/`noRunningTurn` a few
+events into a turn that had not finished. `turnQueue.find(turn =>
+!turn.settled)` (line 1092) is the adapter's own authority on whether a
+turn is "in flight," evaluated at the instant the request lands — not
+something the panel's own `busy` flag can predict with certainty. This is
+exactly why the mandated decision has only two branches and no
+speculation about why `promptRequired` happened: on `promptRequired`
+(idle for real, or this timing gap, or anything else), fall back to
+today's queue-and-drain-at-`turn_finished` path unconditionally — never
+try to distinguish the reason.
+
+### A finding not asked for: a tool call already announced but not yet
+resolved at the moment of injection gets no terminal update at all
+
+In the measurement above, `toolu_...Rr2X` (the FIRST `ToolSearch` call,
+already carrying two `tool_call_update`s before the steer) received an
+explicit `status: 'failed'` / `nonExecutionKind: 'cancelled'` update once
+the turn was interrupted. `toolu_...NmbQ` (the SECOND call — only its
+initial `tool_call` had arrived, no `tool_call_update` yet, at the exact
+moment of injection) received no further update in this run at all — not
+in the events immediately after the steer, not by the time the turn's
+`stop_reason: end_turn` arrived. A tool-call UI that shows a spinner until
+some terminal `tool_call_update` status arrives would show this one
+running forever. Not established whether this generalizes (one
+measurement, one such tool call) — flagged here rather than guessed at or
+silently patched around; no defensive client-side "mark still-pending
+tool calls as interrupted on steer" logic has been added on the strength
+of a single observation.
+
+### Consequences for the UI
+
+The decision the owner asked for, and the only one built —
+`ui/panel.py::_on_enqueue_requested`: if `agent_info().supports_steering`
+(new `AgentInfo` field, read from `InitializeResponse.field_meta["steering"]
+["supported"]`, `client.py::_agent_info_from`) and the session is busy, call
+`_session/steering` (`AcpClient.steer`, always with `idleBehavior:
+"promptRequired"` — never the silent-detached-turn default, since nothing
+in this codebase's own turn/busy/queue bookkeeping is built to survive a
+turn it didn't start itself); on `{"outcome": "injected"}`, promote the
+queued row immediately. On `{"outcome": "promptRequired", ...}`, or if
+steering isn't supported at all, leave it queued for the unchanged
+existing path (`_drain_queue`, at `turn_finished`). No third behavior. An
+agent that never advertises `steering.supported` sees no change at all —
+"the agent doesn't support it — the control doesn't get drawn" extends to
+this decision the same as every other one in `design.md`.
+
+### Not established
+
+- Whether any agent other than `claude-agent-acp@0.66.0` implements this
+  extension at all — not part of the base ACP schema, so absence is the
+  default assumption for the other five agents until measured.
+- Whether the orphaned-tool-call gap above generalizes beyond the one
+  observed case.
+- Whether rapid repeated steering (multiple messages typed and sent while
+  busy, each triggering its own `_session/steering` call before the
+  previous one's reply lands) preserves send order at the wire — each call
+  goes out as its own fire-and-forget task on the worker's event loop
+  (`client.py::AcpClient._submit`), and nothing here forces them to wait
+  for one another's response before the next is sent. Not measured; the
+  owner's reported bug was one message stuck behind a long tool-call
+  chain, not a burst of several in quick succession.
+
+## 32. A second `session/load` for the same conversation — the §15 race, one protocol method over
+
+Reported for real: the owner opened a scene, landed on a past conversation,
+typed a new message, and it rendered ABOVE the resumed history instead of
+below it — a screenshot showed the new message, then that turn's own
+activity ("Ruminating… 28s", "Ran 5 tools"), and only below that the long
+earlier reply the conversation actually ended on. `ui/panel.py::_on_session_
+loaded`'s own docstring assumes "the agent has already replayed this
+session's own history... by the time this runs" — true per the ACP spec,
+but that assumption is only as good as there being exactly ONE `session/
+load` in flight for the conversation. There wasn't.
+
+### The measurement
+
+`AgentPanel._adopt_running_client` (line ~1271, reached automatically when
+a tab connects with a restored conversation already current — no click
+needed) calls `_adopt_or_resume` in the background; nothing in that path
+blocks the composer (`_start_loaded_session` only updates the boot strip's
+text, `set_boot_phase` — the actual input-covering scrim, `set_booting
+(True)`, is never invoked here at all, only from `begin_boot`, which this
+path doesn't call). So the artist can type and hit Send while that first
+`session/load` is still outstanding. At that moment `current_session()` is
+still the restored placeholder — nothing has swapped it out yet — so
+`_on_submitted`'s restored branch (`ui/panel.py:2870`) does exactly what it
+always does: hold the blocks in `_pending_prompt` and call `_adopt_or_
+resume` again for the SAME conversation. `_adopt_or_resume` had no memory
+of already being in flight. Reproduced directly, before any fix, with
+`client.load_session` monkeypatched to record its own calls (the exact
+technique `test_session_resume.py` already uses):
+
+```
+calls after boot-time adopt_or_resume: 1
+calls after typing while still restored: 2
+  {'session_id': 'agent-sess-9', 'cwd': '/tmp', 'mcp_servers': [...], 'session_meta': None}
+  {'session_id': 'agent-sess-9', 'cwd': '/tmp', 'mcp_servers': [...], 'session_meta': None}
+```
+
+Two identical `session/load` calls, same session id, both genuinely in
+flight — `AcpWorker.do_load_session` is a fire-and-forget task per call,
+same shape as `do_prompt` (§15). Nothing in `AcpClient`, `AcpWorker`, or
+the vendored `acp` package serializes two `session/load` calls for one
+session id any more than it serializes two `session/prompt` calls — the
+exact same class of race §15 already measured, one protocol method over,
+now confirmed for `session/load` too.
+
+### A separate, narrower question this made worth answering directly: does a SINGLE `session/load` call preserve replay-before-response ordering for real, or only by convention?
+
+`ClientSideConnection`'s own transport (`acp/connection.py`) routes
+incoming NOTIFICATIONS through an async queue+dispatcher
+(`self._queue.publish(...)`, consumed by a separate task) while an incoming
+RESPONSE resolves its future directly and synchronously inside
+`_receive_loop` (`_handle_response` → `self._state.resolve_outgoing(...)`).
+Those are two different delivery paths with no code-level guarantee tying
+them together — worth measuring rather than assuming ordering holds just
+because the two paths happen to share an event loop.
+
+Measured against a real agent process (`tests/fake_agent.py`'s new
+`load-slow` scenario: two replay chunks and the response itself spread
+across real `asyncio.sleep(0.2)`s, ~0.6s total, wide enough a window that
+any genuine reordering would show up as a chunk arriving after
+`session_loaded`, not merely as suspiciously fast timing) — three runs,
+`tests/test_client.py::test_load_session_replay_lands_before_session_
+loaded_even_when_slow`:
+
+```
+0.202  chunk  replay-1  earlier: rotor pyro setup
+0.403  chunk  replay-2  earlier: second reply
+0.604  loaded  sess-load-1  None
+chunks BEFORE session_loaded: 2
+chunks AFTER (or at) session_loaded: 0
+```
+
+Consistent across all three runs: for a SINGLE, unambiguous `session/load`
+call, replay is always fully visible before `session_loaded` fires — the
+queue/response split above does not manifest as an observable reordering
+in practice. So the ordering bug the owner hit was never about single-call
+ordering being unreliable; it was specifically the second, concurrent call
+racing the first (own replay landing in whichever order the two calls'
+own replays happened to interleave, and whichever response the panel
+reacted to first not necessarily matching what was actually on screen).
+
+### The fix
+
+`AgentPanel._adopt_or_resume` (`ui/panel.py`) now refuses to act a second
+time for a restored key it is already adopting:
+
+```python
+if self._adopting_restored == restored_session_id:
+    return
+```
+
+`self._adopting_restored` already existed for an unrelated reason (telling
+`_on_session_started`/`_on_session_loaded` which local model/title/queue to
+transplant onto the live session) and is set, synchronously, before either
+branch of `_adopt_or_resume` (`session/load` or the read-only-new-session
+fallback) ever calls out — so the guard closes both branches with one
+check, and closes it airtight: the whole `_adopt_or_resume` → `_start_
+loaded_session` → `client.load_session(...)` chain is synchronous UI-thread
+Python with no `await` in it, so there is no window for a second call to
+land between "decided to resume" and "the flag says so."
+
+The typed message is not lost: `_on_submitted`'s restored branch always
+overwrites `_pending_prompt` with the latest blocks BEFORE calling back
+in here, and the one attempt that IS still in flight sends whatever
+`_pending_prompt` holds once it resolves — same mechanism `_on_session_
+loaded`/`_on_session_started` already had, unchanged. Typing twice before
+the first resume resolves still only sends the SECOND message (the first
+is overwritten) — an existing limitation of `_pending_prompt` being a
+single slot rather than a queue (the same is already true for a brand
+new, not-yet-open session), not something this fix changes or was asked to
+change.
+
+Confirmed with the fix in place, same repro: `calls after typing while
+still restored: 1`. Regression tests: `tests/test_session_resume.py::
+test_a_second_adopt_while_the_first_is_still_in_flight_does_not_call_
+load_twice` (the bug) and `::test_a_second_adopt_for_a_different_key_is_
+unaffected` (the guard is keyed per restored id, not a blanket lock — a
+genuinely different conversation resumes normally even while another is
+still adopting).
+
+### Why this is enough, not a partial fix
+
+The owner's own requirement was that entry order must be decided by
+position in the conversation, not by what happened to arrive on the wire
+first. With the guard in place, "wire arrival order" and "conversation
+position" are the same thing BY CONSTRUCTION, not by observation of a race
+that no longer has a way to occur: there is only ever one `session/load`
+per adoption, and a single call's replay-before-response ordering is
+confirmed reliable above. No additional ordering machinery (a stable
+position field on each entry, a barrier holding the composer closed until
+replay finishes, merge-by-position) was added on top of that — the
+measurement showed the extra mechanism would have nothing left to guard
+against once the actual, single, proven cause was closed. If a future
+agent or a different code path ever produces a genuine single-call
+reordering, that would be a new, separately measured fact, not something
+this section's evidence covers.
+
+### Consequences for the UI
+
+- Composer input is not blocked during a background resume — this was
+  already true before this fix (no `begin_boot`/scrim on this path) and
+  remains true; the fix only removes the DUPLICATE request, not the
+  window itself. An artist typing during a background resume still sees
+  the message accepted immediately and sent once the (single) resume
+  completes — no visible wait, no dead input, matching the requirement
+  that Houdini and the panel never block for this.
+- A stray note or spinner was considered and not added: the existing
+  boot-strip text (`PHASE_SESSION`) already says a resume is happening,
+  and adding a second indicator for "and this message is waiting for it"
+  was not asked for and does not fix a lost-or-duplicated message on its
+  own — the guard does.
+
+### Not established
+
+- Whether the SAME re-entrancy class exists for `_start_new_session()`
+  reached OUTSIDE `_adopt_or_resume` (e.g. the "+" button pressed twice
+  quickly on an already-running agent) — a different call path, not
+  implicated in this report, not measured here.
+- What a real `claude-agent-acp` (as opposed to `tests/fake_agent.py`)
+  does with two genuinely concurrent `session/load` calls for one session
+  id — not measured, and, per the fix above, not needed: the panel never
+  sends a second one now.

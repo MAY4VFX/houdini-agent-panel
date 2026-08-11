@@ -78,6 +78,7 @@ from acp.schema import (
     SessionModeState,
     TextContentBlock,
 )
+from acp.utils import serialize_params
 
 from . import __version__, childproc, shellenv
 from .logbook import logger as _logbook_logger
@@ -248,6 +249,15 @@ class AgentInfo:
     #: knowing (every test fixture, for one) gets the answer that costs
     #: nothing if wrong: we simply don't ask the agent to close anything.
     supports_close_session: bool = False
+    #: Whether the agent implements `_session/steering` — an extension
+    #: outside ACP's standard schema, so it isn't in `agentCapabilities` at
+    #: all. Advertised as a TOP-LEVEL `initialize` response `_meta` field,
+    #: sibling of `agentCapabilities`: `field_meta["steering"]["supported"]`
+    #: (docs/facts/acp-sdk.md §31, measured against `claude-agent-acp@0.66.0`
+    #: live, not read off a schema — the extension has no schema). Defaults
+    #: to False for the same reason as `supports_close_session`: the answer
+    #: that costs nothing if wrong is to never attempt it.
+    supports_steering: bool = False
 
 
 def _agent_info_from(init: Any) -> AgentInfo:
@@ -255,6 +265,10 @@ def _agent_info_from(init: Any) -> AgentInfo:
     caps = init.agent_capabilities or AgentCapabilities()
     prompt_caps = caps.prompt_capabilities or PromptCapabilities()
     auth_caps = caps.auth
+    # `field_meta` is `initialize`'s raw, untyped `_meta` — the only place
+    # `_session/steering` support is advertised (docs/facts/acp-sdk.md §31).
+    top_meta = getattr(init, "field_meta", None) or {}
+    steering_meta = top_meta.get("steering") if isinstance(top_meta, dict) else None
     return AgentInfo(
         name=implementation.name if implementation else "agent",
         version=(implementation.version if implementation else "") or "",
@@ -275,6 +289,9 @@ def _agent_info_from(init: Any) -> AgentInfo:
         # `is not None` specifically — that's a direct match to the
         # contract, not a guess via truthiness.
         supports_logout=auth_caps is not None and getattr(auth_caps, "logout", None) is not None,
+        supports_steering=bool(
+            isinstance(steering_meta, dict) and steering_meta.get("supported")
+        ),
         auth_methods=tuple(
             AuthMethod(
                 id=m.id,
@@ -490,6 +507,9 @@ class AcpWorker(QtCore.QThread):
     usage_changed = Signal(str, object)  # session_id, acp.schema.Usage
     turn_finished = Signal(str, str)  # session_id, stop_reason
     error = Signal(str, str)  # session_id (may be ""), text
+    #: session_id, entry_id (the queued row this came from), outcome —
+    #: "injected" | "prompt_required" | "failed" (docs/facts/acp-sdk.md §31).
+    steered = Signal(str, str, str)
 
     # --- permissions ---------------------------------------------------------
     permission_requested = Signal(str, str, object, list)
@@ -1114,6 +1134,54 @@ class AcpWorker(QtCore.QThread):
         _log.info("turn done: session=%s stop=%s", session_id, response.stop_reason)
         self.turn_finished.emit(session_id, response.stop_reason)
 
+    async def do_steer(self, session_id: str, entry_id: str, blocks: list[dict]) -> None:
+        """Try to inject `blocks` into a turn already running, instead of
+        waiting for it to finish (docs/facts/acp-sdk.md §31).
+
+        `idleBehavior: "promptRequired"` is sent unconditionally — never the
+        adapter's silent detached-new-turn default. Without it we would lose
+        control of that turn's lifecycle: every one of this codebase's own
+        turn/busy/queue bookkeeping (`_drain_queue`, the Stop button,
+        `_on_turn_finished`) assumes WE start every turn, and a turn the
+        adapter started on its own behalf would silently drift out of sync
+        with all of it.
+
+        Always resolves — never lets a steer attempt hang the caller waiting
+        for `steered`: an unreachable agent or a malformed response falls
+        back to `"failed"`, and `ui/panel.py::_on_steered` already knows how
+        to fall back to the ordinary queued-message path for that outcome,
+        the exact same path used when steering was never attempted at all.
+        """
+        if self._conn is None:
+            self.steered.emit(session_id, entry_id, "failed")
+            return
+        try:
+            content = [
+                serialize_params(_build_content_block(block)) for block in blocks
+            ]
+            result = await self._conn.ext_method(
+                "session/steering",
+                {
+                    "sessionId": session_id,
+                    "prompt": content,
+                    "_meta": {"steering": {"idleBehavior": "promptRequired"}},
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - any failure just falls back to queueing
+            _log.info("steer failed: session=%s error=%s", session_id, exc)
+            self.steered.emit(session_id, entry_id, "failed")
+            return
+        outcome = result.get("outcome") if isinstance(result, dict) else None
+        _log.info("steer: session=%s entry=%s outcome=%s", session_id, entry_id, outcome)
+        if outcome == "injected":
+            self.steered.emit(session_id, entry_id, "injected")
+        else:
+            # "promptRequired" (no turn was actually running by the time
+            # this reached the agent — see §31's own "can happen mid-turn"
+            # finding) or anything unexpected: the content stays ours to
+            # send the ordinary way.
+            self.steered.emit(session_id, entry_id, "prompt_required")
+
     async def do_cancel(self, session_id: str) -> None:
         if self._conn is not None:
             await self._conn.cancel(session_id=session_id)
@@ -1343,6 +1411,7 @@ _FORWARDED_SIGNALS = (
     "turn_finished",
     "error",
     "permission_requested",
+    "steered",
 )
 
 
@@ -1377,6 +1446,7 @@ class AcpClient(QtCore.QObject):
     usage_changed = Signal(str, object)
     turn_finished = Signal(str, str)
     error = Signal(str, str)
+    steered = Signal(str, str, str)
 
     permission_requested = Signal(str, str, object, list)
 
@@ -1586,6 +1656,16 @@ class AcpClient(QtCore.QObject):
 
     def prompt(self, session_id: str, blocks: list[dict]) -> None:
         self._submit(lambda w: w.do_prompt(session_id, blocks))
+
+    def steer(self, session_id: str, entry_id: str, blocks: list[dict]) -> None:
+        """Try to slot `blocks` into a turn already running instead of
+        waiting for it to finish — only meaningful when `agent_info().
+        supports_steering` and the session is busy
+        (`ui/panel.py::_on_enqueue_requested`, the only caller). Always
+        resolves via the `steered` signal, `entry_id` round-tripped back so
+        the caller can find the queued row again — never leaves a caller
+        waiting with no answer (docs/facts/acp-sdk.md §31)."""
+        self._submit(lambda w: w.do_steer(session_id, entry_id, blocks))
 
     def cancel(self, session_id: str) -> None:
         self._submit(lambda w: w.do_cancel(session_id))
