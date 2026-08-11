@@ -299,7 +299,21 @@ def check_answer_reaches_the_feed(agent_id: str) -> str:
 
 
 def check_mcp(agent_id: str) -> str:
-    """The whole point of the panel: the agent can see the scene."""
+    """The whole point of the panel: the agent can see the scene.
+
+    Does NOT exercise the race `498b251` fixed (opening a session before
+    the fx server has finished its own async readiness poll) — the fx
+    server lives IN the hython process, not per-check, so by the time this
+    runs it has almost always already been warmed by an earlier check in
+    the same run (`connect`/`session`/`prompt` all open a session first).
+    That race only shows up for the very first session opened in a fresh
+    hython process, and checks are deliberately order-independent ("must be
+    able to execute any subset in any order" — see the checks comment
+    below), so there is no reliable way to guarantee THIS check is that
+    first session without breaking that independence. Worth remembering
+    this limitation explicitly rather than re-discovering it the next time
+    someone wonders why a run of `--only mcp` never reproduces it.
+    """
     with Harness(agent_id) as h:
         h.connect()
         h.open_session()
@@ -453,6 +467,77 @@ def check_sign_in_reachable(agent_id: str) -> str:
         if h.panel._pages.currentIndex() != panel_mod.AgentPanel.PAGE_AUTH:
             raise Failure("the sign-in screen could not be opened")
         return f"methods: {', '.join(m.id for m in info.auth_methods)}"
+
+
+def check_captured_token_signs_in_alone(agent_id: str) -> str:
+    """The one part of "signing in" that actually belongs to this panel,
+    proven in isolation.
+
+    Every other check in this file goes through `open_session()`, which
+    requires the agent to already be authenticated SOME way — an artist's
+    own real `claude login` sitting in `~/.claude/.credentials.json` makes
+    `connect`/`session`/`prompt`/`mcp`/... all pass, whether or not this
+    panel's own capture-and-inject mechanism
+    (`settings.agent_oauth_tokens` -> `runtime.py::_with_oauth_tokens` ->
+    `CLAUDE_CODE_OAUTH_TOKEN`) works at all. `check_sign_in_reachable`
+    doesn't close that gap either — on any machine capable of running the
+    checks above (i.e. every machine this file is ever actually run on),
+    that agent already has real auth methods satisfied or none advertised,
+    so its own real work never runs.
+
+    This isolates the claim that's actually ours: with NO ambient Claude
+    login reachable at all (`isolate_agent_config=True` — the agent gets a
+    fresh, empty `CLAUDE_CONFIG_DIR` of its own, see runtime.py::
+    _CONFIG_DIR_ENV_VAR) and nothing else in `agent_oauth_tokens` but the
+    one captured token, the agent still connects and opens a session. The
+    only way that can happen is the injection actually reaching the
+    process — there is nothing else left for it to have authenticated
+    with.
+
+    Claude-specific by construction (`CLAUDE_CODE_OAUTH_TOKEN`/
+    `isolate_agent_config` are both verified for `claude-acp` only,
+    docs/facts/acp-sdk.md §21) — skips with a stated reason for any other
+    agent id, not silently.
+
+    The token is never written into this repository, fixture or literal,
+    even a fake-looking one — read from `HAP_E2E_CLAUDE_TOKEN` at the
+    moment it's used, same rule this project already applies everywhere
+    else (secrets live only in `~/Github/may-hub/.env`). No token in the
+    environment is not a failure: a machine with nothing to test this
+    against isn't broken, it just can't run this particular check today.
+    """
+    if agent_id != "claude-acp":
+        return (
+            "skipped — CLAUDE_CODE_OAUTH_TOKEN/isolate_agent_config are "
+            "claude-acp-specific; nothing verified here applies to this agent"
+        )
+    token = os.environ.get("HAP_E2E_CLAUDE_TOKEN")
+    if not token:
+        return "skipped — HAP_E2E_CLAUDE_TOKEN is not set, nothing to inject"
+
+    original = settings_mod.load()
+    isolated = settings_mod.Settings(
+        default_agent=agent_id,
+        autostart_agent=True,
+        agent_oauth_tokens={agent_id: {"CLAUDE_CODE_OAUTH_TOKEN": token}},
+        isolate_agent_config=True,
+    )
+    settings_mod.save(isolated)
+    try:
+        with Harness(agent_id) as h:
+            h.connect()
+            session_id = h.open_session()
+            return (
+                f"session {session_id[:16]}… opened with an isolated "
+                "CLAUDE_CONFIG_DIR and only the captured token to authenticate with"
+            )
+    finally:
+        # Whatever the machine's owner actually has restored exactly as
+        # `Harness.__exit__` already restores default_agent/autostart_agent
+        # for every other check — this additionally restores the fields
+        # this check itself overwrote (agent_oauth_tokens, isolate_agent_
+        # config), which that narrower restore does not touch.
+        settings_mod.save(original)
 
 
 def check_two_panels_share_one_agent(agent_id: str) -> str:
@@ -643,6 +728,7 @@ CHECKS = {
     "options": check_config_options,
     "modes": check_modes,
     "signin": check_sign_in_reachable,
+    "captured_token": check_captured_token_signs_in_alone,
     "panels": check_two_panels_share_one_agent,
     "panels_independent": check_two_tabs_independent_current,
     "manifest": check_launch_writes_manifest,
