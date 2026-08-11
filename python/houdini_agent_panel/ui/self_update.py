@@ -50,9 +50,12 @@ imported the STALE package straight off `PYTHONPATH`, version pin or not.
 import and pinned the INNER `pip install --target` to it — a self-update
 that silently reinstalled the version it was already running. This is the
 exact same shadowing `mcp_runtime.SHADOWING_VARS` already exists to strip
-for the fx server's own subprocess; stripping it here too is what actually
-closes the bug — the explicit version pin only makes a correct resolution
-faster and more deterministic once shadowing is no longer in the way.
+for the fx server's own subprocess; stripping it out of the environment is
+what actually closes the bug — the explicit version pin only makes a
+correct resolution faster and more deterministic once shadowing is no
+longer in the way. That stripping itself now lives inside
+`TerminalLoginWorker.build_env` (moved there so every caller gets it, not
+only this one that remembered to ask) — see that method's own docstring.
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ import threading
 from shutil import which
 from types import SimpleNamespace
 
-from .. import childproc, mcp_runtime
+from .. import childproc
 from .qt import Signal
 from .terminal_login import TerminalLoginWorker
 from .worker import Worker, WorkerStopped
@@ -181,20 +184,13 @@ class SelfUpdateWorker(Worker):
         # widening. `SimpleNamespace(env={})` stands in for the
         # `terminal_auth` that method reads `.env` off of — there is no
         # per-command override here, unlike a real terminal auth method.
+        # `build_env` itself strips `mcp_runtime.SHADOWING_VARS`
+        # (PYTHONPATH/PYTHONHOME/PYTHONSTARTUP) from the OS environment it
+        # starts from — used to be re-popped here by hand, after the report
+        # below was diagnosed; moved into `build_env` so a caller cannot
+        # forget it the way `bugreport_worker.py` had (harmlessly, there —
+        # see that module's own env use).
         env = TerminalLoginWorker.build_env(SimpleNamespace(env={}))
-        # Houdini's own package json prepends its deps tree to PYTHONPATH
-        # (`houdini_package.py`), and this subprocess inherits that from
-        # `os.environ` like any other child spawned from here. Left in
-        # place, it shadows whatever `uvx` actually resolved: `PYTHONPATH`
-        # wins over a venv's own site-packages regardless of version pins,
-        # so `python -m houdini_agent_panel install` imported the STALE
-        # panel off `PYTHONPATH` and pinned the real install to ITS
-        # version — measured directly, reproduced on this Mac with a
-        # planted fake package on `PYTHONPATH`. Same fix as
-        # `mcp_runtime._clean_env` already applies to the fx server's own
-        # subprocess, for the identical reason.
-        for name in mcp_runtime.SHADOWING_VARS:
-            env.pop(name, None)
 
         uvx = which("uvx", path=env.get("PATH", ""))
         spec = f"{self._target}=={self._version}"

@@ -93,7 +93,7 @@ import platform
 import re
 import subprocess
 
-from .. import childproc, orphans, shellenv, token_check
+from .. import childproc, mcp_runtime, orphans, shellenv, token_check
 from ..logbook import logger as _logbook_logger
 from .qt import Signal
 from .worker import Worker, WorkerStopped
@@ -796,12 +796,43 @@ class TerminalLoginWorker(Worker):
         always `{}` for kimi, measured; Claude's own built-in recipe also
         sets none), so it wins over a general proxy default the same way
         an agent's own explicit env already does.
+
+        Unlike `client.py::do_start`, "the OS environment" here really is
+        `os.environ` in full — not the ACP SDK's six-variable minimum —
+        because this same method also builds the environment for `uvx
+        --refresh ...` (`self_update.py`) and for an in-process HTTP POST
+        (`bugreport.post_report`), both of which plausibly want more than
+        that (`HOME`/cache dirs for `uv`, whatever else a real machine's
+        network stack already has configured). Narrowing that base is a
+        second project on its own, not a safe drive-by here — self-update
+        already broke twice in one week from smaller changes nearby
+        (`3e38cea`).
+
+        `SHADOWING_VARS` (`PYTHONPATH`/`PYTHONHOME`/`PYTHONSTARTUP`) is
+        stripped from that base regardless, though: Houdini's own package
+        json writes `PYTHONPATH` into `os.environ` for the PANEL's own
+        benefit (`houdini_package.py`), same value this method's own
+        caller never intends for a login CLI (or `uvx`, or nothing at
+        all, for the in-process HTTP case). One caller already remembered
+        to pop it back out after calling this (`self_update.py`, with the
+        report of a stale panel importing off a shadowed `PYTHONPATH` to
+        prove it necessary) — another one currently in this codebase does
+        not (`bugreport_worker.py`, `SimpleNamespace(env={})` straight
+        into `post_report`). Stripping it HERE, once, makes that
+        forgettable per-caller step structurally unnecessary instead of
+        merely unlikely to be missed — the exact shape of bug the fx MCP
+        server just went a week silently broken from (`shellenv.py`'s own
+        fix), except this is the one spot that would hit it for any
+        terminal-login command that happens to be a Python program,
+        should one ever join the roughly forty agents in the ACP registry
+        that aren't today.
         """
         from .. import proxy as proxy_module
         from .. import settings as settings_module
 
         current_settings = settings_module.load()
-        env = shellenv.merged(dict(os.environ), proxy_module.child_env(current_settings))
+        base = {k: v for k, v in os.environ.items() if k not in mcp_runtime.SHADOWING_VARS}
+        env = shellenv.merged(base, proxy_module.child_env(current_settings))
         env.update(terminal_auth.env)
         return env
 

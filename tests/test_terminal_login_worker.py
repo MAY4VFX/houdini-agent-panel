@@ -402,6 +402,43 @@ def test_build_env_lets_the_methods_own_env_win_over_the_studio_proxy(monkeypatc
     assert env["HTTPS_PROXY"] == "http://method-specific:9"
 
 
+def test_build_env_never_leaks_pythonpath_from_houdinis_own_process(monkeypatch):
+    """Same class of leak as `shellenv.py`'s own fix, closed here too:
+    Houdini's package json writes `PYTHONPATH`/`PYTHONHOME`/`PYTHONSTARTUP`
+    into `os.environ` for the PANEL's own benefit (`houdini_package.py`),
+    not for a spawned login CLI (or `uvx`, self_update.py's own caller of
+    this same method). Every terminal-auth command measured so far is a
+    Node/Go/Rust binary that never reads these — but the next one to join
+    the ACP registry might not be, and this must not depend on that."""
+    _no_shell(monkeypatch)
+    monkeypatch.setenv("PYTHONPATH", "/Users/artist/Library/Application Support/HoudiniAgentPanel/deps/py3.13")
+    monkeypatch.setenv("PYTHONHOME", "/should/not/leak")
+    monkeypatch.setenv("PYTHONSTARTUP", "/should/not/leak")
+
+    ta = TerminalAuth(command=sys.executable, args=[], env={})
+    env = TerminalLoginWorker.build_env(ta)
+
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert "PYTHONSTARTUP" not in env
+
+
+def test_build_env_still_carries_the_rest_of_the_os_environment(monkeypatch):
+    """The other half of the same change: unlike `client.py`'s agent
+    launch, this is NOT narrowed to the ACP SDK's six-variable minimum —
+    `self_update.py` (`uvx`) and `bugreport.post_report` share this method
+    and plausibly need more than that (HOME/cache dirs, whatever the real
+    machine's network stack has). Only the three shadowing variables are
+    excluded; an ordinary one must still come through."""
+    _no_shell(monkeypatch)
+    monkeypatch.setenv("SOME_REAL_MACHINE_VARIABLE", "kept")
+
+    ta = TerminalAuth(command=sys.executable, args=[], env={})
+    env = TerminalLoginWorker.build_env(ta)
+
+    assert env.get("SOME_REAL_MACHINE_VARIABLE") == "kept"
+
+
 def test_build_env_adds_nothing_when_no_proxy_is_configured(monkeypatch):
     """Empty in, empty out — same contract `proxy.child_env` itself
     documents: an unnecessary `HTTPS_PROXY=""` is worse than none at all
