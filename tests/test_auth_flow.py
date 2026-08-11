@@ -1125,6 +1125,52 @@ def test_claude_agents_no_methods_screen_offers_a_real_spawnable_sign_in(qapp):
     widget.shutdown()
 
 
+def test_claudes_sign_in_button_states_the_subscription_billing_fact(qapp):
+    """Issue #41's last checklist item: a Claude subscription used through
+    the panel bills against that subscription's own limits, same as Claude
+    Code itself — verified against Anthropic's own support article before
+    writing this (docs/facts/acp-sdk.md §29), stated as a plain fact here,
+    not a warning. Checked on the actual button an artist sees when they
+    click Settings > Sign in — a hover-only tooltip, same surface
+    `test_claude_agents_no_methods_screen_offers_a_real_spawnable_sign_in`
+    already reads for the API-key sentence."""
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    widget._rejoin_agent("claude-acp")
+    client = panel_mod.shared_client(widget._agent_id)
+    client.agent_info = lambda: _info(name="claude")
+
+    widget._offer_sign_in()
+
+    button = widget._auth_view._buttons["claude-setup-token"]
+    assert "draws from that subscription's own limits" in button.toolTip()
+    widget.shutdown()
+
+
+def test_claudes_auto_offered_no_methods_note_states_the_same_billing_fact(qapp, monkeypatch):
+    """The other surface for the same fact: `auth_required` firing before
+    any session exists routes through `_offer_login_command`'s static note
+    (no `/login` command to prefer yet), not the button above — an artist
+    who never opens Settings and just gets prompted mid-flow must see this
+    too."""
+    from houdini_agent_panel import client as client_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    notes: list[str] = []
+    monkeypatch.setattr(widget, "_note", notes.append)
+    info = client_mod.AgentInfo(
+        name="claude", version="1.0", protocol_version=1,
+        supports_image=False, supports_audio=False, supports_embedded_context=False,
+        supports_load_session=False, supports_logout=False, auth_methods=(),
+    )
+
+    widget._offer_login_command(info)
+
+    assert "draws from that subscription's own limits" in notes[-1]
+    widget.shutdown()
+
+
 def test_clicking_claudes_built_in_sign_in_spawns_setup_token(qapp, monkeypatch):
     """Confirms the button from the test above actually routes to a spawn,
     not `authenticate()` — claude-acp has no such method on the wire at

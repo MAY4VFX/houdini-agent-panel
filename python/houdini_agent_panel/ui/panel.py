@@ -1715,11 +1715,13 @@ class AgentPanel(QtWidgets.QWidget):
             "in a terminal, `claude setup-token` — Login method: "
             "Subscription Plan (Claude Pro/Max) — mints a token tied to "
             "that subscription; export it as CLAUDE_CODE_OAUTH_TOKEN in "
-            "your shell profile. Or ANTHROPIC_API_KEY in your shell "
-            "profile — Login method: API usage billing (Anthropic "
-            "Console), a different account, billed per token. The panel "
-            "passes your login shell's environment to the agent either "
-            "way. Then restart it from Settings."
+            "your shell profile. Usage here draws from that subscription's "
+            "own limits, the same as Claude Code itself. Or "
+            "ANTHROPIC_API_KEY in your shell profile — Login method: API "
+            "usage billing (Anthropic Console), a different account, "
+            "billed per token. The panel passes your login shell's "
+            "environment to the agent either way. Then restart it from "
+            "Settings."
         ),
     }
     _GENERIC_NO_METHODS_ADVICE = (
@@ -3787,12 +3789,13 @@ class AgentPanel(QtWidgets.QWidget):
                 "Plan (Claude Pro/Max). It signs in through your browser "
                 "and mints a token tied to that subscription (docs/facts/"
                 "acp-sdk.md §21: no credentials file is written), which "
-                "the panel captures and saves for you automatically. "
-                "ANTHROPIC_API_KEY in your shell profile is a separate "
-                "route — Login method: API usage billing (Anthropic "
-                "Console), a different account, billed per token, not "
-                "this subscription. Use whichever one you actually want "
-                "this agent billed against."
+                "the panel captures and saves for you automatically. Usage "
+                "here draws from that subscription's own limits, the same "
+                "as Claude Code itself. ANTHROPIC_API_KEY in your shell "
+                "profile is a separate route — Login method: API usage "
+                "billing (Anthropic Console), a different account, billed "
+                "per token, not this subscription. Use whichever one you "
+                "actually want this agent billed against."
             ),
             terminal_auth=acp_client.TerminalAuth(command=command, args=args, env={}),
         )

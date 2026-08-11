@@ -2427,6 +2427,15 @@ usage rather than the flat plan. Issue #41 already set the standard here
 so that fact belongs in front of the artist at the sign-in step, stated
 as a fact about money, not as a warning about rules.
 
+> **Superseded, billing only — see §29.** The paragraph above was checked
+> 2026-08-07 against sources it itself flagged as secondary. §29 (checked
+> 2026-08-11) found Anthropic's own support article, dated more recently,
+> saying the mechanism that would make "spends metered extra usage" true
+> was announced then explicitly paused before taking effect — as of that
+> check, usage through a third-party ACP client still draws from the
+> subscription's own limits, same as Claude Code. The permission question
+> two paragraphs up is untouched by this; only the billing conclusion is.
+
 ## 24. Windows sign-in via ConPTY — implemented, not yet run on Windows
 
 §20's own Windows note ended with "no Windows machine exists in this
@@ -2943,3 +2952,15 @@ Anthropic's billing stance here has changed more than once in a few
 months; treat anything written here as dated the moment it's read, and
 re-check the support article directly (not secondary coverage of it)
 before relying on this again.
+
+**What actually shipped:** not silence, and not §23's original claim —
+the *positive* half of the same primary source, which is confirmed
+current: "usage through the panel draws from that subscription's own
+limits, the same as Claude Code itself." Added to both places an artist
+sees before signing in with Claude — `AgentPanel._NO_METHODS_ADVICE
+["claude-acp"]` (the automatic note when `auth_required` fires with no
+session yet) and `_builtin_terminal_auth_method`'s own button
+description (Settings > Sign in). Neither mentions credits, dollar
+amounts, the June pause, or that this could change — that's the
+reasoning trail above, not something an artist about to sign in needs
+read to them.
