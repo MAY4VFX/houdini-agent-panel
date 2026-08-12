@@ -522,39 +522,14 @@ class SettingsView(QtWidgets.QWidget):
         self._telemetry_checkbox.toggled.connect(self._on_field_changed)
 
         # `Settings.claude_show_host_mcp_servers` / `claude_show_host_skills`
-        # — see `client.py::claude_session_meta`. Both on by default:
-        # today's behavior (Claude sees the artist's own account config,
-        # same as a terminal launch) is what artists already have. Replaces
-        # the earlier `isolate_agent_config` (redirecting the whole
-        # `CLAUDE_CONFIG_DIR`), which the owner rejected live — it took
-        # sign-in down with it, since a real `claude login`'s credentials
-        # live in that same directory. These two touch only what the agent
-        # can SEE, never where it authenticates from.
-        self._claude_host_mcp_checkbox = QtWidgets.QCheckBox(
-            "Let Claude see your own MCP servers", self
-        )
-        self._claude_host_mcp_checkbox.toggled.connect(self._on_field_changed)
-        self._claude_host_skills_checkbox = QtWidgets.QCheckBox(
-            "Let Claude see your own skills", self
-        )
-        self._claude_host_skills_checkbox.toggled.connect(self._on_field_changed)
-        self._claude_host_caption = QtWidgets.QLabel(
-            "Both on by default — Claude sees your account exactly like it "
-            "would from a terminal. MCP servers off: Claude connects only to "
-            "fxhoudini, ignoring any other server your account has configured "
-            "— the fix for a personal server (or one sharing fxhoudini's own "
-            "name) sitting in front of this panel's own tools. Skills off: "
-            "Claude stops reading your personal skill/plugin marketplace, but "
-            "still reads this scene's own AGENTS.md/CLAUDE.md — that file is "
-            "project-scoped, not account-scoped, so it keeps knowing it's "
-            "running inside Houdini either way. Neither touches sign-in — a "
-            "token this panel captured through “Sign in…” keeps working "
-            "regardless. Claude only, for now; every other agent ignores "
-            "both. Applies the next time that agent starts.",
-            self,
-        )
-        self._claude_host_caption.setWordWrap(True)
-        self._claude_host_caption.setStyleSheet("color: palette(disabled, text);")
+        # used to have their own checkboxes and a standalone "Agent
+        # config" section right here — moved to claude-acp's own row in
+        # the Agents section (`ui/agents.py::_AgentRow`), next to that
+        # row's Sign in/Sign out, on the owner's own words: these are
+        # properties of Claude, not of the panel, and don't belong in a
+        # section next to Network/Privacy/Data. See `client.py::
+        # claude_session_meta` for what they actually turn into on the
+        # wire.
 
         # A bare scheme+host (no path) gets `/v1/audio/transcriptions`
         # appended by `ui/voice.py::_normalize_whisper_endpoint` — the
@@ -756,13 +731,6 @@ class SettingsView(QtWidgets.QWidget):
         data_section.add_row("Bug report endpoint", self._bugreport_endpoint_edit)
         data_section.add_action_row(self._report_bug_button)
 
-        # Collapsed by default, same rank as Network/Privacy/Data: a niche
-        # switch most artists never need to touch.
-        agent_config_section = _Section("Agent config", self, expanded=False, grid=grid_metrics)
-        agent_config_section.add_checkbox(self._claude_host_mcp_checkbox)
-        agent_config_section.add_checkbox(self._claude_host_skills_checkbox)
-        agent_config_section.add_widget(self._claude_host_caption)
-
         # Kept as attributes (not just locals) so a test can reach a given
         # section's grid directly, the same way `test_ui_settings.py`
         # already reaches `view._autostart_checkbox` etc. — see
@@ -772,7 +740,6 @@ class SettingsView(QtWidgets.QWidget):
         self._updates_section = updates_section
         self._voice_section = voice_section
         self._privacy_section = privacy_section
-        self._agent_config_section = agent_config_section
         self._network_section = network_section
         self._data_section = data_section
 
@@ -793,7 +760,6 @@ class SettingsView(QtWidgets.QWidget):
             voice_section,
             privacy_section,
             network_section,
-            agent_config_section,
             data_section,
         ):
             rail_layout.addWidget(widget)
@@ -929,8 +895,15 @@ class SettingsView(QtWidgets.QWidget):
             self._proxy_edit.setText(current.proxy_url)
             self._no_proxy_edit.setText(current.no_proxy)
             self._ca_bundle_edit.setText(current.ca_bundle)
-            self._claude_host_mcp_checkbox.setChecked(current.claude_show_host_mcp_servers)
-            self._claude_host_skills_checkbox.setChecked(current.claude_show_host_skills)
+            # `claude_show_host_mcp_servers`/`claude_show_host_skills` no
+            # longer have their own fields here — they live on claude-acp's
+            # own row now (`ui/agents.py::_AgentRow`), which already
+            # re-reads settings fresh on every rebuild. Asked for
+            # explicitly, not left to whatever the next unrelated trigger
+            # happens to be — a reload is exactly the moment an external
+            # settings.json change (or "Restore defaults") should reach it
+            # too.
+            self._agents_view.refresh_auth_rows()
             self._refresh_version_labels()
             # A reload is a fresh read of what's on disk, not an edit — the
             # invitation to restart only belongs to an edit THIS screen just
@@ -963,8 +936,9 @@ class SettingsView(QtWidgets.QWidget):
         current.proxy_url = self._proxy_edit.text().strip()
         current.no_proxy = self._no_proxy_edit.text().strip()
         current.ca_bundle = self._ca_bundle_edit.text().strip()
-        current.claude_show_host_mcp_servers = self._claude_host_mcp_checkbox.isChecked()
-        current.claude_show_host_skills = self._claude_host_skills_checkbox.isChecked()
+        # `claude_show_host_mcp_servers`/`claude_show_host_skills` are
+        # saved directly by `ui/agents.py::AgentsView._set_claude_toggle`
+        # now — not read from a field on THIS screen at all.
         settings_module.save(current)
         return current
 

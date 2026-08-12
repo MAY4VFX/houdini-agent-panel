@@ -52,6 +52,69 @@ def _wait_until(condition, *, timeout_ms: int = 5000) -> None:
     assert condition(), "condition did not become true in time"
 
 
+# --- the "nothing to show yet" placeholder ----------------------------------
+#
+# Reported for real: the Agents section rendered as a bare header with
+# nothing under it — indistinguishable from broken — while the registry
+# fetch (off the main thread, network or cache) hadn't answered yet. The
+# root cause turned out to be a corrupted cache file (docs/facts/
+# on-disk-writes.md), but the missing placeholder was a real, independent
+# gap either way: even a genuinely slow or failed fetch left the same
+# blank section with no indication anything was happening.
+
+
+def test_shows_a_loading_placeholder_before_set_agents_is_ever_called(qapp):
+    view = AgentsView()
+
+    assert view._rows_layout.count() == 1
+    placeholder = view._rows_layout.itemAt(0).widget()
+    assert isinstance(placeholder, QtWidgets.QLabel)
+    assert "Loading" in placeholder.text()
+
+
+def test_a_confirmed_empty_answer_replaces_the_placeholder_with_a_clear_reason(qapp):
+    """`set_agents([])` — the registry fetch genuinely came back with
+    nothing (network unreachable, no cache). Reads differently from
+    "hasn't answered yet": there's nothing left to wait FOR."""
+    view = AgentsView()
+
+    view.set_agents([])
+
+    assert view._rows_layout.count() == 1
+    placeholder = view._rows_layout.itemAt(0).widget()
+    assert isinstance(placeholder, QtWidgets.QLabel)
+    assert "Loading" not in placeholder.text()
+    assert "Couldn't load" in placeholder.text()
+
+
+def test_a_real_answer_replaces_the_placeholder_with_actual_rows(qapp, monkeypatch):
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(id="agent-a", name="Agent A", version="1.0.0")
+    view = AgentsView()
+
+    view.set_agents([entry])
+
+    assert view._rows_layout.count() == 1
+    row = view._rows_layout.itemAt(0).widget()
+    assert not isinstance(row, QtWidgets.QLabel), "a real agent row, not the placeholder"
+
+
+def test_refresh_auth_rows_before_the_first_set_agents_does_not_claim_a_failure(qapp):
+    """`refresh_auth_rows` (a fresh connect's own auth-cache refresh,
+    `ui/panel.py:1459`) can fire before the registry fetch has answered at
+    all — it must not misread "nothing has arrived yet" as "the fetch
+    came back empty" and show the wrong one of the two placeholder texts."""
+    view = AgentsView()
+
+    view.refresh_auth_rows()
+
+    assert view._rows_layout.count() == 1
+    placeholder = view._rows_layout.itemAt(0).widget()
+    assert "Loading" in placeholder.text(), (
+        "still waiting for the first real answer — must not claim the fetch failed"
+    )
+
+
 def test_unavailable_agent_shown_with_reason_not_hidden(qapp, monkeypatch):
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
@@ -196,6 +259,113 @@ def test_installed_agent_has_no_use_button(qapp, monkeypatch):
     row = view._rows_layout.itemAt(0).widget()
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
     assert buttons == {"Remove", "Sign in…"}
+
+
+# --- claude-acp's own MCP-servers/skills visibility toggles ---------------
+#
+# Moved here from a standalone top-level "Agent config" section
+# (`ui/settings_view.py`, next to Network/Privacy/Data) — the owner's own
+# words: "it should be in the agent's own settings", not a separate menu.
+# `claude_session_meta` (`client.py`) is the other half — what these two
+# fields actually turn into on the wire.
+
+
+def _mark_claude_installed() -> None:
+    _mark_installed("claude-acp", "1.0.0")
+    current = settings_module.load()
+    current.installed_agents["claude-acp"] = settings_module.InstalledAgent(
+        agent_id="claude-acp", version="1.0.0", kind="binary", installed_at="now"
+    )
+    settings_module.save(current)
+
+
+def test_claude_row_shows_the_two_visibility_checkboxes(qapp, monkeypatch):
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    _mark_claude_installed()
+    entry = AgentEntry(
+        id="claude-acp", name="Claude Agent", version="1.0.0",
+        npx=NpxDistribution(package="@test/claude", args=[]),
+    )
+    view = AgentsView()
+
+    view.set_agents([entry])
+
+    row = view._rows_layout.itemAt(0).widget()
+    checkboxes = {c.text(): c.isChecked() for c in row.findChildren(QtWidgets.QCheckBox)}
+    assert checkboxes == {
+        "See your own MCP servers": True,
+        "See your own skills": True,
+    }, "both on by default, matching Settings.claude_show_host_mcp_servers/skills"
+
+
+def test_a_non_claude_agent_row_has_no_such_checkboxes(qapp, monkeypatch):
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    entry = AgentEntry(
+        id="agent-a",
+        name="Agent A",
+        version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./myagent", sha256="0" * 64)},
+    )
+    current = settings_module.load()
+    current.installed_agents["agent-a"] = settings_module.InstalledAgent(
+        agent_id="agent-a", version="1.0.0", kind="binary", installed_at="now"
+    )
+    _mark_installed("agent-a", "1.0.0")
+    settings_module.save(current)
+    view = AgentsView()
+
+    view.set_agents([entry])
+
+    row = view._rows_layout.itemAt(0).widget()
+    assert row.findChildren(QtWidgets.QCheckBox) == []
+
+
+def test_toggling_the_claude_checkbox_saves_settings_immediately(qapp, monkeypatch):
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    _mark_claude_installed()
+    entry = AgentEntry(
+        id="claude-acp", name="Claude Agent", version="1.0.0",
+        npx=NpxDistribution(package="@test/claude", args=[]),
+    )
+    view = AgentsView()
+    view.set_agents([entry])
+    row = view._rows_layout.itemAt(0).widget()
+    mcp_checkbox = next(
+        c for c in row.findChildren(QtWidgets.QCheckBox) if c.text() == "See your own MCP servers"
+    )
+    skills_checkbox = next(
+        c for c in row.findChildren(QtWidgets.QCheckBox) if c.text() == "See your own skills"
+    )
+
+    mcp_checkbox.setChecked(False)
+    skills_checkbox.setChecked(False)
+
+    current = settings_module.load()
+    assert current.claude_show_host_mcp_servers is False
+    assert current.claude_show_host_skills is False
+
+
+def test_a_saved_off_toggle_survives_a_fresh_rebuild(qapp, monkeypatch):
+    """The checkbox reflects settings.json on construction, not just after
+    a toggle in the same widget's own lifetime."""
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    _mark_claude_installed()
+    current = settings_module.load()
+    current.claude_show_host_mcp_servers = False
+    settings_module.save(current)
+    entry = AgentEntry(
+        id="claude-acp", name="Claude Agent", version="1.0.0",
+        npx=NpxDistribution(package="@test/claude", args=[]),
+    )
+
+    view = AgentsView()
+    view.set_agents([entry])
+
+    row = view._rows_layout.itemAt(0).widget()
+    mcp_checkbox = next(
+        c for c in row.findChildren(QtWidgets.QCheckBox) if c.text() == "See your own MCP servers"
+    )
+    assert mcp_checkbox.isChecked() is False
 
 
 def test_sign_in_is_offered_for_every_installed_agent_from_the_start(qapp, monkeypatch):

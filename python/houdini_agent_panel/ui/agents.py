@@ -281,6 +281,13 @@ class _AgentRow(QtWidgets.QWidget):
     remove_custom_requested = Signal()
     sign_in_requested = Signal()
     sign_out_requested = Signal()
+    #: Only ever wired for claude-acp's own row (`show_host_mcp_servers`/
+    #: `show_host_skills` below non-None is what draws the checkboxes at
+    #: all) — the owner's own words on why they don't belong in a
+    #: standalone top-level "Agent config" section next to Network/
+    #: Privacy/Data: these are properties of THIS agent, not of the panel.
+    claude_host_mcp_toggled = Signal(bool)
+    claude_host_skills_toggled = Signal(bool)
 
     #: Fixed width for the state column and the actions column. Letting them
     #: size to content made every row's buttons land at a different x —
@@ -304,6 +311,12 @@ class _AgentRow(QtWidgets.QWidget):
         can_sign_out: bool = False,
         is_signed_in: bool = False,
         auth_status: str = "",
+        #: `None` — this agent has nothing of the kind (every agent but
+        #: claude-acp). A real bool draws the checkbox at its current
+        #: state; the caller (`AgentsView._rebuild_registry_rows`) is the
+        #: one place that knows which agent id this is for.
+        show_host_mcp_servers: bool | None = None,
+        show_host_skills: bool | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -395,6 +408,46 @@ class _AgentRow(QtWidgets.QWidget):
             else:
                 auth_row.addStretch(1)
             outer.addLayout(auth_row)
+
+            if show_host_mcp_servers is not None or show_host_skills is not None:
+                # A THIRD indented line, same left edge as `auth_row` above
+                # it — these are claude-acp's own settings, not something
+                # that belongs in a standalone top-level section (the
+                # owner's own words: "it should be in the agent's own
+                # settings"). `client.py::claude_session_meta` is the
+                # other half of this — what actually gets sent, and why
+                # dropping only "user" from settingSources (not an empty
+                # list) is load-bearing (docs/facts/acp-sdk.md §30).
+                toggle_row = QtWidgets.QHBoxLayout()
+                toggle_row.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
+                toggle_row.setSpacing(6)
+                if show_host_mcp_servers is not None:
+                    mcp_checkbox = QtWidgets.QCheckBox("See your own MCP servers", self)
+                    mcp_checkbox.setChecked(show_host_mcp_servers)
+                    mcp_checkbox.toggled.connect(self.claude_host_mcp_toggled.emit)
+                    toggle_row.addWidget(mcp_checkbox)
+                if show_host_skills is not None:
+                    skills_checkbox = QtWidgets.QCheckBox("See your own skills", self)
+                    skills_checkbox.setChecked(show_host_skills)
+                    skills_checkbox.toggled.connect(self.claude_host_skills_toggled.emit)
+                    toggle_row.addWidget(skills_checkbox)
+                toggle_row.addStretch(1)
+                outer.addLayout(toggle_row)
+                # Short by design — the owner's own complaint about the
+                # old caption: five sentences about settingSources and
+                # project-scoped files is implementation detail, not
+                # something an artist decides from. What changes when
+                # it's off is the whole answer; docs/facts/acp-sdk.md §30
+                # carries the rest for whoever needs it.
+                caption = QtWidgets.QLabel(
+                    "Off means this agent only sees fxhoudini / this scene's own "
+                    "AGENTS.md — not your personal MCP servers or skills.",
+                    self,
+                )
+                caption.setWordWrap(True)
+                caption.setStyleSheet("color: palette(disabled, text);")
+                caption.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
+                outer.addWidget(caption)
 
         if is_custom:
             remove_btn = _compact_button("Remove", self._actions)
@@ -496,6 +549,15 @@ class AgentsView(QtWidgets.QWidget):
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._custom_rows_layout = QtWidgets.QVBoxLayout()
+        #: Flips True the first time `set_agents` actually answers — even
+        #: with an empty list. Read by `_rebuild_registry_rows` (called
+        #: below, at construction, before any registry fetch could
+        #: possibly have finished) to tell "nothing to show because
+        #: nothing has answered yet" from "nothing to show because the
+        #: real answer was empty" — reported for real: the section used to
+        #: render as a bare header with nothing under it, whichever one it
+        #: was, indistinguishable from broken.
+        self._answered = False
 
         self._custom_name = QtWidgets.QLineEdit(self)
         self._custom_name.setPlaceholderText("Name")
@@ -534,6 +596,7 @@ class AgentsView(QtWidgets.QWidget):
         layout.addWidget(self._custom_section)
 
         self._load_custom_agents()
+        self._rebuild_registry_rows()
 
     # --- feeding data --------------------------------------------------
 
@@ -545,6 +608,7 @@ class AgentsView(QtWidgets.QWidget):
         truth, and duplicating it in the widget's own memory would risk it
         drifting out of sync.
         """
+        self._answered = True
         self._entries = list(entries)
         self._updates_by_target = {u.target: u for u in (updates or []) if u.kind == "agent"}
         self._rebuild_registry_rows()
@@ -585,6 +649,27 @@ class AgentsView(QtWidgets.QWidget):
         """
         _clear_layout(self._rows_layout)
         self._rows_by_id = {}
+        if not self._entries:
+            # Two different reasons to have nothing to show, and they read
+            # very differently: `set_agents` simply hasn't been called yet
+            # (`__init__`'s own placeholder covers that until the first
+            # call, `self._answered` still False here means a caller other
+            # than `set_agents` — `refresh_auth_rows` — got here first) vs.
+            # a real answer that came back empty (network unreachable, no
+            # cache — `ui/panel.py::_on_refresh_done`'s own "Couldn't
+            # fetch the agent list" note covers the feed; this is the
+            # same fact, echoed where the artist is actually looking,
+            # since that note is easy to miss or scroll past).
+            text = (
+                "Loading agents…"
+                if not self._answered
+                else "Couldn't load the agent list — check the network, or Settings → Network."
+            )
+            placeholder = QtWidgets.QLabel(text, self)
+            placeholder.setWordWrap(True)
+            placeholder.setStyleSheet("color: palette(disabled, text);")
+            self._rows_layout.addWidget(placeholder)
+            return
         current_settings = settings_module.load()
         for entry in self._entries:
             reason = entry.unavailable_reason()
@@ -609,15 +694,45 @@ class AgentsView(QtWidgets.QWidget):
                 can_sign_out=_can_sign_out_agent(entry.id, auth_info, current_settings),
                 is_signed_in=_is_agent_signed_in(entry.id, auth_info, current_settings),
                 auth_status=_auth_status_text(attempt),
+                # claude-acp only — `client.py::claude_session_meta` is the
+                # other half, verified live against nothing else honoring
+                # this (docs/facts/acp-sdk.md §30).
+                show_host_mcp_servers=(
+                    current_settings.claude_show_host_mcp_servers if entry.id == "claude-acp" else None
+                ),
+                show_host_skills=(
+                    current_settings.claude_show_host_skills if entry.id == "claude-acp" else None
+                ),
                 parent=self,
             )
             row.install_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
+            row.claude_host_mcp_toggled.connect(
+                lambda checked: self._set_claude_toggle("claude_show_host_mcp_servers", checked)
+            )
+            row.claude_host_skills_toggled.connect(
+                lambda checked: self._set_claude_toggle("claude_show_host_skills", checked)
+            )
             row.sign_in_requested.connect(lambda checked=False, aid=entry.id: self.sign_in_requested.emit(aid))
             row.sign_out_requested.connect(lambda checked=False, aid=entry.id: self.sign_out_requested.emit(aid))
             self._rows_layout.addWidget(row)
             self._rows_by_id[entry.id] = row
+
+    def _set_claude_toggle(self, field: str, checked: bool) -> None:
+        """One of claude-acp's own two checkboxes changed — read fresh,
+        write the one field, save. Same "reload, don't trust a stale
+        snapshot" discipline `_install`/`_uninstall` already use elsewhere
+        in this class, and the reason this doesn't go through
+        `ui/settings_view.py::_save_from_fields` (a different screen's own
+        save-everything-on-screen method, with no idea these two fields
+        moved here) — `settings.json` has exactly one field list that
+        matters at save time: whatever changed, reloaded fresh underneath
+        it.
+        """
+        current = settings_module.load()
+        setattr(current, field, checked)
+        settings_module.save(current)
 
     def trigger_update(self, agent_id: str) -> bool:
         """Start updating `agent_id` as if its own row's button were clicked.

@@ -41,7 +41,6 @@ def _build(qapp) -> SettingsView:
         view._voice_section,
         view._privacy_section,
         view._network_section,
-        view._agent_config_section,
         view._data_section,
     ):
         section._toggle.setChecked(True)
@@ -164,7 +163,6 @@ def test_section_headers_share_one_left_edge(qapp):
             view._voice_section,
             view._privacy_section,
             view._network_section,
-            view._agent_config_section,
             view._data_section,
         )
     }
@@ -204,7 +202,6 @@ def test_nothing_starts_left_of_the_header_rail(qapp):
             view._voice_section,
             view._privacy_section,
             view._network_section,
-            view._agent_config_section,
             view._data_section,
         )
     }
@@ -226,7 +223,6 @@ def test_section_gap_is_the_same_between_every_pair(qapp):
         view._voice_section,
         view._privacy_section,
         view._network_section,
-        view._agent_config_section,
         view._data_section,
     ]
     gaps = set()
