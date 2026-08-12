@@ -26,7 +26,6 @@ grows without limit would eventually cost more to load than it is worth.
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -227,16 +226,20 @@ def save(conversations: list[StoredConversation], *, active_id: str | None = Non
     rest = [c for c in ordered if not c.pinned][: max(0, MAX_CONVERSATIONS - len(pinned))]
     keep = _ordered(pinned + rest)
 
-    target = store_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
     payload = {
         "version": STORE_VERSION,
         "active_id": active_id,
         "conversations": [c.to_dict() for c in keep],
     }
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
-    os.replace(tmp, target)
+    # `paths.atomic_write_text`, not a hand-rolled `.tmp` + `os.replace`
+    # here: a fixed, shared temp filename is not actually atomic across
+    # two concurrent writers (two Houdini processes, two tabs' own save
+    # calls racing) — see that function's own docstring and docs/facts/
+    # on-disk-writes.md for the corrupted-cache incident that is the
+    # reason this file no longer hand-rolls it either.
+    paths.atomic_write_text(
+        store_path(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    )
 
 
 def _ordered(conversations: list[StoredConversation]) -> list[StoredConversation]:

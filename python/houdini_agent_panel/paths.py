@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 APP_NAME = "HoudiniAgentPanel"
@@ -86,6 +87,50 @@ def logs_dir() -> Path:
 
 def settings_path() -> Path:
     return data_dir() / "settings.json"
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` so a reader never sees a partial or
+    interleaved file — not even under two writers racing each other.
+
+    `os.replace` itself is atomic; what wasn't is the temp file every
+    caller wrote it FROM. Five call sites (`registry.py`,
+    `conversations_store.py`, `settings.py`, `orphans.py`, `updates.py`)
+    each hand-rolled the same `path.with_suffix(path.suffix + ".tmp")` —
+    one FIXED name, shared by every writer. Two processes (two Houdini
+    sessions, or the panel racing an installer) writing that same name at
+    once can interleave: one truncates and starts writing while the other
+    is mid-write, and whichever finishes last determines the final
+    `os.replace` — but the bytes already in the file by then can be a
+    hybrid of both writes. Measured for real, byte for byte: an owner's
+    `registry.json` cache was a complete, valid 35728-byte JSON document
+    plus exactly one trailing `}` — not truncated, not garbage, one
+    leftover byte from a longer write that a shorter one raced and lost to
+    (docs/facts/on-disk-writes.md). `_read_cache`'s own `except ValueError:
+    return None` swallowed the corruption silently, and a stale-but-valid
+    cache (`max_age=None` would normally accept one) can't save a file
+    that doesn't parse at ANY age — the Agents section stayed empty with
+    nothing in `panel.log` to explain why.
+
+    `tempfile.mkstemp` gives every CALL its own name, in the SAME
+    directory as `path` (required for `os.replace` to stay atomic — a
+    temp file on a different filesystem/mount is a copy, not a rename).
+    Two concurrent writers now hold two different files; neither can ever
+    see the other's partial content, and whichever `os.replace` runs last
+    simply wins outright, same as it always should have.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def open_in_file_manager(path: Path) -> None:

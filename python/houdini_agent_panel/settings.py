@@ -1,15 +1,14 @@
 """Panel settings — one small JSON file.
 
-Read whole, written atomically. There are deliberately no partial merges:
-the file has a dozen keys, and `os.replace` over a temp file guarantees
-that a Houdini crash mid-write never leaves someone with a truncated JSON
-file and no panel.
+Read whole, written atomically (`paths.atomic_write_text` — a unique temp
+file per write, `os.replace` into place) — a Houdini crash mid-write, or
+two writers racing each other, never leaves someone with a truncated or
+interleaved JSON file and no panel.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -358,10 +357,15 @@ def load(path: Path | None = None) -> Settings:
 
 def save(settings: Settings, path: Path | None = None) -> None:
     target = path or paths.settings_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(settings.to_dict(), indent=2, ensure_ascii=False) + "\n", "utf-8")
-    os.replace(tmp, target)
+    # `paths.atomic_write_text`, not a hand-rolled `.tmp` + `os.replace` —
+    # a FIXED, shared temp filename is not actually atomic across two
+    # concurrent writers (two Houdini processes saving settings at once).
+    # See that function's own docstring and docs/facts/on-disk-writes.md
+    # for the corrupted-cache incident this same pattern caused elsewhere
+    # in the codebase.
+    paths.atomic_write_text(
+        target, json.dumps(settings.to_dict(), indent=2, ensure_ascii=False) + "\n"
+    )
 
 
 def agent_owns_token(agent_id: str, settings: Settings) -> bool:

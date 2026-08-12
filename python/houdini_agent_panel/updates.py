@@ -20,7 +20,6 @@ unreadable version is worse than no banner at all.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -275,8 +274,6 @@ def _read_cache(now: datetime, *, fresh_start: bool) -> list[Update] | None:
 
 
 def _write_cache(now: datetime, updates: list[Update]) -> None:
-    path = _cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "checked_at": now.isoformat(),
         # Which panel produced this answer. A day-old cache written by an
@@ -287,9 +284,10 @@ def _write_cache(now: datetime, updates: list[Update]) -> None:
         "panel_version": _current_panel_version() or "",
         "updates": [asdict(u) for u in updates],
     }
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload), "utf-8")
-    os.replace(tmp, path)
+    # `paths.atomic_write_text` — see its own docstring and docs/facts/
+    # on-disk-writes.md: a fixed, shared `.tmp` name (what this used to do
+    # here too) is not actually atomic across two concurrent writers.
+    paths.atomic_write_text(_cache_path(), json.dumps(payload))
 
 
 def check(

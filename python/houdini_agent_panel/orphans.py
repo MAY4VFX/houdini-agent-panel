@@ -119,12 +119,11 @@ def _load() -> dict[str, RunningAgent]:
 
 
 def _save(records: dict[str, RunningAgent]) -> None:
-    target = _path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     payload = {key: asdict(record) for key, record in records.items()}
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", "utf-8")
-    os.replace(tmp, target)
+    # `paths.atomic_write_text` — see its own docstring and docs/facts/
+    # on-disk-writes.md: a fixed, shared `.tmp` name (what this used to do
+    # here too) is not actually atomic across two concurrent writers.
+    paths.atomic_write_text(_path(), json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
 # --- writers: called from client.py around the process's own lifetime ----

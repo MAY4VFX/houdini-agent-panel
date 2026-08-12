@@ -10,7 +10,6 @@ the whole registry.
 from __future__ import annotations
 
 import json
-import os
 import platform
 import time
 from dataclasses import dataclass, field
@@ -18,7 +17,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import paths
+from .logbook import logger
 from .network import Fetcher, NetworkError, fetch_json
+
+_log = logger("houdini_agent_panel.registry")
 
 REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
 
@@ -285,12 +287,26 @@ def reset_memory_cache_for_tests() -> None:
 
 
 def _read_cache(path: Path, *, max_age: float | None) -> tuple[float, list[AgentEntry]] | None:
-    """`max_age=None` — accept a cache of any age (network unavailable, cache exists)."""
+    """`max_age=None` — accept a cache of any age (network unavailable, cache exists).
+
+    A cache that doesn't parse at ANY age can't be saved by that
+    leniency — measured for real (docs/facts/on-disk-writes.md): a
+    torn/interleaved write (fixed by `paths.atomic_write_text`, but an
+    existing file written before that fix stays corrupt until something
+    clears it) left a complete, valid JSON document plus one leftover
+    trailing byte, `json.loads` raising on every single read afterward,
+    forever, silently — the Agents section stayed empty and `panel.log`
+    had nothing to say why. Logged AND removed here so it can't keep
+    failing the same way on every subsequent launch: the next fetch
+    writes a fresh cache in its place.
+    """
     if not path.exists():
         return None
     try:
         wrapper = json.loads(path.read_text("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        _log.warning("registry cache: %s did not parse (%s) — removing it", path, exc)
+        path.unlink(missing_ok=True)
         return None
     if not isinstance(wrapper, dict):
         return None
@@ -306,11 +322,8 @@ def _read_cache(path: Path, *, max_age: float | None) -> tuple[float, list[Agent
 
 
 def _write_cache(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     wrapper = {"fetched_at": time.time(), "payload": payload}
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(wrapper), "utf-8")
-    os.replace(tmp, path)
+    paths.atomic_write_text(path, json.dumps(wrapper))
 
 
 def fetch_registry(
