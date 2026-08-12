@@ -1707,10 +1707,18 @@ def test_text_typed_before_any_session_is_not_thrown_away(qapp, monkeypatch):
     monkeypatch.setattr(widget, "_start_new_session", lambda: started.append(True))
     prompted: list[tuple[str, list]] = []
     monkeypatch.setattr(client, "prompt", lambda sid, blocks: prompted.append((sid, blocks)))
+    notes: list[str] = []
+    widget._note = notes.append
 
     widget._on_submitted([{"type": "text", "text": "make it rain"}])
     assert started == [True]
     assert prompted == []
+    # Reported for real: routine narration here ("No conversation open
+    # yet — starting one and sending this.") read as a problem report,
+    # especially alongside an unrelated false "not signed in" note from
+    # the same investigation (`test_signin_reachable.py`). The message
+    # showing as sent is already visible without saying so again.
+    assert notes == [], "starting the first session must not narrate itself"
 
     state = _session()
     client.session_started.emit(state.session_id, state)

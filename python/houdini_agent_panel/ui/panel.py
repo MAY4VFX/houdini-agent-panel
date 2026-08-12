@@ -2911,8 +2911,19 @@ class AgentPanel(QtWidgets.QWidget):
             # blocks here would silently eat what the artist just typed — the
             # first message after opening the panel, most often. Hold it and
             # send it the moment a session exists.
+            #
+            # No note shown here on purpose (there used to be one, "No
+            # conversation open yet — starting one and sending this.") —
+            # reported for real: the artist's own memory of it, alongside
+            # an unrelated false "not signed in" (`_on_log_line`'s own fix,
+            # same investigation), was "it said something about a
+            # conversation not being found". Routine and accurate, but
+            # narrating a UI action the artist can already see happen (the
+            # message shows as sent, a conversation appears) added a line
+            # that reads as a problem report at the exact moment nothing
+            # is wrong. The underlying behavior — hold the message, open a
+            # session, send it — is unchanged; only the narration is gone.
             self._pending_prompt = list(blocks)
-            self._note("No conversation open yet — starting one and sending this.")
             self._start_new_session()
             return
         text = _text_of_blocks(blocks)
@@ -3849,6 +3860,28 @@ class AgentPanel(QtWidgets.QWidget):
             )
             return
         if "authorizationrequired" in lowered.replace(" ", ""):
+            if self._pool.all():
+                # A live session already exists for this agent — direct,
+                # protocol-level proof the connection genuinely works, not
+                # a heuristic. A stray "AuthorizationRequired" AFTER that
+                # is not the fresh sign-in failure this marker exists to
+                # catch: if it were, the session that already answered a
+                # turn couldn't have. Reported for real: the owner saw
+                # "not signed in" while his own session had started and
+                # answered fine per `panel.log` — this substring-only
+                # check (needed for Grok, which never signals auth
+                # failure through the protocol at all — see this
+                # marker's own comment) has no way to tell "the actual
+                # failure this exists for" from "some unrelated line
+                # that happens to contain the same words" once a session
+                # is already up. Logged, not surfaced — the artist's own
+                # working conversation is the more trustworthy signal.
+                _log.info(
+                    "stderr contained an auth-looking marker with a session "
+                    "already live for %s — not surfacing it: %s",
+                    self._agent_id, line.strip(),
+                )
+                return
             self._note(
                 "The agent says it is not signed in. Open the ⋯ menu and pick Sign in."
             )

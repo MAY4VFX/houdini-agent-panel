@@ -53,6 +53,41 @@ def test_authorization_error_on_stderr_opens_the_sign_in_screen(qapp, monkeypatc
     widget.shutdown()
 
 
+def test_authorization_error_on_stderr_is_not_shouted_once_a_session_is_already_live(
+    qapp, monkeypatch
+):
+    """Reported for real: the owner saw "The agent says it is not signed
+    in" while his own session had already started and answered a turn —
+    `panel.log` showed a clean connect. The substring-only marker this
+    check runs on (needed for Grok, which never signals auth failure
+    through the protocol at all) has no way to tell the real failure it
+    exists for apart from an unrelated stderr line that happens to
+    contain the same words, once a session already exists to prove the
+    connection genuinely works."""
+    from houdini_agent_panel import sessions
+
+    widget = panel_mod.AgentPanel()
+    qapp.processEvents()
+    client = panel_mod.shared_client(widget._agent_id)
+    monkeypatch.setattr(client, "agent_info", lambda: _info())
+    client.session_started.emit(
+        "s1",
+        sessions.SessionState(session_id="s1", title="New conversation", cwd="/tmp", created_at=0.0),
+    )
+    qapp.processEvents()
+    notes: list[str] = []
+    widget._note = notes.append
+
+    client.log_line.emit(
+        "ERROR worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)"
+    )
+    qapp.processEvents()
+
+    assert notes == [], "a working session is stronger evidence than a stray stderr substring"
+    assert widget._pages.currentIndex() != panel_mod.AgentPanel.PAGE_AUTH
+    widget.shutdown()
+
+
 def test_sign_in_is_reachable_from_the_settings_agents_row(qapp, monkeypatch):
     """The manual entry point moved from the header chip's switcher menu to
     the Settings screen's agent row (an artist's complaint: "Claude is
