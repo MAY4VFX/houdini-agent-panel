@@ -355,6 +355,27 @@ class TranscriptModel:
 
     def apply_tool_call(self, call: Any) -> Entry:
         tool_call_id = call.tool_call_id
+        # Same redelivery this class already guards `apply_chunk` against
+        # (`_by_message_id`), just never closed here until it was measured
+        # for real: `session/load` replay carries the SAME `tool_call_id`
+        # Claude originally issued (docs/facts/acp-sdk.md §32) — a session
+        # kept alive across a resume (not dropped and rebuilt from replay
+        # any more) would otherwise see this `tool_call` a second time and
+        # append a second row sharing the first one's id. Redelivery
+        # updates the existing entry's own fields instead of creating a
+        # sibling — the same "the content already exists, treat this as
+        # the latest word on it" rule `apply_tool_update` below already
+        # applies to a call's STATUS; this is that rule applied to the
+        # call's initial announcement too.
+        existing = self._by_tool_call_id.get(tool_call_id)
+        if existing is not None and existing.tool is not None:
+            view = existing.tool
+            view.title = call.title
+            view.kind = getattr(call, "kind", None) or view.kind
+            view.status = getattr(call, "status", None) or view.status
+            view.content = _plain_list(getattr(call, "content", None)) or view.content
+            view.locations = _plain_list(getattr(call, "locations", None)) or view.locations
+            return existing
         view = ToolCallView(
             tool_call_id=tool_call_id,
             title=call.title,
@@ -492,6 +513,31 @@ class TranscriptModel:
         ]
         self._by_message_id.clear()
         self._by_tool_call_id.clear()
+        # Rebuilt, not left empty: a restored conversation resumed later
+        # via `session/load` (`ui/panel.py::_on_session_loaded`, which
+        # keeps this model instead of discarding it — docs/facts/
+        # acp-sdk.md §32) needs `apply_chunk`'s own `(kind, message_id)`
+        # dedup to recognise a redelivered agent message as one it already
+        # has, same as it already does for a model that stayed alive
+        # in-process. `apply_chunk`'s own id shape (`f"{kind}:{message_
+        # id}"`, this class's one and only writer of that format) is
+        # reversed here — `_UNKEYED_PREFIX` ids (no message_id at all,
+        # e.g. Grok) are deliberately excluded, same as `apply_chunk`
+        # itself never keys those. Tool calls are not included: `to_
+        # records` never persists them at all (its own docstring — "live
+        # state belonging to an agent process that no longer exists"), so
+        # a restored model never has one to collide with in the first
+        # place; whatever tool activity shows up after a resume comes
+        # from replay alone, by construction.
+        for entry in self._entries:
+            if entry.kind not in ("agent", "thought"):
+                continue
+            prefix = f"{entry.kind}:"
+            if not entry.id.startswith(prefix) or entry.id.startswith(_UNKEYED_PREFIX):
+                continue
+            message_id = entry.id[len(prefix):]
+            if message_id:
+                self._by_message_id[(entry.kind, message_id)] = entry
 
     def entries(self) -> list[Entry]:
         return list(self._entries)

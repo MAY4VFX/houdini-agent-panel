@@ -136,6 +136,31 @@ def test_apply_tool_update_for_unknown_id_returns_none():
     assert model.apply_tool_update(_tool_update(tool_call_id="ghost")) is None
 
 
+def test_apply_tool_call_redelivered_under_the_same_id_does_not_duplicate():
+    """Measured live against a real `session/load` replay of a real
+    conversation (docs/facts/acp-sdk.md §32): `tool_call_id` matches
+    between the original call and its later replay — a redelivery must
+    update the existing row, not add a sibling sharing its id."""
+    model = TranscriptModel()
+    first = model.apply_tool_call(_tool_call(status="completed", title="Read scene.py"))
+
+    second = model.apply_tool_call(_tool_call(status="completed", title="Read scene.py"))
+
+    assert first is second
+    assert len(model.entries()) == 1
+    assert model.entries()[0].tool.status == "completed"
+
+
+def test_apply_tool_call_redelivery_can_still_carry_newer_fields():
+    model = TranscriptModel()
+    model.apply_tool_call(_tool_call(status="pending"))
+
+    entry = model.apply_tool_call(_tool_call(status="completed"))
+
+    assert len(model.entries()) == 1
+    assert entry.tool.status == "completed"
+
+
 # --- plan ----------------------------------------------------------------
 
 
@@ -229,6 +254,99 @@ def test_note_and_error_both_survive_a_round_trip_through_records():
     kinds = {entry.id: entry.kind for entry in restored.entries()}
     assert kinds[note.id] == "note"
     assert kinds[error.id] == "error"
+
+
+# --- load_records: redelivery dedup after a restart ---------------------------
+#
+# `session/load` (`ui/panel.py::_on_session_loaded`) keeps a restored
+# conversation's own model alive across a resume instead of rebuilding it
+# from replay (docs/facts/acp-sdk.md §32) — which means a REAL replay's
+# `message_id` for an agent reply can, and does, match one this restored
+# model already has. `apply_chunk`'s own dedup only works if `_by_message_
+# id` actually has the entry in it; `load_records` used to always clear
+# that dict and never repopulate it, so a conversation that survived a
+# restart had NO working dedup at all, structurally, regardless of
+# whether the ids matched.
+
+
+def test_load_records_rebuilds_dedup_for_agent_and_thought_entries():
+    model = TranscriptModel()
+    model.load_records([
+        {"kind": "agent", "id": "agent:msg_1", "text": "the answer so far"},
+    ])
+
+    # A redelivery of the SAME message, same id — must merge, not duplicate.
+    merged = model.apply_chunk("msg_1", "the answer so far")
+
+    assert len(model.entries()) == 1
+    assert merged.text == "the answer so far"
+
+
+def test_load_records_rebuild_is_specific_to_kind_not_just_message_id():
+    """An `agent` entry and a `thought` entry never share a redelivery
+    just because their underlying `messageId` happens to match — `apply_
+    chunk`'s own key is `(kind, message_id)`, and the rebuild has to use
+    the exact same key or it would merge two things that were always
+    meant to stay apart."""
+    model = TranscriptModel()
+    model.load_records([
+        {"kind": "agent", "id": "agent:msg_1", "text": "the spoken answer"},
+    ])
+
+    thought = model.apply_chunk("msg_1", "the private reasoning", thought=True)
+
+    assert len(model.entries()) == 2
+    assert thought.kind == "thought"
+    assert thought.text == "the private reasoning"
+
+
+def test_load_records_does_not_key_user_entries_into_the_agent_dedup_dict():
+    """Only `apply_chunk`'s own `f\"{kind}:{message_id}\"` shape should
+    ever populate `_by_message_id` — a `user` entry's id is an unrelated
+    uuid (`append_user`), never a message_id, and must not accidentally
+    let a later agent chunk merge into a user's own line just because
+    some id happened to collide."""
+    model = TranscriptModel()
+    model.load_records([{"kind": "user", "id": "msg_1", "text": "a question"}])
+
+    # Same literal id as the restored user entry's — if `load_records`
+    # mistakenly keyed it, this would merge into the user's own text.
+    reply = model.apply_chunk("msg_1", "an unrelated agent reply")
+
+    assert len(model.entries()) == 2
+    assert reply.kind == "agent"
+    assert reply.text == "an unrelated agent reply"
+
+
+def test_load_records_leaves_an_unkeyed_agent_entry_out_of_the_dedup_dict():
+    """An unkeyed agent chunk's id carries `_UNKEYED_PREFIX`, not a real
+    message_id — `load_records` must not try to parse one out of it and
+    accidentally key it. (Whether a LATER unkeyed chunk continues that
+    same restored entry positionally is a separate, pre-existing
+    mechanism — `apply_chunk`'s own "last entry, same kind" rule — not
+    what this test is about.)"""
+    model = TranscriptModel()
+    model.load_records([{"kind": "agent", "id": "unkeyed:abc-123", "text": "an unkeyed reply"}])
+
+    assert model._by_message_id == {}
+
+
+def test_a_tool_call_after_restart_never_duplicates_because_none_were_ever_stored():
+    """`to_records` never persists `tool`-kind entries at all (its own
+    docstring: "live state belonging to an agent process that no longer
+    exists") — so a restored model has nothing for a replayed tool call to
+    collide with. This pins that absence is genuinely a non-issue, not an
+    untested assumption."""
+    model = TranscriptModel()
+    model.load_records([
+        {"kind": "user", "id": "e1", "text": "do something"},
+        {"kind": "agent", "id": "agent:msg_1", "text": "done"},
+    ])
+
+    entry = model.apply_tool_call(_tool_call(tool_call_id="tc1"))
+
+    assert len(model.entries()) == 3
+    assert entry.kind == "tool"
 
 
 # --- queue / promote / remove -------------------------------------------------
