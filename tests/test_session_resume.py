@@ -224,6 +224,17 @@ def test_a_second_adopt_for_a_different_key_is_unaffected(qapp, monkeypatch):
 def test_a_successful_load_continues_the_conversation_and_sends_the_pending_prompt(
     qapp, monkeypatch
 ):
+    """Measured live, docs/facts/acp-sdk.md §32: `session/load`'s own
+    replay is not a reliable way to rebuild what the artist sees — it can
+    arrive after `session_loaded` already fired (an unpredictable split,
+    not just "usually fine"), and `client.py` has always dropped
+    `user_message_chunk` outright, so the artist's OWN old messages never
+    came from replay at all, timing aside. `_on_session_loaded` keeps the
+    local, already-complete record instead of discarding it — this test
+    used to assert the opposite ("the local read-only copy must not be
+    stacked on top of the agent's own replay"), which was exactly the
+    reasoning the measurement disproved.
+    """
     conversation = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-9")
     store.save([conversation])
 
@@ -241,9 +252,15 @@ def test_a_successful_load_continues_the_conversation_and_sends_the_pending_prom
     widget._set_current_session(key)
     widget._on_submitted([{"type": "text", "text": "and more dust"}])
 
-    # The agent replays the session's own history as ordinary session_update
-    # notifications BEFORE session/load answers — simulated the same way the
-    # real handler receives it, through the normal message_chunk signal.
+    # The agent's own replay — a real one would use the SAME message_id
+    # this conversation's own stored "make dust" reply once had; this
+    # placeholder id has no match in the kept-alive local model, so it
+    # lands as its own, additional entry rather than merging into
+    # anything — exactly like a genuinely NEW live update after resuming
+    # would. Order-independence is the point: fired here BEFORE
+    # session_loaded, but nothing about this test depends on that order
+    # any more (see test_replay_landing_after_session_loaded_is_still_
+    # fine below for the other extreme).
     client.message_chunk.emit("agent-sess-9", "replay-1", "earlier: rotor pyro setup")
     qapp.processEvents()
 
@@ -256,14 +273,109 @@ def test_a_successful_load_continues_the_conversation_and_sends_the_pending_prom
     assert widget._current_session().session_id == "agent-sess-9"
     assert widget._pool.get(key) is None, "the restored placeholder must be gone"
     texts = [e.text for e in widget._model("agent-sess-9").entries()]
-    assert texts[0] == "earlier: rotor pyro setup", (
-        "the agent's own replay must be the start of the resumed transcript"
+    assert "make dust" in texts, (
+        "the artist's own past message must survive a resume — it never came from "
+        "replay to begin with (client.py drops user_message_chunk unconditionally)"
     )
-    assert "make dust" not in texts, (
-        "the local read-only copy must not be stacked on top of the agent's own replay"
+    assert "earlier: rotor pyro setup" in texts, "replay content is still shown, not discarded"
+    assert texts.index("make dust") < texts.index("and more dust"), (
+        "the kept-alive history stays ABOVE the newly typed message"
     )
     assert "and more dust" in texts, "the message typed while resuming must still go out"
     assert prompts and prompts[0][0] == "agent-sess-9"
+    widget.shutdown()
+
+
+def test_replay_landing_after_session_loaded_is_still_fine(qapp, monkeypatch):
+    """The other measured extreme (docs/facts/acp-sdk.md §32): replay can
+    arrive AFTER `session_loaded` already fired and this handler's own
+    work (transplanting the model, sending the pending prompt) already
+    ran. Nothing here waits for replay any more, so this must not lose or
+    duplicate anything either — it simply lands in the same, still-live
+    model whenever it shows up."""
+    conversation = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-9")
+    store.save([conversation])
+
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _info(supports_load_session=True)
+    client._running = True
+    monkeypatch.setattr(client, "load_session", lambda **kw: None)
+    monkeypatch.setattr(client, "prompt", lambda session_id, blocks: None)
+
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._set_current_session(key)
+    widget._on_submitted([{"type": "text", "text": "and more dust"}])
+
+    live = sessions.SessionState(
+        session_id="agent-sess-9", title="New chat", cwd="/tmp", created_at=0.0
+    )
+    client.session_loaded.emit("agent-sess-9", live)
+    qapp.processEvents()
+
+    # Only now does replay show up — after everything session_loaded
+    # itself already did.
+    client.message_chunk.emit("agent-sess-9", "replay-1", "earlier: rotor pyro setup")
+    qapp.processEvents()
+
+    texts = [e.text for e in widget._model("agent-sess-9").entries()]
+    assert "make dust" in texts
+    assert "earlier: rotor pyro setup" in texts
+    assert "and more dust" in texts
+    widget.shutdown()
+
+
+def test_replay_redelivering_an_agent_message_this_conversation_already_has_does_not_duplicate(
+    qapp, monkeypatch
+):
+    """The decisive question, measured live against a real six-turn
+    conversation and its own real replay (docs/facts/acp-sdk.md §32):
+    `message_id` for an agent reply DOES match between the original turn
+    and its later replay (the same underlying Claude API message id,
+    persisted and replayed verbatim) — so `apply_chunk`'s own `(kind,
+    message_id)` key, now rebuilt on load by `TranscriptModel.load_
+    records` (this test's own reason for existing — that rebuild is what
+    makes this dedup possible for a RESTORED conversation, not just one
+    that stayed in memory), absorbs the redelivery into the entry that id
+    already names. One entry, not two, whichever order the two same-id
+    deliveries land in.
+    """
+    conversation = store.StoredConversation.new(title="Rotor pyro", agent_id="claude-acp", cwd="/tmp")
+    conversation.agent_session_id = "agent-sess-9"
+    conversation.entries = [
+        {"kind": "user", "id": "e1", "text": "make dust"},
+        {"kind": "agent", "id": "agent:msg_ABC123", "text": "the dust is made and settling now."},
+    ]
+    store.save([conversation])
+
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _info(supports_load_session=True)
+    client._running = True
+    monkeypatch.setattr(client, "load_session", lambda **kw: None)
+
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._set_current_session(key)
+    # No pending prompt this time — reached purely by switching onto the
+    # restored tab, same as `_adopt_running_client`'s own boot-time call.
+    widget._adopt_or_resume(key)
+
+    live = sessions.SessionState(
+        session_id="agent-sess-9", title="New chat", cwd="/tmp", created_at=0.0
+    )
+    client.session_loaded.emit("agent-sess-9", live)
+    qapp.processEvents()
+
+    # The agent's own replay of the SAME message, under the SAME id.
+    client.message_chunk.emit("agent-sess-9", "msg_ABC123", "the dust is made and settling now.")
+    qapp.processEvents()
+
+    entries = widget._model("agent-sess-9").entries()
+    agent_entries = [e for e in entries if e.kind == "agent"]
+    assert len(agent_entries) == 1, f"expected one entry, not a duplicate: {agent_entries}"
+    assert agent_entries[0].text == "the dust is made and settling now.", "redelivery must not double the text either"
     widget.shutdown()
 
 

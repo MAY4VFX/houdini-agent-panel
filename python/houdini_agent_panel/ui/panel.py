@@ -1974,23 +1974,51 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _on_session_loaded(self, session_id: str, state: Any) -> None:
-        """`session/load` came back: the agent has already replayed this
-        session's own history as ordinary `session_update` notifications
-        (the protocol requires that before it ever answers `session/load`
-        — confirmed by reading agentclientprotocol.com/protocol/session-
-        setup, not assumed), which landed in `self._models[session_id]`
-        through the same per-kind handlers a live turn already uses
-        (`_on_message_chunk`, `_on_tool_call`, ...). That IS the resumed
-        transcript by the time this runs.
+        """`session/load` came back.
 
-        Unlike `_on_session_started`'s adoption of a brand new session,
-        this does NOT transplant our own local, read-only copy onto
-        `session_id`: a new session has nothing of its own to lose, a
-        loaded one does — the agent's own replay is the more trustworthy
-        of the two, and overwriting it would throw away exactly what
-        `session/load` was called to get back. The local copy is dropped,
-        not merged, so a slow replay racing this signal can never end up
-        duplicated alongside it.
+        This USED to drop our own local model here and trust the agent's
+        replay alone to rebuild the transcript — measured, live, to be
+        wrong on two counts (docs/facts/acp-sdk.md §32, full account):
+
+        1. **Timing.** The protocol requires replay to happen before
+           `session/load` answers, but that guarantee doesn't survive this
+           object's own worker-thread → Qt-cross-thread-signal path to
+           the main thread: two runs of the SAME six-turn conversation
+           saw 0-of-10 and 6-of-10 replay updates arrive AFTER this
+           handler's own signal had already fired. No wait here — no
+           `processEvents()` loop, no grace period — closes that; a
+           handler cannot outrun signals its own connection hasn't
+           delivered yet, whatever the wire timing looked like.
+        2. **Content.** `client.py::session_update` has always dropped
+           `user_message_chunk` outright (the artist's own words render
+           locally the moment they're sent — see `_on_submitted` — so a
+           LIVE turn never needed the agent's echo of them). Replay is
+           the one case that comment didn't anticipate: nothing in
+           `client.py` distinguishes "echo of what I just typed" from
+           "the only copy of a question typed hours ago", so every one of
+           the artist's own past messages was silently absent no matter
+           how the timing above landed.
+
+        So: the local model is transplanted onto `session_id`, exactly
+        like `_on_session_started`'s adoption of a brand-new session
+        below already does — never dropped. `session/load` still serves
+        the reason it exists: giving the AGENT its own memory back, for
+        continuity the model needs internally. It is no longer this
+        transcript's only source for what the artist sees; that was
+        always our own record, complete and correctly ordered on its
+        own — replay is a bonus confirmation of it, not a replacement.
+
+        Nothing double-counts when replay content still lands in this
+        SAME, kept-alive model, whenever it lands: `apply_chunk`'s own
+        `(kind, message_id)` key and `apply_tool_call`'s matching
+        `tool_call_id` key (added specifically for this — see its own
+        docstring) both merge a redelivery into the entry that id already
+        names, verified live, message id for message id and tool-call id
+        for tool-call id, against a real six-turn conversation and its
+        own real replay (docs/facts/acp-sdk.md §32). `user_message_chunk`
+        never reaching this model at all is exactly why the artist's own
+        old messages can only ever come from the kept-alive local copy —
+        which is the whole point, not a gap to close.
         """
         _log.info("session/load resolved: agent=%s session=%s", self._agent_id, session_id)
         self._composer.finish_boot()
@@ -1998,7 +2026,15 @@ class AgentPanel(QtWidgets.QWidget):
         self._adopting_restored = None
         self._loading_session_id = None
         if adopted is not None:
-            self._models.pop(adopted, None)
+            # Move the restored conversation onto the session the agent
+            # just resumed — same words, same id on disk, a live
+            # transport at last. Exactly `_on_session_started`'s own
+            # adoption, below — this used to be the one path that did
+            # something different here (drop instead of move); it no
+            # longer is.
+            old_model = self._models.pop(adopted, None)
+            if old_model is not None:
+                self._models[session_id] = old_model
             conversation_id = self._conversation_ids.pop(adopted, None)
             if conversation_id is not None:
                 self._conversation_ids[session_id] = conversation_id
@@ -2827,6 +2863,21 @@ class AgentPanel(QtWidgets.QWidget):
         shared_client(agent_id if agent_id is not None else self._agent_id).close_session(session_id)
 
     def _model(self, session_id: str) -> TranscriptModel:
+        # While `session_id` is the target of an in-flight `session/load`,
+        # anything arriving for it (replay's own content racing
+        # `_on_session_loaded` itself — measured, real, not theoretical:
+        # docs/facts/acp-sdk.md §32) is redirected to the SAME model the
+        # restored placeholder already has, instead of auto-vivifying a
+        # fresh, empty one at `session_id` that `_on_session_loaded`'s own
+        # transplant would then silently overwrite — the exact bug this
+        # guard closes, found by a test that fired replay BEFORE
+        # `session_loaded` and watched its own content vanish. Safe to
+        # check unconditionally: `_loading_session_id`/`_adopting_
+        # restored` are cleared, synchronously, at the very start of
+        # `_on_session_loaded`/`_on_session_load_failed` — by the time
+        # either has actually run, this no longer matches anything.
+        if session_id == self._loading_session_id and self._adopting_restored is not None:
+            return self._models.setdefault(self._adopting_restored, TranscriptModel())
         return self._models.setdefault(session_id, TranscriptModel())
 
     def _is_current(self, session_id: str) -> bool:

@@ -563,6 +563,15 @@ class AcpWorker(QtCore.QThread):
         # full SessionModeState (see docs/architecture.md §6).
         self._session_modes: dict[str, list] = {}
         self._session_current_modes: dict[str, str] = {}
+        #: session_id -> {update kind: count}, while a `session/load` for
+        #: that session is being counted (`do_load_session` registers and
+        #: reads this) — see `session_update`'s own note. `panel.log` used
+        #: to have nothing between "session/load:" and "session/load: ok"
+        #: no matter how much replay a session actually carried, which is
+        #: exactly the blind spot that made a real corrupted-cache
+        #: incident and a real replay-timing race both look identical from
+        #: the log alone (docs/facts/acp-sdk.md §32).
+        self._load_update_counts: dict[str, dict[str, int]] = {}
 
     # --- loop plumbing ------------------------------------------------
 
@@ -617,6 +626,9 @@ class AcpWorker(QtCore.QThread):
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         kind = update.session_update
+        counts = self._load_update_counts.get(session_id)
+        if counts is not None:
+            counts[kind] = counts.get(kind, 0) + 1
         if kind == "agent_message_chunk":
             text = _chunk_text(update.content)
             self.message_chunk.emit(session_id, update.message_id or "", text)
@@ -1043,13 +1055,17 @@ class AcpWorker(QtCore.QThread):
         Per the ACP spec (agentclientprotocol.com/protocol/session-setup,
         confirmed by reading it, not assumed): the agent MUST replay the
         entire conversation as ordinary `session_update` notifications
-        BEFORE answering this request. Nothing special is done with those
-        here — they arrive through the exact same `session_update` handler
-        every live turn already uses, and land in `AgentPanel._models
-        [session_id]` (keyed by the session_id below, which — unlike
-        `do_new_session` — is not new, it's the one WE pass in) through the
-        ordinary per-kind signals. By the time `session_loaded` fires, that
-        model already IS the resumed transcript.
+        BEFORE answering this request. That guarantee does not survive
+        this codebase's own worker-thread -> Qt-cross-thread-signal path
+        to the main thread — measured live, docs/facts/acp-sdk.md §32:
+        replay updates for the SAME real conversation landed entirely
+        before this call's own response in one run, and 40% of them
+        AFTER it in another. `ui/panel.py::_on_session_loaded` no longer
+        assumes replay is done by the time it runs — it keeps the local,
+        already-complete transcript instead of rebuilding from replay —
+        so this method does not need to wait for anything here either;
+        replay still lands, through the ordinary per-kind signals, into
+        whichever model is current for `session_id` whenever it arrives.
 
         `session_meta` — same `claude_session_meta(...)` `do_new_session`
         gets, and needed here too: `claude-agent-acp`'s own `loadSession`
@@ -1063,6 +1079,12 @@ class AcpWorker(QtCore.QThread):
             self.session_load_failed.emit(session_id, "no connection to the agent")
             return
         _log.info("session/load: session=%s", session_id)
+        # Counts every `session_update` kind seen for THIS session id while
+        # this dict entry exists (`session_update`'s own hook, above) — the
+        # one thing `panel.log` had no way to say before: how much replay
+        # a load actually carried, and, from the two summaries below, how
+        # much of it straddled the response itself.
+        self._load_update_counts[session_id] = {}
         try:
             servers = _build_mcp_servers(mcp_servers)
             response = await self._conn.load_session(
@@ -1070,14 +1092,21 @@ class AcpWorker(QtCore.QThread):
             )
         except acp.RequestError as exc:
             _log.warning("session/load failed: session=%s error=%s", session_id, exc)
+            self._load_update_counts.pop(session_id, None)
             if not self._emit_if_auth_required(exc):
                 self.session_load_failed.emit(session_id, str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             _log.warning("session/load failed: session=%s error=%r", session_id, exc)
+            self._load_update_counts.pop(session_id, None)
             self.session_load_failed.emit(session_id, str(exc))
             return
-        _log.info("session/load: ok session=%s", session_id)
+        counts_at_response = dict(self._load_update_counts.get(session_id, {}))
+        _log.info(
+            "session/load: ok session=%s updates_by_response=%s",
+            session_id, counts_at_response,
+        )
+        self.loop.create_task(self._log_load_update_counts_after_settling(session_id))
 
         current_mode_id = None
         available_modes: list[_SessionMode] = []
@@ -1107,6 +1136,23 @@ class AcpWorker(QtCore.QThread):
         )
         if options:
             self.config_options_changed.emit(session_id, options)
+
+    async def _log_load_update_counts_after_settling(self, session_id: str) -> None:
+        """The second half of `do_load_session`'s own summary — measured
+        live (docs/facts/acp-sdk.md §32) that replay can still be arriving
+        after `session/load`'s own response resolves, so a single count
+        taken at that moment is a lower bound, not the whole story. Waits
+        a couple of seconds for the stream to go quiet, then logs what
+        showed up in that window too. Never touches what the counts are
+        FOR — `_on_session_loaded`'s own kept-alive model already has
+        this content by whatever path it arrived; this only makes the
+        fact of it arriving late visible in `panel.log`, which used to
+        have nothing here at all.
+        """
+        await asyncio.sleep(2.0)
+        counts = self._load_update_counts.pop(session_id, None)
+        if counts is not None:
+            _log.info("session/load: settled session=%s updates_total=%s", session_id, counts)
 
     async def do_prompt(self, session_id: str, blocks: list[dict]) -> None:
         if self._conn is None:

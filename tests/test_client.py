@@ -272,19 +272,19 @@ def test_load_session_replays_history_under_the_same_session_id(qapp, make_clien
 def test_load_session_replay_lands_before_session_loaded_even_when_slow(
     qapp, make_client, tmp_path
 ):
-    """The panel's own `ui/panel.py::_on_session_loaded` assumes replay is
-    fully visible by the time it runs (its own docstring says so, quoting
-    the spec). Measured for real rather than trusted: `tests/fake_agent.py`'s
-    ``load-slow`` scenario spreads two replay chunks and the response itself
-    across real `asyncio.sleep`s (0.2s apart, ~0.6s total) — wide enough a
-    window that a genuine reordering would show up as a chunk arriving
-    AFTER `session_loaded`, not merely as a suspiciously-fast test. It
-    doesn't: every replay chunk is fully recorded before `session_loaded`
-    fires, confirmed 3x in manual measurement before this was written as a
-    permanent test — see docs/facts's session-resume section for the
-    full account of the bug this measurement ruled out (a single
-    `session/load` is NOT the source of the race; a second, concurrent one
-    was — `ui/panel.py::_adopt_or_resume`'s own guard against that)."""
+    """Pins `fake_agent.py`'s own ``load-slow`` scenario, not a general
+    guarantee — it was written believing this WAS general (docs/facts/
+    acp-sdk.md §32's own earlier account, since corrected): a real
+    `claude-agent-acp`, driven through this same `AcpClient`, measured
+    replay landing AFTER `session_loaded` had already fired — 0-of-10 and
+    6-of-10 updates in two runs of the identical real conversation,
+    non-deterministic. `fake_agent.py`'s sequential `await self._client.
+    session_update(...)` calls, one at a time before answering, happen to
+    preserve order regardless — a property of THIS test double's own
+    implementation, not the protocol. `ui/panel.py::_on_session_loaded`
+    no longer depends on either — see §32's full account and `ui/agents.py`
+    's/`ui/panel.py`'s own kept-alive-model design for why this ordering
+    stopped being load-bearing."""
     client = make_client()
     _connect(qapp, client, "load-slow", tmp_path)
     session_id = _new_session(qapp, client, tmp_path)
@@ -300,6 +300,46 @@ def test_load_session_replay_lands_before_session_loaded_even_when_slow(
         "earlier: rotor pyro setup",
         "earlier: second reply",
     ], "both replay chunks must have already landed by the time session_loaded fires"
+
+
+def test_load_session_logs_a_summary_of_what_replay_actually_carried(qapp, make_client, tmp_path, caplog):
+    """The owner's own gap, closed: `panel.log` used to have nothing
+    between "session/load:" and "session/load: ok" no matter how much
+    replay a load actually carried — the exact blind spot that made a
+    corrupted cache and a genuine replay-timing race both look identical
+    from the log alone (docs/facts/on-disk-writes.md, docs/facts/acp-sdk.md
+    §32). Two summaries: one at the response itself, one after the stream
+    has had a couple of seconds to settle — the second one is what a real
+    six-turn measurement needed to show anything arrived AFTER the first."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="houdini_agent_panel.client")
+    client = make_client()
+    _connect(qapp, client, "load-slow", tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+
+    loaded = _Recorder(client.session_loaded)
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
+    _pump_until(qapp, lambda: loaded.calls, "session/load to answer", timeout=5.0)
+
+    messages = [r.getMessage() for r in caplog.records]
+    at_response = next((m for m in messages if "updates_by_response=" in m), None)
+    assert at_response is not None, messages
+    assert "'agent_message_chunk': 2" in at_response, (
+        f"load-slow's own two replay chunks must both be counted by the time the "
+        f"response resolves: {at_response!r}"
+    )
+
+    # The settle summary fires ~2s later — wait for it rather than assume
+    # it already happened.
+    _pump_until(
+        qapp,
+        lambda: any("updates_total=" in r.getMessage() for r in caplog.records),
+        "the settle summary to log",
+        timeout=5.0,
+    )
+    settled = next(r.getMessage() for r in caplog.records if "updates_total=" in r.getMessage())
+    assert "'agent_message_chunk': 2" in settled
 
 
 def test_load_session_failure_is_reported_not_silent(qapp, make_client, tmp_path):
