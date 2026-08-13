@@ -705,8 +705,8 @@ class AgentsView(QtWidgets.QWidget):
                 ),
                 parent=self,
             )
-            row.install_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
-            row.update_requested.connect(lambda checked=False, e=entry, r=row: self._install(e, r))
+            row.install_requested.connect(lambda checked=False, e=entry: self._install(e))
+            row.update_requested.connect(lambda checked=False, e=entry: self._install(e))
             row.uninstall_requested.connect(lambda checked=False, e=entry: self._uninstall(e.id))
             row.claude_host_mcp_toggled.connect(
                 lambda checked: self._set_claude_toggle("claude_show_host_mcp_servers", checked)
@@ -748,10 +748,10 @@ class AgentsView(QtWidgets.QWidget):
         entry = next((e for e in self._entries if e.id == agent_id), None)
         if row is None or entry is None:
             return False
-        self._install(entry, row)
+        self._install(entry)
         return True
 
-    def _install(self, entry: "AgentEntry", row: "_AgentRow") -> None:
+    def _install(self, entry: "AgentEntry") -> None:
         if entry.id in self._installing:
             return  # already installing/updating this one — a double-click
         self._installing.add(entry.id)
@@ -759,11 +759,31 @@ class AgentsView(QtWidgets.QWidget):
             self._before_install(entry.id)
         worker = _InstallWorker(entry, fetch=self._fetch, parent=self)
         self._threads.append(worker)
-        worker.progressed.connect(row.set_progress)
-        worker.succeeded.connect(lambda _spec, e=entry, r=row: self._on_installed(e, r))
-        worker.failed.connect(lambda message, e=entry, r=row: self._on_install_failed(r, message, e.id))
+        # By id, looked up FRESH at the moment each callback actually
+        # fires — never a `row` object captured here and held across the
+        # whole install. Crashed for real: `_rebuild_registry_rows` (a
+        # rebuild triggered by an unrelated connect/auth event, or by a
+        # SECOND install finishing first — `_on_installed` below rebuilds
+        # too) can run at any point while a download is still in flight,
+        # `_clear_layout` orphans the OLD row's C++ widgets
+        # (`deleteLater()`), and the closure's own Python reference to
+        # `row` survives that with no way to know its `QProgressBar` is
+        # already gone underneath it. `_rows_by_id.get(agent_id)`
+        # returning `None` here just means the row is genuinely gone
+        # (uninstalled, or the registry no longer lists it) — nothing
+        # left to update, not an error.
+        worker.progressed.connect(
+            lambda done, total, note, aid=entry.id: self._update_row_progress(aid, done, total, note)
+        )
+        worker.succeeded.connect(lambda _spec, e=entry: self._on_installed(e))
+        worker.failed.connect(lambda message, aid=entry.id: self._on_install_failed(aid, message))
         worker.finished.connect(lambda w=worker: self._forget_thread(w))
         worker.start()
+
+    def _update_row_progress(self, agent_id: str, done: int, total: int | None, note: str) -> None:
+        row = self._rows_by_id.get(agent_id)
+        if row is not None:
+            row.set_progress(done, total, note)
 
     def _forget_thread(self, worker: "_InstallWorker") -> None:
         # `finished` fires just BEFORE the thread actually stops — dropping
@@ -792,15 +812,19 @@ class AgentsView(QtWidgets.QWidget):
             release(worker)
         self._threads = []
 
-    def _on_install_failed(self, row: "_AgentRow", message: str, agent_id: str) -> None:
+    def _on_install_failed(self, agent_id: str, message: str) -> None:
         self._installing.discard(agent_id)
-        row.clear_progress()
-        row.set_state_text(f"error: {message}")
+        row = self._rows_by_id.get(agent_id)
+        if row is not None:
+            row.clear_progress()
+            row.set_state_text(f"error: {message}")
         self.install_failed.emit(agent_id, message)
 
-    def _on_installed(self, entry: "AgentEntry", row: "_AgentRow") -> None:
+    def _on_installed(self, entry: "AgentEntry") -> None:
         self._installing.discard(entry.id)
-        row.clear_progress()
+        row = self._rows_by_id.get(entry.id)
+        if row is not None:
+            row.clear_progress()
         current = settings_module.load()
         kind = "npx" if entry.needs_node else "binary"
         current.installed_agents[entry.id] = settings_module.InstalledAgent(

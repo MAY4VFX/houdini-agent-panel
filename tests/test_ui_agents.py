@@ -189,6 +189,79 @@ def test_install_flow_runs_in_background_and_updates_row(qapp, monkeypatch, fetc
     assert buttons == {"Remove", "Sign in…"}
 
 
+def test_install_callbacks_do_not_crash_when_their_row_is_already_gone(qapp):
+    """Reported for real, from the owner's own panel.log, twice:
+
+    RuntimeError: Internal C++ object (PySide6.QtWidgets.QProgressBar) already deleted.
+
+    raised from `_on_installed`'s `row.clear_progress()`. `_install` used
+    to capture the `_AgentRow` object itself in its worker callbacks'
+    closures — if ANYTHING rebuilds the row list while that install is
+    still in flight (an unrelated connect/auth event calling
+    `refresh_auth_rows`, or a second install finishing first, since
+    `_on_installed` itself rebuilds), `_clear_layout` deletes the
+    ORIGINAL row's C++ widgets out from under that still-alive Python
+    reference. Fixed by looking the row up fresh by id at the moment
+    each callback fires; this pins the direct consequence — calling the
+    three callbacks with no matching row in `_rows_by_id` at all must
+    never raise.
+    """
+    entry = AgentEntry(id="agent-a", name="Agent A", version="1.0.0")
+    view = AgentsView()
+    assert "agent-a" not in view._rows_by_id  # never built a row for it at all
+
+    # None of these may raise, and the state-affecting ones must still do
+    # their own work regardless of there being no row left to update.
+    view._update_row_progress("agent-a", 5, 10, "downloading…")
+    view._on_install_failed("agent-a", "network unreachable")
+    assert "agent-a" not in view._installing
+
+    view._installing.add("agent-a")
+    view._on_installed(entry)
+    assert "agent-a" not in view._installing
+    assert settings_module.load().installed_agents["agent-a"].version == "1.0.0"
+
+
+def test_a_rebuild_mid_install_does_not_crash_when_it_finishes(qapp, monkeypatch, fetcher):
+    """The real race, end to end: a genuine background worker, real Qt
+    signals, a rebuild deliberately timed to land WHILE the install is
+    still in flight — the exact shape of `refresh_auth_rows`/a second
+    install's own `_rebuild_registry_rows` landing mid-download."""
+    monkeypatch.setattr("houdini_agent_panel.runtime.platform_key", lambda: "fake-platform")
+    monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
+    payload = _zip_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    fetcher.add_bytes("https://x/a.zip", payload)
+    entry = AgentEntry(
+        id="agent-a", name="Agent A", version="1.0.0",
+        binaries={"fake-platform": BinaryDistribution(archive="https://x/a.zip", cmd="./myagent", sha256=digest)},
+    )
+    view = AgentsView(fetch=fetcher)
+    view.set_agents([entry])
+    row = view._rows_layout.itemAt(0).widget()
+    install_button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Install")
+
+    rebuilt = []
+
+    def _rebuild_mid_flight(*_args):
+        if not rebuilt:
+            rebuilt.append(True)
+            # Same effect `refresh_auth_rows`/another install finishing
+            # first would have: every existing row, including this
+            # install's own, is torn down and rebuilt fresh.
+            view._rebuild_registry_rows()
+
+    install_button.click()
+    worker = view._threads[0]
+    worker.progressed.connect(_rebuild_mid_flight)
+
+    _wait_until(lambda: not view._threads)
+
+    assert rebuilt == [True], "the mid-flight rebuild never actually happened — test didn't exercise the race"
+    assert settings_module.load().installed_agents["agent-a"].version == "1.0.0"
+    assert "agent-a" not in view._installing
+
+
 def test_install_failure_not_an_installerror_still_reports_and_unlocks(qapp, monkeypatch):
     """A real bug, found live: `_InstallWorker.run()` only caught
     `runtime.InstallError`. `node.NpxNotFoundError` (raised by
