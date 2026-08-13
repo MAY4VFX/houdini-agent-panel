@@ -3576,3 +3576,195 @@ this section's evidence covers.
   does with two genuinely concurrent `session/load` calls for one session
   id — not measured, and, per the fix above, not needed: the panel never
   sends a second one now.
+
+### Correction — §32's own "single call ordering is reliable" claim was wrong
+
+The double-load race above was real and the fix for it stands. But the
+owner hit the SAME symptom again on the next release, with the guard
+proven working (`panel.log` showed exactly one `session/load` call,
+resolving 0.8s before the artist's message went out — no race, by the
+guard's own account). §32's own conclusion — "for a SINGLE, unambiguous
+`session/load` call, replay is always fully visible before `session_
+loaded` fires" — was the thing to re-examine, and it does not hold
+against a real agent driven through this codebase's own client.
+
+**What was measured the first time, and why it missed this.** The
+`load-slow` fake-agent scenario `tests/test_client.py::test_load_session_
+replay_lands_before_session_loaded_even_when_slow` used sends each replay
+chunk with `await self._client.session_update(...)`, one at a time, before
+ever answering `session/load` — a real asyncio await, but entirely on the
+FAKE AGENT's own side, saying nothing about how the CLIENT side (this
+codebase's own `AcpWorker` → Qt cross-thread signal → `AcpClient` on the
+main thread) delivers what it receives. That path was never exercised by
+the earlier measurement, which only checked `AcpClient`-level signal
+timestamps, not a real subprocess AND real cross-thread delivery
+together.
+
+**Measured for real this time**: a genuine six-turn conversation (two
+`ToolSearch` calls) run against a live `claude-agent-acp@0.66.0`, through
+this project's own `AcpClient` end to end — the same object `ui/panel.py`
+actually uses, worker thread and Qt signal forwarding included, not raw
+ACP events. `session_loaded`'s own arrival time compared against every
+replay-derived `message_chunk`/`tool_call` signal's arrival time, same
+conversation, run twice:
+
+```
+Run 1: session_loaded fired at t=34.461
+  replay-derived signals BEFORE session_loaded: 0
+  replay-derived signals AFTER session_loaded:  10 (all of them)
+
+Run 2 (identical code, identical 6-turn conversation):
+  replay-derived signals BEFORE session_loaded: 6
+  replay-derived signals AFTER session_loaded:  4
+```
+
+Non-deterministic, on the exact same code — a genuine race, not a
+timing coincidence one run happened to catch. Separately, at the raw ACP
+level (no Qt forwarding), the SAME real adapter showed a much narrower
+split (most updates landing within 0-2ms of the response, a few after) —
+the worker-thread → Qt-cross-thread-signal path adds its own reordering
+on top of whatever the wire itself does, which is exactly why measuring
+through `AcpClient` (not raw ACP, and not the fake agent) was the
+decision that actually found this — see the file's own scratch measurement
+scripts' reasoning, distilled here.
+
+**Completeness, checked separately and confirmed intact**: every run's
+replay eventually arrived whole — all six turns' text, both tool calls,
+matching this codebase's own record of the live conversation exactly.
+Nothing is dropped; the ordering it arrives in relative to `session_
+loaded` is what's unreliable.
+
+### The actual fix: never rebuild the visible transcript from replay at all
+
+Two false premises, both closed by construction, not by a stricter wait
+(a wait has no reliable boundary to wait FOR — see above):
+
+1. **`ui/panel.py::_on_session_loaded` used to drop the local model and
+   trust replay to rebuild it.** It no longer does. The local model — a
+   restored conversation's own record, or (equivalently) whatever a
+   still-open tab already has — is transplanted onto the resumed
+   session id, the same way `_on_session_started`'s adoption of a
+   brand-new session already worked. `session/load` still serves the
+   reason it exists — giving the AGENT its own memory back — but it is
+   no longer this transcript's only source for what the artist sees.
+2. **`client.py::session_update` has always dropped `user_message_chunk`
+   outright** (a LIVE turn never needs an echo of what the artist just
+   typed — `_on_submitted` already rendered it locally). Nothing in that
+   code distinguishes "echo of a live send" from "the only copy of a
+   question typed hours ago", so replay's own record of the artist's OWN
+   past messages was silently discarded independent of any timing issue.
+   Confirmed directly: `merged_model`'s `user`-kind entries after
+   replaying a real 6-turn conversation into an already-populated model
+   were exactly the 6 the local record supplied — 0 ever arrived via
+   replay, because `user_message_chunk` never reaches a signal handler at
+   all. This is now why the design works, not a gap in it: the artist's
+   own words were NEVER going to come from replay reliably, so the fix
+   stops depending on that ever happening.
+
+**The one thing that had to be checked before trusting this design**
+(the owner's own explicit condition — measure before rewriting): if
+replay keeps flowing into the SAME, now-kept-alive model whenever it
+lands, do its `message_id`/`tool_call_id` collide with what the local
+record already has, and if so, does that collision produce a duplicate
+row or get absorbed?
+
+Measured directly, real conversation, real replay, fed through the exact
+translation `ui/panel.py`'s own handlers use (`apply_chunk`/`apply_tool_
+call`/`apply_tool_update`):
+
+- **Agent messages**: `message_id` MATCHES exactly between the original
+  turn and its later replay (the same underlying Claude API message id,
+  persisted and replayed verbatim) — confirmed with realistic-length
+  text (short test strings under `_REPEAT_GUARD_MIN_LEN`, 12 characters,
+  defeat the existing `_is_repeated_message` guard and produce doubled
+  text — a test-data artifact caught and corrected, not a real bug; see
+  `tests/test_session_resume.py::test_replay_redelivering_an_agent_
+  message_this_conversation_already_has_does_not_duplicate`). One entry,
+  not two, whichever order the two same-id deliveries land in.
+- **Tool calls**: `tool_call_id` ALSO matches exactly, but `apply_tool_
+  call` had NO dedup check at all — unlike `apply_chunk`'s `_by_message_
+  id`, nothing stopped a redelivered `tool_call` from appending a second
+  row sharing the first one's id. Confirmed live: 4 unique tool calls in
+  the real conversation, 8 tool-kind entries in a model that also had
+  replay naively merged in — a real, reproducible duplication. **Fixed**:
+  `apply_tool_call` now checks `_by_tool_call_id` first, same shape as
+  `apply_chunk`, and updates the existing entry's fields instead of
+  appending a sibling.
+- **A gap that would have silently defeated both of the above for the
+  actual reported scenario** (a conversation that survived a Houdini
+  restart, not one that stayed open in the same process): `TranscriptModel.
+  load_records` — what `_restore_conversations` uses to rebuild a model
+  from `conversations.json` — always called `self._by_message_id.clear()`
+  and `self._by_tool_call_id.clear()` and never repopulated either, even
+  though the loaded entries' own `id` field carries the SAME `f"{kind}:
+  {message_id}"`/`tool_call_id` shape `apply_chunk`/`apply_tool_call`
+  themselves write. A restored model's dedup was structurally empty
+  regardless of whether the ids would have matched. **Fixed**: `load_
+  records` now rebuilds `_by_message_id` for every `agent`/`thought`
+  entry whose id has that shape (excluding `_UNKEYED_PREFIX` ids — Grok
+  never had a message_id to key on in the first place). Tool calls are
+  deliberately NOT rebuilt into `_by_tool_call_id` here: `to_records`
+  never persists `tool`-kind entries at all (its own docstring — "live
+  state belonging to an agent process that no longer exists"), so a
+  restored model never has one stored to collide with; whatever tool
+  activity shows up after a real restart-and-resume comes from replay
+  alone, by construction, with nothing to duplicate against.
+
+**A second, independent bug this design surfaced and had to close**:
+early-arriving replay (before `_on_session_loaded` has run at all) used
+to call `AgentPanel._model(session_id)`, which auto-vivifies a brand-new,
+empty `TranscriptModel` at that key (`self._models.setdefault(...)`) —
+and `_on_session_loaded`'s own transplant (`self._models[session_id] =
+old_model`) then UNCONDITIONALLY OVERWROTE that key, discarding whatever
+early replay had already written into it. Caught by a test that fired
+`message_chunk` before `session_loaded` and watched its own content
+disappear — not a hypothetical, reproduced on the first version of this
+fix. **Fixed**: `_model(session_id)` now redirects to the restored key's
+own model (`self._adopting_restored`) whenever `session_id` is the target
+of an in-flight `session/load` (`session_id == self._loading_session_id`)
+— so early replay writes into the SAME object the transplant later
+promotes, rather than a throwaway one the transplant would otherwise
+clobber. Safe unconditionally: both tracking fields are cleared,
+synchronously, at the very start of `_on_session_loaded`/`_on_session_
+load_failed`, so by the time either has actually run this redirect no
+longer matches anything.
+
+### Observability: `panel.log` used to say nothing about what a load actually carried
+
+`client.py::do_load_session` now counts every `session_update` kind seen
+for the session id it is loading (`AcpWorker._load_update_counts`) and
+logs two summaries: one the moment `session/load`'s own response
+resolves (`updates_by_response=...`), one ~2 seconds later
+(`updates_total=...`) to catch whatever arrived after — exactly the
+window the measurement above showed is not empty. Neither line existed
+before this; a developer reading `panel.log` alone had no way to tell a
+corrupted cache (docs/facts/on-disk-writes.md) apart from a genuine
+replay-timing race apart from nothing having gone wrong at all.
+
+### Consequences for the UI
+
+- Nothing about composer blocking changes — unaffected by any of this,
+  same as §32's own original note.
+- The artist's own past messages are now sourced ENTIRELY from the local
+  record, on every resume, restart or not — this was already true for a
+  restored-but-never-resumed conversation; it is now equally true for one
+  that IS resumed via `session/load`.
+- A tool call mid-flight at the moment of a restart has no local record
+  to restore either way (`to_records` never persisted it) — whatever the
+  agent's own replay says about it is the only version that can show up,
+  same as before this section, not a regression from it.
+
+### Not established
+
+- Whether a REPLAYED tool call's `content`/`locations` (richer detail
+  than the original live call may have shown, or the reverse) should win
+  over what the live turn already displayed, now that `apply_tool_call`'s
+  redelivery path applies incoming non-empty fields on top of the
+  existing entry — not tested against a real graph of tool-call updates
+  arriving in a different order than the original live turn saw them.
+- Whether `_is_repeated_message`'s 12-character floor could still let a
+  short, realistic reply (a one-word "Done." or "OK") double under
+  replay — deliberately not raised or special-cased here without a real
+  measurement showing it happens for actual conversation text, not the
+  synthetic short strings this investigation's own first test draft used
+  before being corrected.
