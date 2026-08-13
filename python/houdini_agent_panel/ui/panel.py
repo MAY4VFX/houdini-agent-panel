@@ -36,7 +36,7 @@ from .. import context_files, refresh, scene, sessions, settings as settings_mod
 from .. import shellenv, signin_evidence, updates as updates_mod
 from ..announcements import Announcement, Button
 from ..logbook import logger as _logbook_logger
-from ..transcript_model import PermissionView, TranscriptModel
+from ..transcript_model import Entry, PermissionView, TranscriptModel
 from .announcement import BlockingNotice, ConsentStrip, NoticeStrip
 from .chips import HeaderBar
 from .boot_status import PHASE_CONNECTING, PHASE_LAUNCHING, PHASE_PREPARING, PHASE_SESSION
@@ -593,6 +593,14 @@ class AgentPanel(QtWidgets.QWidget):
         #: checks this before sending a second one; `_set_new_session_busy`
         #: is the visible half, flipped in the same place.
         self._new_session_pending: bool = False
+        #: `(session_id, entry_id)` of the "still opening" note
+        #: `_note_slow_new_session` wrote, so `_on_session_started` can
+        #: correct it in place once the diagnosis turns out to have been
+        #: only ever a guess. `None` whenever no such note is outstanding —
+        #: which is most of the time, since it's only written for claude-acp
+        #: (empty `auth_methods` is normal for it, see `_NO_METHODS_ADVICE`)
+        #: on a `session/new` that stalled past `_NEW_SESSION_GRACE_MS`.
+        self._pending_new_session_note: tuple[str, str] | None = None
         #: The worker currently running a spawned terminal-auth process
         #: (Kimi's `kimi login`, §13-14), if any — `None` the rest of the
         #: time. Kept so `_on_auth_cancel_pending`/`_show_page`/`shutdown`
@@ -1706,6 +1714,7 @@ class AgentPanel(QtWidgets.QWidget):
 
     def _on_disconnected(self, reason: str) -> None:
         self._clear_new_session_pending()
+        self._pending_new_session_note = None
         self._pending_permissions.clear()
         self._permission_views.clear()
         self._hide_permission_popover()
@@ -1851,6 +1860,7 @@ class AgentPanel(QtWidgets.QWidget):
         # the strip says so before removing itself.
         self._composer.finish_boot()
         self._clear_new_session_pending()
+        self._resolve_pending_new_session_note()
         adopted = self._adopting_restored
         self._adopting_restored = None
         if adopted is not None:
@@ -2267,6 +2277,7 @@ class AgentPanel(QtWidgets.QWidget):
         # means it's safe to let the artist try "+" again rather than leave
         # the button stuck disabled until something else resolves it.
         self._clear_new_session_pending()
+        self._pending_new_session_note = None
         if self._pending_logout_agent == self._agent_id:
             # A `logout()` requested from a Settings row (rather than the
             # sign-in screen's own button) has no screen guaranteed to be
@@ -2394,6 +2405,7 @@ class AgentPanel(QtWidgets.QWidget):
         # Whatever this tab was waiting on belonged to the agent it's
         # leaving — the new one has sent nothing yet.
         self._clear_new_session_pending()
+        self._pending_new_session_note = None
         _live_panels_for(self._agent_id).discard(self)
         self._agent_id = agent_id
         _live_panels_for(agent_id).add(self)
@@ -2736,6 +2748,25 @@ class AgentPanel(QtWidgets.QWidget):
         self._new_session_pending = False
         self._set_new_session_busy(False)
 
+    def _resolve_pending_new_session_note(self) -> None:
+        """The conversation `_note_slow_new_session` was worried about just
+        opened — its "still opening" note said a guess, not a fact, and now
+        there's a fact to replace it with. Looks the note up by the exact
+        `(session_id, entry_id)` it was written at, not "whatever's
+        current" — the artist may already have been mid a DIFFERENT
+        conversation when they pressed "+", and that's where the note
+        landed (`_note`'s own session resolution)."""
+        pending = self._pending_new_session_note
+        if pending is None:
+            return
+        self._pending_new_session_note = None
+        note_session_id, note_entry_id = pending
+        model = self._models.get(note_session_id)
+        if model is None:
+            return
+        if model.update_note(note_entry_id, "The new conversation opened — it was just slower than usual.") is not None:
+            self._touch(note_session_id, note_entry_id)
+
     def _begin_fx_wait(self) -> None:
         """Entered once, right before the first `_poll_fx_wait` tick — the
         one place that announces the wait, so a poll firing every
@@ -2822,7 +2853,8 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _report_stalled_new_session(self, before: set) -> None:
-        """Say what is actually wrong, which is usually "it isn't signed in".
+        """Say what is actually wrong — which, for most agents, is usually
+        "it isn't signed in", but is NEVER that for claude-acp.
 
         Also ends the boot, whatever it says. The progress strip and the
         cover over the input belong to a start that is still happening; a
@@ -2851,6 +2883,16 @@ class AgentPanel(QtWidgets.QWidget):
         exactly why deferring to the shared, measured `_no_methods_advice`
         fallback is the honest answer, not a regression: a blanket "type
         /login" was never more than a guess in this branch to begin with.
+
+        claude-acp is the one exception, carved out below rather than left
+        to fall into that same branch: it reports an empty `authMethods`
+        list UNCONDITIONALLY, signed in or not (measured — see
+        `_NO_METHODS_ADVICE`'s own docstring), so "empty methods + stall"
+        carries no information about sign-in status for it at all. Reported
+        for real from the owner's own screenshot: a genuinely signed-in
+        account, mid a `session/new` slowed by his own MCP fleet
+        (`docs/facts/acp-sdk.md`), was told it "isn't signed in" — a false
+        diagnosis built on a fact that was never evidence to begin with.
         """
         self._composer.cancel_boot()
         if self._closed:
@@ -2861,6 +2903,9 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client(self._agent_id)
         info = client.agent_info()
         if info is not None and not info.auth_methods:
+            if self._agent_id == "claude-acp":
+                self._note_slow_new_session()
+                return
             self._offer_login_command(info)
             return
         self._note(
@@ -2869,6 +2914,39 @@ class AgentPanel(QtWidgets.QWidget):
             "settings.",
             error=True,
         )
+
+    def _note_slow_new_session(self) -> None:
+        """claude-acp's own honest answer for `_report_stalled_new_session`:
+        no login guess, because empty `auth_methods` is normal for this
+        agent whether or not the artist is signed in. Names the one
+        concrete, measured lever when it's actually still available: a
+        heavy MCP fleet resolved through unpinned `npx ...@latest` entries
+        cost 19s of version resolution alone across just four servers,
+        measured on a real, comparably-configured machine — and
+        `claude_show_host_mcp_servers` is what controls whether this agent
+        even reaches them. Silent about the lever once it's already off:
+        suggesting turning off something already off would be its own
+        small untruth.
+
+        The note is provisional, not a verdict — `_on_session_started`
+        corrects it in place (`_pending_new_session_note`) the moment the
+        conversation this was worried about actually opens.
+        """
+        current = self._current_session()
+        session_id = current.session_id if current else "__idle__"
+        lever = (
+            ' If you have a lot of MCP servers configured, that can add '
+            'real time to every new chat — try turning off "See your own '
+            'MCP servers" for this agent in Settings if this keeps '
+            "happening."
+            if self._settings.claude_show_host_mcp_servers
+            else ""
+        )
+        entry = self._note(
+            "Still opening the conversation — this is taking longer than "
+            f"usual, but nothing is wrong yet.{lever}"
+        )
+        self._pending_new_session_note = (session_id, entry.id)
 
     def _on_session_renamed(self, session_id: str, title: str) -> None:
         state = self._pool.get(session_id)
@@ -5474,7 +5552,7 @@ class AgentPanel(QtWidgets.QWidget):
         # look like it did something.
         self._restored = stored
 
-    def _note(self, text: str, *, error: bool = False) -> None:
+    def _note(self, text: str, *, error: bool = False) -> Entry:
         """The panel's own single "say something in the feed" mechanism —
         every call site EXCEPT a genuine failure (`error=True`) is routine
         commentary, and used to be indistinguishable from one either way.
@@ -5490,6 +5568,11 @@ class AgentPanel(QtWidgets.QWidget):
         real problem (a spawn failure, a stalled turn, a failed sign-out)
         pass `error=True` at their own call site — see
         `TranscriptModel.append_note`'s own docstring for the rest.
+
+        Returns the entry — most callers ignore it, but one (`_report_
+        stalled_new_session`'s "still opening" note) needs it back to
+        correct itself in place later, via `TranscriptModel.update_note`,
+        once `session_started` proves the diagnosis was only ever a guess.
         """
         current = self._current_session()
         session_id = current.session_id if current else "__idle__"
@@ -5500,6 +5583,7 @@ class AgentPanel(QtWidgets.QWidget):
             self._transcript.refresh(None)
         else:
             self._touch(session_id, entry.id)
+        return entry
 
     # ---------------------------------------------------------- shutdown
 

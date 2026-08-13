@@ -2413,32 +2413,31 @@ def test_the_banner_does_not_offer_a_version_already_installed(qapp, monkeypatch
     assert panel_module._update_is_stale(_Update()) is False
 
 
-def test_an_unconfigured_agent_is_told_apart_from_a_stuck_one(qapp, monkeypatch):
-    """Measured on all six agents with an empty HOME: a never-configured
-    agent connects, advertises NO auth methods, and then never answers
-    `session/new`. The panel's sign-in screen is drawn FROM those auth
-    methods, so it had nothing to show and said "it may be busy or stuck, try
-    switching agents" — a loop with no exit, since every other agent behaves
-    the same way on that machine.
+def test_a_stalled_claude_acp_session_never_guesses_it_is_not_signed_in(qapp, monkeypatch):
+    """Corrected from an earlier version of this test that asserted the
+    OPPOSITE: measured on all six agents with an empty HOME, a
+    never-configured agent connects, advertises NO auth methods, and then
+    never answers `session/new` — so for most agents, "empty methods +
+    stall" really was evidence of "not signed in", and offering the login
+    advice on a stall was the honest call.
 
-    `claude-acp` specifically (not just any agent with no methods) — this
-    used to route through a second, un-corrected copy of "type /login",
-    the exact guess `_offer_login_command` was fixed elsewhere NOT to make
-    for claude-acp (measured: an empty `availableCommands` list). There is
-    no live session at the point `_report_stalled_new_session` runs
-    (`session/new` is what stalled), so it can never confirm a real
-    `/login` command either way — the honest answer is the SAME per-agent
-    advice `_offer_login_command`/`_no_methods_advice` already give
-    (`claude setup-token`), not a blind guess that a later measurement
-    showed was wrong for this exact agent.
+    claude-acp broke that inference: it reports an empty `authMethods`
+    list UNCONDITIONALLY, signed in or not (measured — see
+    `_NO_METHODS_ADVICE`'s own docstring, `claude-acp` reports an empty
+    `availableCommands` list too). Reported for real from the owner's own
+    screenshot: a genuinely signed-in account, mid a `session/new` slowed
+    by his own MCP fleet, was confidently told it "isn't signed in" — a
+    diagnosis built on a fact that was never evidence for THIS agent to
+    begin with. So claude-acp no longer gets a login guess here at all,
+    timeout or not — just the honest "still opening" note, with the one
+    concrete, measured lever named when it's actually available
+    (`claude_show_host_mcp_servers`).
     """
     from houdini_agent_panel import client as client_mod
     from houdini_agent_panel.ui import panel as panel_mod
 
     widget = panel_mod.AgentPanel()
     widget._rejoin_agent("claude-acp")
-    notes: list[str] = []
-    monkeypatch.setattr(widget, "_note", notes.append)
     monkeypatch.setattr(
         panel_mod.shared_client(widget._agent_id),
         "agent_info",
@@ -2446,22 +2445,92 @@ def test_an_unconfigured_agent_is_told_apart_from_a_stuck_one(qapp, monkeypatch)
             name="claude", version="1.0", protocol_version=1,
             supports_image=False, supports_audio=False, supports_embedded_context=False,
             supports_load_session=False, supports_logout=False,
-            auth_methods=(),  # the fresh-machine case
+            auth_methods=(),  # empty for claude-acp regardless of sign-in state
         ),
         raising=False,
     )
 
     widget._report_stalled_new_session(set())
 
-    assert notes, "the artist was told nothing at all"
-    assert "switching agents" not in notes[-1], "still sending them round the loop"
-    assert "claude setup-token" in notes[-1], (
-        f"claude-acp's own measured advice was not given: {notes[-1]!r}"
-    )
+    entries = widget._model("__idle__").entries()
+    assert entries, "the artist was told nothing at all"
+    text = entries[-1].text
+    assert "isn't signed in" not in text, f"still guessing at a login problem: {text!r}"
+    assert "switching agents" not in text, "still sending them round the login-advice loop"
+    assert "claude setup-token" not in text, f"still the login advice, just reworded: {text!r}"
+    assert "MCP servers" in text, "the one measured, concrete lever was not named"
     assert widget._composer._text_edit.toPlainText() == "", (
         "no live session exists yet to have confirmed a /login command — "
-        "typing it in anyway is the exact guess this fix removes"
+        "typing it in anyway would be the exact guess this fix removes"
     )
+    widget.shutdown()
+
+
+def test_a_stalled_claude_acp_session_stays_quiet_about_the_lever_once_it_is_already_off(
+    qapp, monkeypatch
+):
+    """Suggesting the artist turn off a toggle that's already off would be
+    its own small untruth."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    widget._settings.claude_show_host_mcp_servers = False
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id),
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="claude", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(),
+        ),
+        raising=False,
+    )
+
+    widget._report_stalled_new_session(set())
+
+    entries = widget._model("__idle__").entries()
+    assert entries
+    assert "MCP servers" not in entries[-1].text
+    widget.shutdown()
+
+
+def test_a_stalled_claude_acp_note_is_corrected_once_the_session_actually_opens(qapp, monkeypatch):
+    """`_report_stalled_new_session`'s "still opening" note was a guess
+    made under uncertainty, not a verdict — once `session_started` proves
+    the conversation opened fine, the note must say so instead of sitting
+    on screen next to the very conversation that disproves it."""
+    from houdini_agent_panel import client as client_mod
+    from houdini_agent_panel.ui import panel as panel_mod
+
+    widget = panel_mod.AgentPanel()
+    widget._rejoin_agent("claude-acp")
+    monkeypatch.setattr(
+        panel_mod.shared_client(widget._agent_id),
+        "agent_info",
+        lambda: client_mod.AgentInfo(
+            name="claude", version="1.0", protocol_version=1,
+            supports_image=False, supports_audio=False, supports_embedded_context=False,
+            supports_load_session=False, supports_logout=False,
+            auth_methods=(),
+        ),
+        raising=False,
+    )
+
+    widget._report_stalled_new_session(set())
+    entries = widget._model("__idle__").entries()
+    assert len(entries) == 1
+    note_id = entries[0].id
+
+    widget._on_session_started("s1", _session("s1"))
+
+    still_idle = widget._model("__idle__").entries()
+    assert len(still_idle) == 1, "a second note was appended instead of correcting the first"
+    assert still_idle[0].id == note_id, "the correction replaced the note instead of updating it in place"
+    assert "isn't signed in" not in still_idle[0].text
+    assert "opened" in still_idle[0].text.lower()
     widget.shutdown()
 
 

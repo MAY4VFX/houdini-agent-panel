@@ -466,6 +466,22 @@ class TranscriptModel:
         self._entries.append(entry)
         return entry
 
+    def update_note(self, entry_id: str, text: str) -> Entry | None:
+        """A note or error's own diagnosis turned out to be wrong (or just
+        premature) once more information arrived — mutated in place, same
+        id, same position, the same discipline `promote_queued` already
+        uses for a queued message's own transition, rather than left on
+        screen next to the conversation that disproves it. `None` if
+        `entry_id` doesn't name a note/error any more (already scrolled
+        out of `_entries` some other way — nothing calls `remove_entry` on
+        one of these today, but nothing should have to assume that stays
+        true forever)."""
+        for entry in self._entries:
+            if entry.id == entry_id and entry.kind in ("note", "error"):
+                entry.text = text
+                return entry
+        return None
+
     # --- persistence ------------------------------------------------------
     #
     # Only text survives a restart. Tool calls, plans and permission requests
