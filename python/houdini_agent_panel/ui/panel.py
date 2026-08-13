@@ -580,6 +580,19 @@ class AgentPanel(QtWidgets.QWidget):
         #: ONLY thing it ever says, docs/facts/acp-sdk.md §13) rather than
         #: unrelated noise from a running conversation.
         self._auth_pending: bool = False
+        #: True from the moment THIS tab sends `session/new` (agent already
+        #: running — the fx wait, if any, counts as part of the same
+        #: request) until it resolves: `session_started`, an `error`, or the
+        #: agent going away. Neither "+" button disables itself, and the
+        #: only feedback used to arrive up to 20s later
+        #: (`_report_stalled_new_session`) — measured for real: an artist
+        #: whose `session/new` legitimately takes 38s (a heavy MCP fleet)
+        #: saw nothing happen for 14s, concluded the first click missed,
+        #: and pressed "+" again — two independent `session/new` calls, two
+        #: real sessions, not a duplicate log line. `_start_new_session`
+        #: checks this before sending a second one; `_set_new_session_busy`
+        #: is the visible half, flipped in the same place.
+        self._new_session_pending: bool = False
         #: The worker currently running a spawned terminal-auth process
         #: (Kimi's `kimi login`, §13-14), if any — `None` the rest of the
         #: time. Kept so `_on_auth_cancel_pending`/`_show_page`/`shutdown`
@@ -1692,6 +1705,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._offer_notice(ann.id, lambda a=ann: self._notice.show_notice(a))
 
     def _on_disconnected(self, reason: str) -> None:
+        self._clear_new_session_pending()
         self._pending_permissions.clear()
         self._permission_views.clear()
         self._hide_permission_popover()
@@ -1729,6 +1743,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_logout_agent = None
 
     def _on_failed(self, message: str) -> None:
+        self._clear_new_session_pending()
         self._composer.cancel_boot()
         self._note(f"Agent failed to start: {message}", error=True)
         self._open_agent_management()
@@ -1835,6 +1850,7 @@ class AgentPanel(QtWidgets.QWidget):
         # chips below are about to appear. This is the end of the boot and
         # the strip says so before removing itself.
         self._composer.finish_boot()
+        self._clear_new_session_pending()
         adopted = self._adopting_restored
         self._adopting_restored = None
         if adopted is not None:
@@ -2246,6 +2262,11 @@ class AgentPanel(QtWidgets.QWidget):
         self._drain_queue(session_id)
 
     def _on_error(self, session_id: str, message: str) -> None:
+        # Whatever this error is about, a `session/new` this tab is waiting
+        # on cannot still be pending after it — even an unrelated error
+        # means it's safe to let the artist try "+" again rather than leave
+        # the button stuck disabled until something else resolves it.
+        self._clear_new_session_pending()
         if self._pending_logout_agent == self._agent_id:
             # A `logout()` requested from a Settings row (rather than the
             # sign-in screen's own button) has no screen guaranteed to be
@@ -2370,6 +2391,9 @@ class AgentPanel(QtWidgets.QWidget):
         """
         self._unwire_client()
         self._unwire_pool()
+        # Whatever this tab was waiting on belonged to the agent it's
+        # leaving — the new one has sent nothing yet.
+        self._clear_new_session_pending()
         _live_panels_for(self._agent_id).discard(self)
         self._agent_id = agent_id
         _live_panels_for(agent_id).add(self)
@@ -2685,10 +2709,32 @@ class AgentPanel(QtWidgets.QWidget):
             else:
                 self._open_agent_management()
             return
+        if self._new_session_pending:
+            # A `session/new` for this tab is already on the wire (or the
+            # fx wait ahead of it is) — see `_new_session_pending`'s own
+            # comment for the real second-session this closes.
+            _log.info("new session: already in flight for agent=%s — ignoring", self._agent_id)
+            return
+        self._new_session_pending = True
+        self._set_new_session_busy(True)
         if scene.fx_pending():
             self._begin_fx_wait()
             return
         self._open_new_session()
+
+    def _set_new_session_busy(self, busy: bool) -> None:
+        """The visible half of `_new_session_pending` — both "+" doors
+        (header rail, drawer) go quiet the instant the request goes out,
+        not up to 20s later. Houdini's own input-only-blocks rule still
+        holds: nothing else on the panel is touched."""
+        self._header.set_new_session_busy(busy)
+        self._conversations.set_new_session_busy(busy)
+
+    def _clear_new_session_pending(self) -> None:
+        if not self._new_session_pending:
+            return
+        self._new_session_pending = False
+        self._set_new_session_busy(False)
 
     def _begin_fx_wait(self) -> None:
         """Entered once, right before the first `_poll_fx_wait` tick — the

@@ -503,6 +503,22 @@ class HeaderBar(QtWidgets.QWidget):
         self._agent_popup_layout = None
         popup.deleteLater()
 
+    def set_new_session_busy(self, busy: bool) -> None:
+        """The compose button's own feedback for "a `session/new` is
+        already in flight" — disabled the instant the click that started
+        it lands, not up to 20s later when `_report_stalled_new_session`
+        finally has something to say. Without this, an agent whose
+        `session/new` legitimately takes tens of seconds (a heavy MCP
+        fleet, `claude_show_host_mcp_servers` on) looked exactly like a
+        button that ate the first click, and a second one opened a real,
+        separate second session instead of nothing (see the panel's own
+        `_new_session_pending` guard, which this mirrors).
+        """
+        self._new_conversation_button.setEnabled(not busy)
+        self._new_conversation_button.setToolTip(
+            "Opening a new conversation…" if busy else "New conversation"
+        )
+
     def set_settings_open(self, is_open: bool) -> None:
         """Keeps the "…" button's own pressed look in sync with whether
         Settings is actually open — driven by `AgentPanel._show_page`, the

@@ -2693,6 +2693,119 @@ def test_new_session_wait_reuses_the_boot_strip_when_one_is_already_up(qapp, mon
     widget.shutdown()
 
 
+def test_a_second_new_session_click_while_the_first_is_in_flight_is_ignored(qapp, monkeypatch):
+    """Measured for real, from the owner's own log: `session/new` can take
+    38s (a heavy MCP fleet, `claude_show_host_mcp_servers` on). Neither "+"
+    disabled itself and nothing appeared on screen for up to 20s
+    (`_report_stalled_new_session`'s own grace period), so a second click
+    sent a second, independent `session/new` — two real sessions, not one
+    request logged twice. This is the guard: a second call while the first
+    hasn't resolved sends nothing."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    widget._start_new_session()
+    widget._start_new_session()
+    widget._start_new_session()
+
+    assert len(calls) == 1, "a second click while the first request was still in flight sent another one"
+    widget.shutdown()
+
+
+def test_the_new_session_buttons_go_busy_the_moment_the_click_is_accepted(qapp, monkeypatch):
+    """The visible half of the same guard — asked for explicitly: feedback
+    has to appear the instant the click lands, not up to 20s later when
+    `_report_stalled_new_session` finally has something to say. An artist
+    watching a dead-looking button for 14 silent seconds is exactly what
+    produced the second session in the first place."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    assert widget._header._new_conversation_button.isEnabled() is True
+    assert widget._conversations._new_button.isEnabled() is True
+
+    widget._start_new_session()
+
+    assert widget._header._new_conversation_button.isEnabled() is False
+    assert widget._conversations._new_button.isEnabled() is False
+    widget.shutdown()
+
+
+def test_the_new_session_buttons_re_enable_once_the_session_actually_starts(qapp, monkeypatch):
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    widget._start_new_session()
+    assert widget._header._new_conversation_button.isEnabled() is False
+
+    widget._on_session_started("s1", _session("s1"))
+
+    assert widget._header._new_conversation_button.isEnabled() is True
+    assert widget._conversations._new_button.isEnabled() is True
+
+    # And a genuinely new click now sends a genuinely new request.
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    widget._start_new_session()
+    assert calls
+    widget.shutdown()
+
+
+def test_the_new_session_buttons_re_enable_after_an_error(qapp, monkeypatch):
+    """A `session/new` that fails outright must not leave the artist locked
+    out of trying again — only a still-outstanding request blocks a second
+    click."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    monkeypatch.setattr(widget, "_note", lambda *_a, **_k: None)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    widget._start_new_session()
+    assert widget._header._new_conversation_button.isEnabled() is False
+
+    widget._on_error("", "no connection to the agent")
+
+    assert widget._header._new_conversation_button.isEnabled() is True
+    assert widget._conversations._new_button.isEnabled() is True
+    widget.shutdown()
+
+
 def test_a_half_written_prompt_is_never_overwritten(qapp):
     """Offering a command is help; losing what someone was typing to make
     room for it is not."""

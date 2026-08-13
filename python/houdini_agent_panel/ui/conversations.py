@@ -447,6 +447,16 @@ class ConversationDrawer(QtWidgets.QFrame):
         super().showEvent(event)
         self._apply_theme()
 
+    def set_new_session_busy(self, busy: bool) -> None:
+        """Mirrors `HeaderBar.set_new_session_busy` for this drawer's own
+        "New chat" button — the two are two doors to the same action
+        (`AgentPanel._start_new_session`), so both need to go quiet the
+        instant a `session/new` is sent, not just the one the artist
+        happened to click.
+        """
+        self._new_button.setEnabled(not busy)
+        self._new_button.setText("  Opening…" if busy else "  New chat")
+
     def set_empty_scope_text(self, text: str) -> None:
         """What the scope label shows the NEXT time `set_sessions` is
         called with an empty list — see `_empty_scope_text`'s own comment
