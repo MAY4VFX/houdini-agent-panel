@@ -10,14 +10,26 @@
 # with, and hand it the install command. Doesn't put anything into the
 # system except uv, and only if there's nothing else to run it with.
 #
-# UNVERIFIED: there is no Windows machine in this project to run this
-# script on for real. `install.sh` was tested live (mayfx02 and a real Mac,
-# with and without a studio proxy, uvx present and absent, both Houdini
-# versions) and this file was updated to match what that testing found —
-# the same `-TimeoutSec` bound against a silently-dropped connection
-# hanging forever, the same diagnostic-log approach, the same "fail with
-# one readable line" intent — but none of it has actually been executed by
-# PowerShell. Say so if reporting on this file; do not claim it works.
+# Verified live on a stock Windows 11 (10.0.26200) VM with Houdini 22.0.368,
+# Windows PowerShell 5.1, no uv/pipx/node and no real Python — the machine an
+# artist actually has. That run is what the execution-policy handling and the
+# Write-Host error reporting below are for; both were written blind before it
+# and both were wrong. `install.sh` was tested live separately (mayfx02 and a
+# real Mac, with and without a studio proxy, uvx present and absent, both
+# Houdini versions), and the two files share the `-TimeoutSec` bound against a
+# silently-dropped connection hanging forever, the diagnostic-log approach,
+# and the "fail with one readable line" intent.
+
+# Comments in this file may hold any character; string literals and code are
+# ASCII only, and that is not a style preference. This file has no BOM, and
+# Windows PowerShell 5.1 reads a BOM-less file as ANSI, not UTF-8 — so an em
+# dash (E2 80 94) inside a string is decoded as three cp1252 characters, the
+# last of which is U+201D, a curly closing quote. PowerShell accepts curly
+# quotes as string delimiters, so the string ends early, the rest of the line
+# is parsed as code, and the file fails with an unbalanced-brace error
+# hundreds of lines away from the character that caused it. Cost an hour on
+# the Windows 11 VM. The `irm | iex` path in the README decodes as UTF-8 and
+# is immune; anyone who saves this file and runs it is not.
 
 $ErrorActionPreference = 'Stop'
 $Package = 'houdini-agent-panel'
@@ -74,6 +86,19 @@ try {
     Write-Diag "Elevated: $elevated"
 } catch {
     Write-Diag "Elevated: unknown ($($_.Exception.Message))"
+}
+Write-Diag ""
+Write-Diag "--- execution policy ---"
+# The single fact that was missing the first time this script met a real
+# Windows: a stock client machine resolves to `Restricted`, uv's own
+# installer refuses to run under it, and the log said nothing about why.
+Write-Diag "effective: $(Get-ExecutionPolicy)"
+try {
+    foreach ($scope in (Get-ExecutionPolicy -List)) {
+        Write-Diag "  $($scope.Scope): $($scope.ExecutionPolicy)"
+    }
+} catch {
+    Write-Diag "  per-scope list unavailable ($($_.Exception.Message))"
 }
 Write-Diag ""
 Write-Diag "--- network ---"
@@ -140,40 +165,119 @@ function Complete-Install($code) {
     }
 }
 
+# Every failure exit goes through here, and none of them through
+# `Write-Error`: the `$ErrorActionPreference = 'Stop'` at the top of this
+# file makes `Write-Error` a *terminating* error, so it throws instead of
+# printing, and PowerShell renders the throw as a bare "System error.".
+# Measured on the Windows 11 VM — the whole "if you're behind a proxy, set
+# $env:HTTPS_PROXY first" paragraph, written precisely for the person
+# reading that screen, was invisible to them.
+# uv, pip and npm all write their progress to stderr, and under the
+# `$ErrorActionPreference = 'Stop'` this file needs everywhere else,
+# PowerShell turns every one of those lines into a *terminating* error the
+# moment stderr is redirected instead of going straight to a console:
+# `... *> install.txt`, a scheduled task, an SSH session onto a render node.
+# Measured on the Windows 11 VM over SSH — the run died on uv's first
+# progress line, halfway through installing, and blamed it on nothing in
+# particular. An exit code is the only thing that actually reports whether a
+# child worked, so the preference is relaxed for exactly as long as one runs.
+function Invoke-Native {
+    param([string] $Exe, [string[]] $Arguments)
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Exe @Arguments
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Exit-WithMessage($message) {
+    Write-Diag "FATAL: $message"
+    Complete-Install 1
+    Write-Host ""
+    Write-Host $message -ForegroundColor Red
+    exit 1
+}
+
 try {
     # uvx and pipx run the package without installing it into the system:
     # the installer does its job and leaves, without a venv or system
     # Python entries left behind.
     if (Test-Command 'uvx') {
-        Write-Host 'Installing via uvx…'
-        & uvx --from $Package python -m houdini_agent_panel install @Extra
+        Write-Host 'Installing via uvx...'
+        Invoke-Native 'uvx' (@('--from', $Package, 'python', '-m', 'houdini_agent_panel', 'install') + $Extra)
         Complete-Install $LASTEXITCODE
         exit $LASTEXITCODE
     }
 
     if (Test-Command 'pipx') {
-        Write-Host 'Installing via pipx…'
-        & pipx run --spec $Package python -m houdini_agent_panel install @Extra
+        Write-Host 'Installing via pipx...'
+        Invoke-Native 'pipx' (@('run', '--spec', $Package, 'python', '-m', 'houdini_agent_panel', 'install') + $Extra)
         Complete-Install $LASTEXITCODE
         exit $LASTEXITCODE
     }
 
-    Write-Host "Couldn't find uvx or pipx, fetching uv…"
+    Write-Host "Couldn't find uvx or pipx, fetching uv..."
+    # Downloading and running are two separate steps here, and they used to
+    # be one. They fail for unrelated reasons — a proxy blocks the download,
+    # an execution policy blocks the run — and when one `try` covered both,
+    # the run-time failure was reported with the download-time advice: the
+    # Windows 11 VM told its user to check `$env:HTTPS_PROXY` about a
+    # network request that had already succeeded.
+    #
     # -TimeoutSec: measured on install.sh's Unix counterpart that a network
     # silently dropping the connection (not refusing it — a firewall that
     # requires a proxy to be exported first, which we can't know about
     # here) leaves an un-timed-out request hanging with no output for
     # minutes. A bound turns that into a fast, readable failure instead.
     try {
-        Invoke-RestMethod -TimeoutSec 15 https://astral.sh/uv/install.ps1 | Invoke-Expression
+        $uvInstaller = Invoke-RestMethod -TimeoutSec 15 https://astral.sh/uv/install.ps1
     } catch {
-        Write-Diag "FATAL: could not download uv's installer: $($_.Exception.Message)"
-        Complete-Install 1
         # One line, deliberately — same reasoning as the elevation check
         # above. `` `$env:HTTPS_PROXY `` (backtick-escaped) so the literal
         # text prints as advice, not today's actual value interpolated in.
-        Write-Error ("Couldn't download uv's installer from astral.sh: " + $_.Exception.Message + "`nIf you're behind a proxy, set `$env:HTTPS_PROXY first and try again.")
-        exit 1
+        Exit-WithMessage ("Couldn't download uv's installer from astral.sh: " + $_.Exception.Message + "`nIf you're behind a proxy, set `$env:HTTPS_PROXY first and try again.")
+    }
+
+    # uv's installer checks `Get-ExecutionPolicy` itself and refuses to do
+    # anything under `Restricted` — which is what a stock Windows client
+    # resolves to, every scope `Undefined`. This script survives it (a
+    # string run through `iex` is not a script file and is never policy-
+    # checked, which is why `irm | iex` got this far at all), so the
+    # failure lands one level down, inside somebody else's installer, and
+    # reads as though our download broke. Measured on the Windows 11 VM:
+    # that is exactly how the first real install attempt died.
+    #
+    # `-Scope Process` only — it lives in this PowerShell process and dies
+    # with it. Nothing is left behind for the next shell, which keeps the
+    # promise at the top of this file: nothing goes into the system but uv.
+    $PolicyOk = @('Unrestricted', 'RemoteSigned', 'Bypass')
+    if ((Get-ExecutionPolicy) -notin $PolicyOk) {
+        Write-Diag "ExecutionPolicy is $(Get-ExecutionPolicy), setting Bypass for this process only"
+        try {
+            Set-ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop
+        } catch {
+            Write-Diag "Set-ExecutionPolicy failed: $($_.Exception.Message)"
+        }
+    }
+    # Checked again rather than assumed: a Group Policy (`MachinePolicy` /
+    # `UserPolicy`) outranks the process scope and the `Set` above silently
+    # changes nothing. A studio workstation is where that happens, so it
+    # gets its own message — telling an artist to set `$env:HTTPS_PROXY`,
+    # or to try again, would waste their afternoon on the wrong thing.
+    if ((Get-ExecutionPolicy) -notin $PolicyOk) {
+        Exit-WithMessage @"
+Windows won't run uv's installer: the PowerShell execution policy is $(Get-ExecutionPolicy), and a policy set by your administrator overrides what this script can change for itself.
+Ask whoever manages this machine for 'RemoteSigned', or install uv by hand from https://docs.astral.sh/uv/getting-started/installation/ and run this again.
+"@
+    }
+
+    try {
+        Invoke-Expression $uvInstaller
+    } catch {
+        Exit-WithMessage ("uv's installer failed: " + $_.Exception.Message)
     }
 
     # uv's installer asks you to reopen your shell; we have nowhere to
@@ -184,15 +288,14 @@ try {
     )
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) {
-            Write-Host "Installing via $candidate…"
-            & $candidate --from $Package python -m houdini_agent_panel install @Extra
+            Write-Host "Installing via $candidate..."
+            Invoke-Native $candidate (@('--from', $Package, 'python', '-m', 'houdini_agent_panel', 'install') + $Extra)
             Complete-Install $LASTEXITCODE
             exit $LASTEXITCODE
         }
     }
 
-    Complete-Install 1
-    Write-Error @"
+    Exit-WithMessage @"
 uv was installed, but uvx wasn't found. Open a new terminal window and run:
     uvx --from $Package python -m houdini_agent_panel install
 "@
