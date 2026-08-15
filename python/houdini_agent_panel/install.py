@@ -9,7 +9,9 @@ for each Houdini, if there's more than one on the machine.
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -17,11 +19,75 @@ from typing import Sequence
 
 from fxhoudinimcp import houdini_package as fx_houdini_package
 
+from . import childproc
 from . import deps as deps_mod
 from . import mcp_runtime
 from . import houdini_package
 from . import paths
 from .network import Fetcher
+
+
+def _running_elevated() -> bool:
+    """True when this is Windows and the process holds an administrator token."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - never a reason to fail an install
+        return False
+
+
+def _grant_user_access(target: Path, *, out) -> None:
+    """Make an elevated install readable by the artist it was installed for.
+
+    Windows records the *owner* of everything an elevated process creates as
+    `BUILTIN\\Administrators`, not as the human who typed the command, and
+    the dependency tree inherits a DACL whose only useful entry is `OWNER
+    RIGHTS`. A normal Houdini then cannot read a single file in it: an
+    administrator's group membership is deny-only in an unelevated token.
+
+    Measured on Windows 11 with Houdini 22.0.368, the same install run twice.
+    From an ordinary shell, `colorama/__init__.py` came out owned by the
+    user and everything worked. From an elevated one it came out owned by
+    Administrators, and Houdini — not the panel, Houdini — died on
+    `PermissionError: [Errno 13] ... deps/py3.13/colorama/__init__.py` while
+    importing Flask for its own help server, because `HAP_DEPS` sits at the
+    front of `PYTHONPATH` and our unreadable copy of a common package is
+    what its `import colorama` found. The artist got a broken Help Browser,
+    no panel, and an installer that had reported success.
+
+    Running elevated is not exotic — "run PowerShell as administrator" is
+    muscle memory, and in a studio it is how IT installs anything at all.
+    So we repair it rather than refuse: an explicit, inheritable read+execute
+    entry for the account that invoked us, which under UAC is still the
+    artist's own account. Failure here is reported, never fatal: the install
+    itself has already succeeded, and the tree may well be readable anyway.
+
+    Called for every directory this installer *creates*, not for every
+    directory it writes into. A file dropped into a directory Houdini made
+    inherits Houdini's perfectly good permissions and needs nothing from us —
+    which is why an elevated install still produced a readable package json
+    while the dependency tree beside it was unreadable.
+    """
+    if not _running_elevated():
+        return
+    user = os.environ.get("USERNAME")
+    if not user:
+        out("  running elevated, but USERNAME is unset — cannot grant access to the deps tree")
+        return
+    out(f"  running elevated: granting {user} read access to {target}")
+    try:
+        result = childproc.run(
+            ["icacls", str(target), "/grant", f"{user}:(OI)(CI)RX", "/T", "/C", "/Q"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        out(f"  could not run icacls: {exc}")
+        return
+    if result.returncode != 0:
+        out(f"  icacls failed ({result.returncode}): {(result.stderr or '').strip()}")
+        out("  install from an ordinary (non-administrator) PowerShell to avoid this")
 
 
 def _panel_version() -> str:
@@ -212,6 +278,11 @@ def install(
     #: happen at all (`hython -m houdini_agent_panel install` runs from
     #: inside the very tree it is about to overwrite).
     self_updated_to: str | None = None
+    #: `(plugin tree, deps tree)` for every `.pypanel` copied into a prefs
+    #: directory and now duplicated on the package path. Cleared after the
+    #: loop, never inside it: one deps tree serves every Houdini that shares
+    #: its Python version.
+    plugin_pypanels: set[tuple[Path, Path]] = set()
 
     for package_dir in package_dirs:
         prefs_dir = package_dir.parent
@@ -270,6 +341,7 @@ def install(
                 installed = deps_mod.installed_version(target, _PACKAGE)
                 if installed and installed != panel_version:
                     self_updated_to = installed
+                _grant_user_access(target, out=out)
 
         mcp_result = _mcp_python(hython, pyver, target, installer_python, out=out, dry_run=dry_run)
         if mcp_result is None:
@@ -287,9 +359,15 @@ def install(
         package_path = package_dir / houdini_package.PACKAGE_NAME
         fx_plugin = target / "fxhoudinimcp" / "houdini"
         fx_package_path = package_dir / fx_houdini_package.PACKAGE_NAME
+        panel_plugin = (
+            source / "python" / "houdini_agent_panel" / "houdini"
+            if source is not None
+            else target / "houdini_agent_panel" / "houdini"
+        )
         if dry_run:
             out(f"  [dry-run] would write {fx_package_path}")
             out(f"  [dry-run] would write {package_path}")
+            out(f"  [dry-run] would write {prefs_dir / 'python_panels' / houdini_package.PYPANEL_NAME}")
         else:
             package_dir.mkdir(parents=True, exist_ok=True)
             # A fresh Houdini version has no fx package file of its own.
@@ -302,7 +380,27 @@ def install(
             out(f"  fx package json: {written_fx}")
             package_path.write_text(payload, encoding="utf-8", newline="\n")
             out(f"  package json: {package_path}")
+            # Houdini registers the interface from the package path but only
+            # offers it in the New Pane Tab Type menu from here — see
+            # `houdini_package.install_pypanel`. The plugin tree's copy is
+            # then a duplicate, and gets cleared once, after the loop.
+            plugin_pypanels.add((panel_plugin, target))
+            written_pypanel = houdini_package.install_pypanel(prefs_dir, panel_plugin)
+            if written_pypanel is None:
+                out("  python panel definition not found in the plugin tree — menu entry skipped")
+            else:
+                out(f"  python panel: {written_pypanel}")
+                # `python_panels` is a directory Houdini only creates once
+                # somebody saves a panel of their own, so on most machines
+                # this installer is what brings it into being — and an
+                # elevated run brings it into being unreadable.
+                _grant_user_access(written_pypanel.parent, out=out)
         any_ok = True
+
+    for plugin, deps_tree in sorted(plugin_pypanels):
+        cleared = houdini_package.clear_plugin_pypanel(plugin, deps=deps_tree)
+        if cleared is not None:
+            out(f"  removed the duplicate on the package path: {cleared}")
 
     result = 0 if any_ok else 1
 

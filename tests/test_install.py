@@ -527,3 +527,74 @@ def test_no_self_update_notice_with_skip_deps(fake_houdini, monkeypatch):
 
     assert code == 0
     assert "updated itself" not in "\n".join(logged)
+
+
+def test_grant_user_access_is_a_no_op_when_not_elevated(monkeypatch, tmp_path):
+    monkeypatch.setattr(install_mod, "_running_elevated", lambda: False)
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError("icacls must not run for an ordinary install")
+
+    monkeypatch.setattr(install_mod.childproc, "run", explode)
+    install_mod._grant_user_access(tmp_path, out=lambda _: None)
+
+
+def test_grant_user_access_repairs_an_elevated_install(monkeypatch, tmp_path):
+    """An elevated install leaves the tree owned by Administrators, which an
+    artist's unelevated Houdini cannot read at all -- it took down Houdini's
+    own help server on the Windows 11 VM, not just the panel."""
+    monkeypatch.setattr(install_mod, "_running_elevated", lambda: True)
+    monkeypatch.setenv("USERNAME", "artist")
+    calls = []
+
+    class _Ok:
+        returncode = 0
+        stderr = ""
+
+    def record(argv, **kwargs):
+        calls.append(argv)
+        return _Ok()
+
+    monkeypatch.setattr(install_mod.childproc, "run", record)
+    lines: list[str] = []
+    install_mod._grant_user_access(tmp_path, out=lines.append)
+
+    assert calls == [
+        ["icacls", str(tmp_path), "/grant", "artist:(OI)(CI)RX", "/T", "/C", "/Q"]
+    ]
+    assert any("granting artist" in line for line in lines)
+
+
+def test_grant_user_access_reports_a_failure_without_failing_the_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(install_mod, "_running_elevated", lambda: True)
+    monkeypatch.setenv("USERNAME", "artist")
+
+    class _Failed:
+        returncode = 1
+        stderr = "Access is denied."
+
+    monkeypatch.setattr(install_mod.childproc, "run", lambda argv, **kwargs: _Failed())
+    lines: list[str] = []
+    install_mod._grant_user_access(tmp_path, out=lines.append)
+
+    assert any("Access is denied." in line for line in lines)
+    assert any("non-administrator" in line for line in lines)
+
+
+def test_grant_user_access_survives_a_missing_icacls(monkeypatch, tmp_path):
+    monkeypatch.setattr(install_mod, "_running_elevated", lambda: True)
+    monkeypatch.setenv("USERNAME", "artist")
+
+    def missing(argv, **kwargs):
+        raise OSError("no icacls here")
+
+    monkeypatch.setattr(install_mod.childproc, "run", missing)
+    lines: list[str] = []
+    install_mod._grant_user_access(tmp_path, out=lines.append)
+
+    assert any("could not run icacls" in line for line in lines)
+
+
+def test_running_elevated_is_false_off_windows(monkeypatch):
+    monkeypatch.setattr(install_mod.sys, "platform", "darwin")
+    assert install_mod._running_elevated() is False

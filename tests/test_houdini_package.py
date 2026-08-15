@@ -164,3 +164,91 @@ def test_candidate_package_dirs_windows_reports_every_root(tmp_path, monkeypatch
     found = {p.parent for p in houdini_package.candidate_package_dirs()}
 
     assert found == {documents, onedrive}
+
+
+def _plugin_with_pypanel(root: Path, body: str = "<pythonPanelDocument/>") -> Path:
+    plugin = root / "houdini_agent_panel" / "houdini"
+    panels = plugin / "python_panels"
+    panels.mkdir(parents=True)
+    (panels / houdini_package.PYPANEL_NAME).write_text(body, encoding="utf-8")
+    return plugin
+
+
+def test_install_pypanel_copies_into_prefs(tmp_path):
+    """Houdini registers the interface from either place but only offers it in
+    the New Pane Tab Type menu from the prefs directory."""
+    deps = tmp_path / "deps" / "py3.13"
+    plugin = _plugin_with_pypanel(deps, "<pythonPanelDocument>agent</pythonPanelDocument>")
+    prefs = tmp_path / "houdini22.0"
+
+    written = houdini_package.install_pypanel(prefs, plugin)
+
+    assert written == prefs / "python_panels" / houdini_package.PYPANEL_NAME
+    assert written.read_text(encoding="utf-8") == "<pythonPanelDocument>agent</pythonPanelDocument>"
+    assert (plugin / "python_panels" / houdini_package.PYPANEL_NAME).exists()
+
+
+def test_install_pypanel_serves_every_prefs_dir_sharing_one_deps_tree(tmp_path):
+    """20.5 and 21 share the 3.11 dependency tree. Clearing the plugin copy
+    inside the loop left the second Houdini with nothing to install -- caught
+    on the Windows VM, where two prefs directories share one tree."""
+    deps = tmp_path / "deps" / "py3.11"
+    plugin = _plugin_with_pypanel(deps)
+    first = tmp_path / "houdini20.5"
+    second = tmp_path / "houdini21.0"
+
+    assert houdini_package.install_pypanel(first, plugin) is not None
+    assert houdini_package.install_pypanel(second, plugin) is not None
+    assert (second / "python_panels" / houdini_package.PYPANEL_NAME).is_file()
+
+
+def test_clear_plugin_pypanel_removes_the_duplicate_inside_deps(tmp_path):
+    deps = tmp_path / "deps" / "py3.13"
+    plugin = _plugin_with_pypanel(deps)
+
+    cleared = houdini_package.clear_plugin_pypanel(plugin, deps=deps)
+
+    assert cleared == plugin / "python_panels" / houdini_package.PYPANEL_NAME
+    assert not cleared.exists()
+
+
+def test_clear_plugin_pypanel_leaves_a_checkout_alone(tmp_path):
+    """Dev mode points Houdini at the maintainer's checkout. Deleting a tracked
+    file out of someone's repository is not ours to do."""
+    deps = tmp_path / "deps" / "py3.13"
+    deps.mkdir(parents=True)
+    checkout = _plugin_with_pypanel(tmp_path / "repo" / "python")
+
+    assert houdini_package.clear_plugin_pypanel(checkout, deps=deps) is None
+    assert (checkout / "python_panels" / houdini_package.PYPANEL_NAME).exists()
+
+
+def test_clear_plugin_pypanel_is_idempotent(tmp_path):
+    deps = tmp_path / "deps" / "py3.13"
+    plugin = _plugin_with_pypanel(deps)
+
+    assert houdini_package.clear_plugin_pypanel(plugin, deps=deps) is not None
+    assert houdini_package.clear_plugin_pypanel(plugin, deps=deps) is None
+
+
+def test_install_pypanel_reports_a_plugin_tree_without_one(tmp_path):
+    deps = tmp_path / "deps" / "py3.13"
+    plugin = deps / "houdini_agent_panel" / "houdini"
+    plugin.mkdir(parents=True)
+
+    assert houdini_package.install_pypanel(tmp_path / "houdini22.0", plugin) is None
+
+
+def test_install_pypanel_overwrites_a_stale_prefs_copy(tmp_path):
+    """pip restores the plugin copy on every install, so this runs again and
+    again over its own output."""
+    deps = tmp_path / "deps" / "py3.13"
+    plugin = _plugin_with_pypanel(deps, "new")
+    prefs = tmp_path / "houdini22.0"
+    (prefs / "python_panels").mkdir(parents=True)
+    (prefs / "python_panels" / houdini_package.PYPANEL_NAME).write_text("old", encoding="utf-8")
+
+    written = houdini_package.install_pypanel(prefs, plugin)
+
+    assert written is not None
+    assert written.read_text(encoding="utf-8") == "new"

@@ -21,8 +21,61 @@ from pathlib import Path
 #: The filename Houdini looks for in ``<prefs>/packages/``.
 PACKAGE_NAME = "houdini_agent_panel.json"
 
+#: The panel's Python Panel definition, as named inside the plugin tree and
+#: inside Houdini's own ``python_panels`` directory.
+PYPANEL_NAME = "houdini_agent.pypanel"
+
 #: "20.5" out of "20.5" (macOS) or "houdini20.5" (Linux/Windows).
 _VERSION_RE = re.compile(r"^(?:houdini)?(\d+\.\d+)$")
+
+
+def install_pypanel(prefs_dir: Path, plugin: Path) -> Path | None:
+    """Put the panel's `.pypanel` where Houdini's New Pane Tab Type menu
+    will find it, and take it off the plugin path.
+
+    Registering the interface and offering it in that menu are two separate
+    things, and a package's ``path`` only ever bought us the first one.
+    Measured on Windows 11 with Houdini 22.0.368, using two `.pypanel` files
+    identical but for their location: the copy under ``<prefs>/
+    python_panels`` appeared in the menu, the copy on the package path did
+    not, while `hou.pypanel.interfaces()` listed both. That is why an
+    artist could see nothing to click after a clean, successful install —
+    the panel was loaded, Houdini just never offered it. (Namespaced names
+    were ruled out in the same run: a probe called ``zz::testns`` reached
+    the menu from the prefs directory without trouble.)
+
+    Copying only. The plugin's own copy has to go too — Houdini will not
+    hold two definitions of one interface name, and it settles the clash in
+    favour of the package path, the location that does not work — but that
+    is `clear_plugin_pypanel`'s job, once, after every Houdini has been
+    served. Doing it here read perfectly and was wrong: one dependency tree
+    can feed several Houdini versions (20.5 and 21 share the 3.11 tree), and
+    the first one through took the file away from the rest.
+    """
+    source = plugin / "python_panels" / PYPANEL_NAME
+    if not source.is_file():
+        return None
+    panels_dir = prefs_dir / "python_panels"
+    panels_dir.mkdir(parents=True, exist_ok=True)
+    destination = panels_dir / PYPANEL_NAME
+    destination.write_bytes(source.read_bytes())
+    return destination
+
+
+def clear_plugin_pypanel(plugin: Path, *, deps: Path) -> Path | None:
+    """Take the plugin tree's now-duplicate `.pypanel` off ``HOUDINI_PATH``.
+
+    Only ever from inside ``deps``, which this installer owns and rewrites
+    wholesale — pip puts the file back on every install, so this stays
+    idempotent. In dev mode the plugin tree is the maintainer's checkout: a
+    repository is not ours to delete files out of, and a checkout on
+    ``HOUDINI_PATH`` goes on winning the clash exactly as it does today.
+    """
+    source = plugin / "python_panels" / PYPANEL_NAME
+    if not source.is_file() or not source.is_relative_to(deps):
+        return None
+    source.unlink()
+    return source
 
 
 def plugin_path() -> Path:
