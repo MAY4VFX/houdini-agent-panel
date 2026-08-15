@@ -2,9 +2,28 @@
 Windows counterpart to what `pty.openpty()` gives `_PtyMasterReader` on
 POSIX (`terminal_login.py`, docs/facts/acp-sdk.md §20).
 
-**NOT INDEPENDENTLY VERIFIED — no Windows machine in this project** (the
-same gap `node.py::npm_cache_dir`'s own docstring and `self_update.py`'s
-already note, for different reasons). Every step below follows
+**RUN FOR REAL ONCE, AND IT DOES NOT DELIVER OUTPUT.** On a Windows 11 VM
+(build 26200, Houdini 22.0.368) every call below succeeds against a genuine
+`kernel32.dll` — `CreatePseudoConsole` returns `S_OK`, `CreateProcessW`
+returns a pid, the child runs and exits 0 — and not one byte ever arrives
+on the output pipe. Measured, in this order:
+
+- `PeekNamedPipe` on our read end still answers after we close the PTY-side
+  copies, so `CreatePseudoConsole` did duplicate the write end. That step
+  is fine.
+- A child that lives three seconds and prints immediately yields zero bytes
+  across its whole life. Not a flush problem at exit.
+- A real console **window** appears on the desktop, titled after the child.
+  A process attached to a pseudoconsole does not get one.
+
+So the child is running with an ordinary console, not ours, and nothing in
+the attribute-list attachment reports a failure. Cause not found; this is
+the next thing to look at, and `docs/facts/acp-sdk.md` §20's account of the
+POSIX side is the model for what a fix has to end up proving. Until then,
+terminal sign-in cannot work on Windows: the artist sees an empty terminal
+and "Still working" for as long as they are willing to wait.
+
+Every step below follows
 Microsoft's own documented sequence for "Creating a pseudoconsole
 session" (`CreatePipe` x2 → `CreatePseudoConsole` → build a
 `STARTUPINFOEXW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` via

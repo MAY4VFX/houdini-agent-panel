@@ -837,6 +837,7 @@ class TerminalLoginWorker(Worker):
         one ever join the roughly forty agents in the ACP registry that
         aren't today.
         """
+        from .. import node as node_module
         from .. import proxy as proxy_module
         from .. import settings as settings_module
 
@@ -845,6 +846,25 @@ class TerminalLoginWorker(Worker):
         env.update(terminal_auth.env)
         for name in mcp_runtime.SHADOWING_VARS:
             env.pop(name, None)
+        # The other half of "run the login command the same way the agent is
+        # run". `_npx_setup_token_argv` copies the agent's argv — our Node,
+        # `npx-cli.js` called directly — but the agent's launch spec also
+        # puts our Node's directory on the child's PATH, and that was left
+        # behind. It is not decoration: npm runs a package's lifecycle
+        # scripts through `cmd.exe /d /s /c`, which resolves `node` from
+        # PATH and nothing else.
+        #
+        # Measured on a Windows VM with no system Node, which is precisely
+        # the machine this panel vendors Node for. Installing the login
+        # package died on `'node' is not recognized as an internal or
+        # external command` out of `@anthropic-ai/claude-code`'s own
+        # postinstall (`node install.cjs`); npx then exited 1 with nothing
+        # on either stream, and the artist got an empty terminal window, no
+        # browser, and "Still working" underneath it. With the directory
+        # prepended the same install finishes in two seconds.
+        node_bin = node_module.existing_node()
+        if node_bin is not None:
+            env["PATH"] = node_module.path_with_node(node_bin, env.get("PATH"))
         return env
 
     def work(self) -> None:

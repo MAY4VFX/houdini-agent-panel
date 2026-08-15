@@ -1160,3 +1160,50 @@ def test_a_plain_pipe_submit_still_sends_a_line_feed(qapp, tmp_path):
     # The stand-in reads with `readline()`, which only returns on `\n`.
     _wait_until(qapp, lambda: any("got:MY-CODE-123" in line for line in lines))
     worker.wait(3000)
+
+
+def test_build_env_puts_our_node_on_the_path_for_npm(monkeypatch, tmp_path):
+    """npm runs a package's lifecycle scripts through `cmd.exe /d /s /c`,
+    which resolves `node` from PATH and nothing else. On a Windows VM with no
+    system Node -- the machine this panel vendors Node for -- the login
+    package's own postinstall (`node install.cjs`) died on "'node' is not
+    recognized", npx exited 1 with nothing on either stream, and the artist
+    got an empty terminal window and no browser. `_npx_setup_token_argv`
+    copies the agent's argv; this is the PATH half the agent's launch spec
+    also sets."""
+    from houdini_agent_panel.ui import terminal_login as terminal_login_module
+
+    _no_shell(monkeypatch)
+    node_bin = tmp_path / "node" / "22.14.0" / "node"
+    node_bin.parent.mkdir(parents=True)
+    node_bin.touch()
+
+    from houdini_agent_panel import node as node_module
+
+    monkeypatch.setattr(node_module, "existing_node", lambda: node_bin)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+
+    ta = TerminalAuth(command=sys.executable, args=[], env={})
+    env = TerminalLoginWorker.build_env(ta)
+
+    assert env["PATH"].split(os.pathsep)[0] == str(node_bin.parent)
+    # Prepended, never replacing: the login command may need the machine's
+    # own tools too.
+    assert "/usr/bin" in env["PATH"].split(os.pathsep)
+    assert terminal_login_module is not None
+
+
+def test_build_env_survives_a_machine_with_no_node_at_all(monkeypatch):
+    """`existing_node` returns None before any Node is downloaded. The login
+    command falls back to a bare `npx` in that case and PATH is the machine's
+    own -- there is nothing of ours to add, and nothing to crash over."""
+    _no_shell(monkeypatch)
+    from houdini_agent_panel import node as node_module
+
+    monkeypatch.setattr(node_module, "existing_node", lambda: None)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    ta = TerminalAuth(command="npx", args=[], env={})
+    env = TerminalLoginWorker.build_env(ta)
+
+    assert env["PATH"] == "/usr/bin"
