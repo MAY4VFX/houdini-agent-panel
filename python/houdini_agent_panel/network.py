@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from typing import Callable, Protocol
@@ -26,6 +27,25 @@ from typing import Callable, Protocol
 USER_AGENT = "houdini-agent-panel"
 
 DEFAULT_TIMEOUT = 30.0
+
+#: How long a small document (registry, feed, PyPI metadata) gets from the
+#: first byte to the last, in total.
+#:
+#: `DEFAULT_TIMEOUT` cannot do this job and it took a filtered network to
+#: show why: it is the timeout of a single socket read, so a response that
+#: keeps arriving — just barely — never trips it, and `response.read()`
+#: never returns. Measured on a Windows VM behind a filtering link: HTTP 200
+#: immediately, then 24576 of 48886 bytes at 204 B/s, still going after two
+#: minutes, three runs in a row. The panel showed "Loading agents…" for as
+#: long as anyone cared to watch, with a perfectly good "couldn't load the
+#: agent list" message sitting unused behind it.
+#:
+#: Only for documents small enough that any honest link delivers them in
+#: seconds. Archives go through `stream_fetch`, which is deliberately not
+#: bounded this way — an agent or a Node build is tens of megabytes, a slow
+#: office link is a real thing, and there is a progress bar there to show
+#: the artist that something is still happening.
+DEFAULT_DEADLINE = 60.0
 
 #: Custom root CA bundle for studios with an intercepting proxy.
 CA_BUNDLE_ENV = "HAP_CA_BUNDLE"
@@ -142,12 +162,30 @@ class Fetcher(Protocol):
 Progress = Callable[[int, "int | None", str], None]
 
 
-def urlopen_fetch(url: str, *, timeout: float = DEFAULT_TIMEOUT) -> bytes:
+def _read_within(response, url: str, *, deadline: float) -> bytes:
+    """Read a response to the end, or give up at `deadline` — see it."""
+    started = time.monotonic()
+    chunks: list[bytes] = []
+    while True:
+        chunk = response.read(1 << 16)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        if time.monotonic() - started > deadline:
+            raise NetworkError(
+                f"{url}: still arriving after {deadline:.0f}s "
+                f"({sum(len(c) for c in chunks)} bytes so far) — giving up"
+            )
+
+
+def urlopen_fetch(
+    url: str, *, timeout: float = DEFAULT_TIMEOUT, deadline: float = DEFAULT_DEADLINE
+) -> bytes:
     """Fetch a URL in full. Fine for JSON, not for archives."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with _opener_director().open(request, timeout=timeout) as response:
-            return response.read()
+            return _read_within(response, url, deadline=deadline)
     except urllib.error.HTTPError as exc:
         raise NetworkError(f"{url}: HTTP {exc.code} {exc.reason}") from exc
     except (urllib.error.URLError, OSError) as exc:

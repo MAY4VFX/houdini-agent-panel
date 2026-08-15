@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ssl
 
+import pytest
+
 from houdini_agent_panel import network
 
 
@@ -216,3 +218,76 @@ def test_the_panel_actually_applies_its_network_settings(qapp, monkeypatch):
     widget._on_settings_changed()
     assert calls, "changing settings did not reach the network layer"
     widget.shutdown()
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def __call__(self):
+        return self.now
+
+
+class _DribblingResponse:
+    """A response that keeps arriving, slowly, and never ends.
+
+    The shape measured on a Windows VM behind a filtering link: HTTP 200 at
+    once, then a couple of hundred bytes a second, still going two minutes
+    later. Every individual read succeeds, so a socket timeout never fires
+    and `read()` never returns.
+    """
+
+    def __init__(self, clock):
+        self._clock = clock
+
+    def read(self, size=-1):
+        self._clock.advance(5.0)
+        return b"x" * 1024
+
+
+def test_read_within_gives_up_on_a_response_that_never_ends(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(network.time, "monotonic", clock)
+
+    with pytest.raises(network.NetworkError) as excinfo:
+        network._read_within(
+            _DribblingResponse(clock), "https://example.invalid/registry.json", deadline=30.0
+        )
+
+    message = str(excinfo.value)
+    assert "still arriving after 30s" in message
+    assert "bytes so far" in message
+
+
+def test_read_within_returns_a_response_that_ends(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(network.time, "monotonic", clock)
+
+    class _Finite:
+        def __init__(self):
+            self._left = [b"{", b"}"]
+
+        def read(self, size=-1):
+            return self._left.pop(0) if self._left else b""
+
+    assert network._read_within(_Finite(), "https://example.invalid", deadline=30.0) == b"{}"
+
+
+def test_read_within_allows_a_slow_but_finite_response(monkeypatch):
+    """A deadline that fires on the last chunk of a download that did finish
+    would turn a working slow link into a broken one."""
+    clock = _Clock()
+    monkeypatch.setattr(network.time, "monotonic", clock)
+
+    class _Slow:
+        def __init__(self):
+            self._left = [b"a", b"b", b""]
+
+        def read(self, size=-1):
+            clock.advance(9.0)
+            return self._left.pop(0)
+
+    assert network._read_within(_Slow(), "https://example.invalid", deadline=30.0) == b"ab"

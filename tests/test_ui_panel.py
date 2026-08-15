@@ -888,6 +888,27 @@ def test_registry_reaches_the_agents_section(qapp):
     widget.shutdown()
 
 
+def test_a_failed_registry_fetch_reaches_the_agents_section(qapp):
+    """The agents section says "Loading agents…" until it is told an answer
+    arrived, and has a second line ready for the answer being empty. Skipping
+    the call when the fetch failed left the first line on screen for good,
+    which reads as a panel still trying -- seen on a Windows VM behind a
+    filtering link, where the registry dribbled in at 200 B/s and never
+    finished."""
+    widget = _make_panel(qapp)
+    shown = []
+    widget._settings_view.set_agents = lambda entries, updates=None: shown.append(entries)
+
+    class _Result:
+        announcements: list = []
+        updates: list = []
+
+    widget._on_refresh_done(_Result(), [])
+
+    assert shown == [[]]
+    widget.shutdown()
+
+
 def test_installed_agent_reaches_the_header_chip_menu(qapp):
     """"Installed it, and it shows up in the chip menu with no panel restart"."""
     from houdini_agent_panel import settings as settings_mod

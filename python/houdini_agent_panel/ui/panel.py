@@ -3629,14 +3629,22 @@ class AgentPanel(QtWidgets.QWidget):
                 + (f"\n{reason}" if reason else ""),
                 error=True,
             )
-        if settings_view is not None and entries:
+        if settings_view is not None:
             from .. import registry
 
+            # Called even with nothing to show, which it did not used to be.
+            # The agents section draws "Loading agents…" until somebody tells
+            # it an answer arrived, and it has a second line ready for the
+            # answer being empty — "couldn't load the agent list, check the
+            # network, or Settings → Network". Skipping the call on failure
+            # left the first line on screen forever, which reads as a panel
+            # still trying. Seen on a Windows VM behind a filtering link.
+            #
             # featured(), not the whole registry: that's pushing forty-odd
             # entries at the artist, drowning the choice they can't make
             # sense of. Anything else goes through "custom agent".
             settings_view.set_agents(
-                registry.featured(entries),
+                registry.featured(entries) if entries else [],
                 updates=list(getattr(result, "updates", []) or []),
             )
 
