@@ -5511,9 +5511,28 @@ class AgentPanel(QtWidgets.QWidget):
         # and the artist can read them. They carry no live agent session —
         # the id below is ours, not any agent's — and the first message sent
         # into one opens a real session and takes the transcript with it.
+        # A conversation the artist already has OPEN is not restored again,
+        # under either of the two keys it can be in the pool under. Checking
+        # only the `_RESTORED_PREFIX` one (as this did) misses the case that
+        # matters: adoption REPLACES that key with the agent's own session id
+        # (`_on_session_loaded`/`_on_session_started` -> `_pool.remove(adopted)`),
+        # so the restored key is genuinely absent afterwards — and the next
+        # `_restore_conversations()` (a scene change, `_rejoin_agent`, a
+        # reboot of this tab) happily added a SECOND, read-only copy of a
+        # conversation that was live in this very pool. Reported for real on
+        # 0.8.34, and the disk was innocent: 21 conversations stored, not one
+        # duplicate pair among them, while the drawer showed two rows each
+        # for two of them. `_conversation_ids` is the only thing that knows
+        # both keys point at the same conversation, so it is what gets asked.
+        open_conversation_ids = {
+            self._conversation_ids.get(state.session_id)
+            for state in self._pool.all()
+        }
         for conversation in stored:
             key = _RESTORED_PREFIX + conversation.id
             if self._pool.get(key) is not None:
+                continue
+            if conversation.id in open_conversation_ids:
                 continue
             state = sessions.SessionState(
                 session_id=key,

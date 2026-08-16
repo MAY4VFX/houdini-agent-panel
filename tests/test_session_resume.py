@@ -490,3 +490,64 @@ def test_persisting_an_unadopted_restored_conversation_keeps_its_old_session_id(
     written = {c.id: c for c in store.load()}
     assert written[conversation.id].agent_session_id == "agent-sess-9"
     widget.shutdown()
+
+
+def test_restoring_again_after_adoption_does_not_list_the_same_conversation_twice(
+    qapp, monkeypatch
+):
+    """Reported on 0.8.34: the drawer showed two rows each for two
+    conversations while the store held exactly one of each — 21 stored,
+    not one duplicate pair among them. The drawer lists
+    `AgentPanel._pool.all()` and nothing else (`_refresh_sessions`), so a
+    doubled row means a doubled POOL entry, not doubled data.
+
+    Adoption removes the `_RESTORED_PREFIX` key and puts the agent's own
+    session id in its place. `_restore_conversations` skipped a stored
+    conversation only when THAT key was still present — true before
+    adoption, false after — so every later call (a scene change,
+    `_rejoin_agent`, this tab rebooting) added a second, read-only copy of
+    a conversation that was live in the very same pool.
+
+    Asserted on the pool rather than on disk on purpose: the disk was
+    already right when this was reported, and a store-level assertion is
+    exactly what let it through.
+    """
+    conversation = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-9")
+    store.save([conversation])
+
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client("claude-acp")
+    client._agent_info = _info(supports_load_session=True)
+    client._running = True
+    monkeypatch.setattr(client, "load_session", lambda **kw: None)
+    monkeypatch.setattr(client, "prompt", lambda session_id, blocks: None)
+
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._set_current_session(key)
+    widget._on_submitted([{"type": "text", "text": "and more dust"}])
+    live = sessions.SessionState(
+        session_id="agent-sess-9", title="Rotor pyro", cwd="/tmp", created_at=0.0
+    )
+    client.session_loaded.emit("agent-sess-9", live)
+    qapp.processEvents()
+    assert widget._pool.get(key) is None, "adoption must have replaced the restored key"
+
+    # What a scene change does (`_on_hip_dir_changed`), and what
+    # `_rejoin_agent` and a tab reboot do too.
+    widget._restore_conversations()
+    qapp.processEvents()
+
+    for_this_conversation = [
+        state
+        for state in widget._pool.all()
+        if widget._conversation_ids.get(state.session_id) == conversation.id
+    ]
+    assert len(for_this_conversation) == 1, (
+        "an already-open conversation must not come back as a second, read-only row: "
+        f"{[s.session_id for s in for_this_conversation]}"
+    )
+    assert for_this_conversation[0].session_id == "agent-sess-9", (
+        "the surviving row must be the live one, not the restored placeholder"
+    )
+    widget.shutdown()
