@@ -3196,3 +3196,101 @@ def test_switching_agent_from_settings_returns_to_the_conversation(qapp, monkeyp
 
     assert widget._pages.currentIndex() == widget.PAGE_TRANSCRIPT
     widget.shutdown()
+
+
+# `ensure_fx_started` is the second half of the same story: `fx_pending()`
+# only says whether someone else's start is in flight. When the fx server is
+# down AND nothing is starting it — the shape a wedged Houdini holding 8100
+# leaves behind — "+" is the moment to start it ourselves, on a port verified
+# bindable rather than merely silent.
+
+
+def test_new_session_asks_the_fx_server_to_start_before_deciding_to_wait(qapp, monkeypatch):
+    """Order matters: a server started here shows up as `fx_pending()` on
+    the very next check, so the existing bounded wait picks it up. Checking
+    pending first would open a toolless session and only then start it."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: None)
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+
+    order = []
+    monkeypatch.setattr(
+        panel_mod.scene, "ensure_fx_started", lambda: order.append("ensure")
+    )
+    monkeypatch.setattr(
+        panel_mod.scene, "fx_pending", lambda: order.append("pending") or False
+    )
+
+    widget._start_new_session()
+
+    assert order[:2] == ["ensure", "pending"]
+    widget.shutdown()
+
+
+def test_new_session_waits_for_the_fx_server_this_panel_just_started(qapp, monkeypatch):
+    """End to end through the panel: down and not starting, `ensure_fx_
+    started` gets it going, and the session waits instead of opening
+    toolless."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(panel_mod.scene, "mcp_servers", lambda: [])
+
+    pending = [False]
+
+    def ensure():
+        pending[0] = True  # start() set `_starting`, exactly as the real one does
+
+    monkeypatch.setattr(panel_mod.scene, "ensure_fx_started", ensure)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: pending[0])
+
+    widget._start_new_session()
+    assert not calls, "opened a toolless session instead of waiting for the start it just triggered"
+
+    pending[0] = False  # readiness confirmed
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS)
+    assert calls, "the session never opened once the fx server was ready"
+    widget.shutdown()
+
+
+def test_new_session_survives_a_failing_ensure_fx_started(qapp, monkeypatch):
+    """`ensure_fx_started` swallows its own errors, but "+" must not depend
+    on that promise holding."""
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(panel_mod.scene, "mcp_servers", lambda: [])
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: False)
+
+    def boom():
+        raise RuntimeError("plugin exploded")
+
+    monkeypatch.setattr(panel_mod.scene, "ensure_fx_started", boom)
+
+    widget._start_new_session()
+
+    assert calls, "a failing ensure_fx_started took the whole new session down"
+    widget.shutdown()

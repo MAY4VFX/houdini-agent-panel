@@ -2729,6 +2729,18 @@ class AgentPanel(QtWidgets.QWidget):
             return
         self._new_session_pending = True
         self._set_new_session_busy(True)
+        # Before asking whether someone else's start is in flight, make sure
+        # there IS one. `fx_pending()` is False both when the port is already
+        # known and when nothing is starting the server at all — and that
+        # second case is what a wedged Houdini still holding 8100 leaves
+        # behind, since fxhoudinimcp's own auto-start counts a silent port as
+        # free and then fails at bind. `ensure_fx_started` is a no-op unless
+        # the server is genuinely down, and flips `fx_pending()` True when it
+        # does start one, so the bounded wait just below picks it up.
+        try:
+            scene.ensure_fx_started()
+        except Exception:  # noqa: BLE001 - "+" must work even if this doesn't
+            _log.exception("new session: ensure_fx_started failed — continuing without it")
         if scene.fx_pending():
             self._begin_fx_wait()
             return

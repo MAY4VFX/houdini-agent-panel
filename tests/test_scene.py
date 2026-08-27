@@ -565,3 +565,119 @@ def test_fx_bootstrap_fixes_argv_for_the_server(tmp_path):
     seen = _run_bootstrap(tmp_path, policy_module="haio")
 
     assert seen["argv"] == ["fxhoudinimcp"]
+
+
+# --- ensure_fx_started: coming up on a free port when auto-start couldn't ----
+#
+# The incident these cover: a wedged Houdini held 8100 without answering
+# `mcp.health`, so fxhoudinimcp's own `_pick_free_port` called it free,
+# `hwebserver.run()` failed at bind, and the new session got no MCP at all.
+
+
+def _install_fake_startup_with_start(
+    *, running: bool = False, starting: bool = False, port: int = 8100, raises: bool = False
+) -> list:
+    """A fake `startup` that records `start()` calls in the returned list."""
+    calls: list = []
+
+    def start(port=None, background=None, wait=True):
+        calls.append({"port": port, "background": background, "wait": wait})
+        if raises:
+            raise RuntimeError("hwebserver failed to start")
+
+    package = types.ModuleType("fxhoudinimcp_server")
+    startup = types.ModuleType("fxhoudinimcp_server.startup")
+    startup.is_running = lambda: running
+    startup.is_starting = lambda: starting
+    startup.get_port = lambda: port
+    startup.start = start
+    package.startup = startup
+    sys.modules["fxhoudinimcp_server"] = package
+    sys.modules["fxhoudinimcp_server.startup"] = startup
+    return calls
+
+
+def test_ensure_fx_started_does_nothing_when_already_running():
+    calls = _install_fake_startup_with_start(running=True)
+    scene.ensure_fx_started()
+    assert calls == []
+
+
+def test_ensure_fx_started_does_nothing_while_autostart_is_still_polling():
+    """Its own readiness poll is in flight — starting a second one would
+    race the first, and `start()` would refuse anyway (`_starting` guard)."""
+    calls = _install_fake_startup_with_start(starting=True)
+    scene.ensure_fx_started()
+    assert calls == []
+
+
+def test_ensure_fx_started_does_nothing_when_the_plugin_is_not_loaded():
+    """No plugin in this process — there is nothing to start."""
+    scene.ensure_fx_started()  # must not raise
+
+
+def test_ensure_fx_started_starts_on_the_base_port_when_it_is_free(monkeypatch):
+    calls = _install_fake_startup_with_start()
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: True)
+    scene.ensure_fx_started()
+    assert len(calls) == 1
+    assert calls[0]["port"] == 8100
+    # wait=False, or the panel's main thread sits through the readiness poll.
+    assert calls[0]["wait"] is False
+
+
+def test_ensure_fx_started_skips_a_port_held_by_a_wedged_process(monkeypatch):
+    """The whole point: 8100 is held but silent, so it is NOT bindable."""
+    calls = _install_fake_startup_with_start()
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: port != 8100)
+    scene.ensure_fx_started()
+    assert [call["port"] for call in calls] == [8101]
+
+
+def test_ensure_fx_started_skips_every_held_port_in_the_range(monkeypatch):
+    calls = _install_fake_startup_with_start()
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: port >= 8105)
+    scene.ensure_fx_started()
+    assert [call["port"] for call in calls] == [8105]
+
+
+def test_ensure_fx_started_gives_up_when_the_whole_range_is_held(monkeypatch, caplog):
+    calls = _install_fake_startup_with_start()
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: False)
+    with caplog.at_level("WARNING"):
+        scene.ensure_fx_started()
+    assert calls == []
+    assert "8100" in caplog.text and "8115" in caplog.text
+
+
+def test_ensure_fx_started_never_raises_into_the_new_session_path(monkeypatch, caplog):
+    """A failed start must not take the "+" button down with it — the
+    session still opens, just without Houdini tools."""
+    _install_fake_startup_with_start(raises=True)
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: True)
+    with caplog.at_level("ERROR"):
+        scene.ensure_fx_started()  # must not raise
+    assert "hwebserver failed to start" in caplog.text
+
+
+def test_is_bindable_says_no_for_a_port_something_is_listening_on():
+    """Against a real socket, not a fake: this is the one thing
+    `_pick_free_port` gets wrong, so it is checked for real."""
+    import socket as _socket
+
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        taken = held.getsockname()[1]
+        assert scene._is_bindable(taken) is False
+    # Released with the socket, so the same port is bindable again.
+    assert scene._is_bindable(taken) is True
+
+
+def test_is_bindable_says_yes_for_a_free_port():
+    import socket as _socket
+
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert scene._is_bindable(free) is True

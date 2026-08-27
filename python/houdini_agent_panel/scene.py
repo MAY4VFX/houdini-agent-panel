@@ -18,6 +18,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -115,6 +116,123 @@ def fx_pending() -> bool:
     except ImportError:
         return False
     return startup.is_starting()
+
+
+def _is_bindable(port: int) -> bool:
+    """True when a plain TCP bind on `port` succeeds right now.
+
+    This is precisely the check `_pick_free_port` in fxhoudinimcp's
+    `startup.py` does NOT do. It calls a port free when nothing ANSWERS
+    `mcp.health` there — which a wedged Houdini still holding the socket
+    also satisfies. The search then hands that occupied port back,
+    `hwebserver.run()` fails at bind, and the session is left with no MCP
+    at all; the function's own docstring names the limitation ("nothing
+    answers mcp.health is not the same as nothing holds the socket").
+    Asking the kernel is the only answer that survives a process that
+    holds the port but has stopped talking.
+
+    Deliberately WITHOUT `SO_REUSEADDR`: the real question is whether
+    hwebserver will get the port, and a plain bind errs on the safe side
+    of that. It can call a port in TIME_WAIT unusable where hwebserver
+    would have taken it, which costs one port out of sixteen and nothing
+    else.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((fx_host(), port))
+        except OSError:
+            return False
+    return True
+
+
+def _first_bindable_port() -> int | None:
+    """The lowest port in the scan range this process could actually serve on."""
+    for port in range(_PORT_SCAN_BASE, _PORT_SCAN_BASE + _PORT_SCAN_COUNT):
+        if _is_bindable(port):
+            return port
+    return None
+
+
+def ensure_fx_started() -> None:
+    """Start the fx server in THIS process when its own auto-start couldn't.
+
+    Not a reimplementation of the plugin: it calls the plugin's own public
+    `startup.start(port=...)`. The only thing added here is the argument —
+    a port verified bindable by `_is_bindable`, rather than one merely
+    found silent.
+
+    Why this is needed at all. fxhoudinimcp auto-starts at Houdini launch
+    and picks its port with `_pick_free_port`, which treats "nothing
+    answers `mcp.health`" as "free". A Houdini that has wedged — not
+    exited, still holding 8100, no longer answering anything — passes that
+    test, so the new session binds nothing and stays MCP-less for its whole
+    life. Restarting Houdini does not help while the wedged process is
+    still up, which is exactly how it presents: "I restarted and it is
+    still broken."
+
+    Safe to call on every "+" and cheap when there is nothing to do: it
+    returns on the first `is_running()`/`is_starting()` check, and only
+    the down-and-not-starting case probes ports at all. Re-entry after a
+    failed auto-start is sound — `_confirm_ready` sets `_server_started =
+    False` and `_confirm_ready_async` clears `_starting` in a `finally`,
+    deliberately, "or a failed start would leave the server permanently
+    un-startable from the menu".
+
+    Must run on the main thread: hwebserver keeps its `Server` in a
+    `threading.local()`, so handlers registered on one thread are
+    invisible to `run()` on another. Every call site is a panel one, which
+    is the main thread by construction.
+
+    Silent by design — no note in the feed. The artist gets a working MCP;
+    the port it landed on is a log line, not their problem.
+    """
+    try:
+        import fxhoudinimcp_server.startup as startup  # noqa: PLC0415 - see the module docstring
+    except ImportError:
+        # No plugin in this process — nothing to start, and the HTTP scan
+        # fallback in `fx_port` is already the answer for that case.
+        return
+
+    if startup.is_running() or startup.is_starting():
+        return
+
+    port = _first_bindable_port()
+    if port is None:
+        _log.warning(
+            "ensure_fx_started: the fx server is down and every port in %s..%s is "
+            "held by something else — leaving it to the HTTP scan fallback",
+            _PORT_SCAN_BASE,
+            _PORT_SCAN_BASE + _PORT_SCAN_COUNT - 1,
+        )
+        return
+
+    if port != _PORT_SCAN_BASE:
+        _log.warning(
+            "ensure_fx_started: port %s is held by another process that isn't "
+            "answering mcp.health (a wedged Houdini, most likely) — starting the "
+            "fx server on %s instead",
+            _PORT_SCAN_BASE,
+            port,
+        )
+    else:
+        _log.info(
+            "ensure_fx_started: the fx server isn't up and its auto-start isn't "
+            "running — starting it on port %s",
+            port,
+        )
+
+    try:
+        # wait=False for the same reason auto-start uses it: the readiness
+        # poll runs up to `_READINESS_TIMEOUT` = 15s, and this is the main
+        # thread. `is_starting()` goes True here, so the panel's existing
+        # bounded fx wait picks the result up on its own.
+        startup.start(port=port, wait=False)
+    except Exception:  # noqa: BLE001 - must never take the "+" button down with it
+        _log.exception(
+            "ensure_fx_started: starting the fx server on port %s failed — the "
+            "session will open without Houdini tools",
+            port,
+        )
 
 
 def _cached_scan_for_any_fx_port() -> int | None:
