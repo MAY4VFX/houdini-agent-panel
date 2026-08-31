@@ -1452,6 +1452,9 @@ class AgentPanel(QtWidgets.QWidget):
         self._client_wiring = wiring
 
     def _unwire_client(self) -> None:
+        # This tab stops hearing the agent at all, so it cannot go on being
+        # the tab that applies its updates — see `_writes_shared_state`.
+        sessions.release_writer(self._agent_id, self)
         for signal, slot in getattr(self, "_client_wiring", ()):
             try:
                 signal.disconnect(slot)
@@ -2215,13 +2218,38 @@ class AgentPanel(QtWidgets.QWidget):
             remembered.config_options_by_agent.setdefault(self._agent_id, {})[config_id] = value
             settings_mod.save(remembered)
 
+    def _writes_shared_state(self) -> bool:
+        """Whether THIS tab is the one that applies this agent's updates.
+
+        A session's transcript belongs to the agent, not to a tab
+        (`sessions.models`), but the shared client broadcasts every update
+        to every tab wired to it — so an append run once per tab lands
+        twice on the one shared model. See `sessions._writers` for what
+        that did to a real conversation. Everything else in these handlers
+        (drawing, the unread dot, the composer's own chrome) is a fact
+        about THIS tab and still runs in all of them.
+        """
+        return sessions.is_writer(self._agent_id, self)
+
     def _on_message_chunk(self, session_id: str, message_id: str, text: str) -> None:
-        entry = self._model(session_id).apply_chunk(message_id, text)
-        self._touch(session_id, entry.id, streamed=True)
+        self._apply_chunk(session_id, message_id, text, thought=False)
 
     def _on_thought_chunk(self, session_id: str, message_id: str, text: str) -> None:
-        entry = self._model(session_id).apply_chunk(message_id, text, thought=True)
-        self._touch(session_id, entry.id, streamed=True)
+        self._apply_chunk(session_id, message_id, text, thought=True)
+
+    def _apply_chunk(
+        self, session_id: str, message_id: str, text: str, *, thought: bool
+    ) -> None:
+        model = self._model(session_id)
+        if self._writes_shared_state():
+            entry = model.apply_chunk(message_id, text, thought=thought)
+        else:
+            # The writer tab already appended this chunk to the model we
+            # share with it — find the row it went into and draw that,
+            # rather than appending the same words a second time.
+            entry = model.chunk_entry(message_id, thought=thought)
+        if entry is not None:
+            self._touch(session_id, entry.id, streamed=True)
 
     def _on_tool_call(self, session_id: str, call: Any) -> None:
         entry = self._model(session_id).apply_tool_call(call)
@@ -2258,8 +2286,13 @@ class AgentPanel(QtWidgets.QWidget):
             self._update_escape_shortcut_enabled()
         self._finish_activity(session_id)
         if stop_reason and stop_reason not in ("end_turn", "cancelled"):
-            entry = self._model(session_id).append_error(f"Agent stopped: {stop_reason}")
-            self._touch(session_id, entry.id)
+            if self._writes_shared_state():
+                entry = self._model(session_id).append_error(f"Agent stopped: {stop_reason}")
+                self._touch(session_id, entry.id)
+            else:
+                # The writer tab appended it; redraw the feed rather than
+                # write a second identical row into the shared model.
+                self._touch(session_id, None)
         # The agent's side of the exchange, on disk the moment it lands —
         # otherwise a hang on the artist's NEXT prompt would cost this
         # whole answer too, not just the one that never came back. See
@@ -2307,8 +2340,13 @@ class AgentPanel(QtWidgets.QWidget):
         if not target:
             self._note(message, error=True)
             return
-        entry = self._model(target).append_error(message)
-        self._touch(target, entry.id)
+        if self._writes_shared_state():
+            entry = self._model(target).append_error(message)
+            self._touch(target, entry.id)
+        else:
+            # Same as `_on_turn_finished`: the row exists already, drawn
+            # from the model both tabs share.
+            self._touch(target, None)
         state = self._pool.get(target)
         if state is not None:
             # An error ends this turn as surely as `turn_finished` does —
@@ -3020,8 +3058,14 @@ class AgentPanel(QtWidgets.QWidget):
         current = self._current_session()
         return current is not None and current.session_id == session_id
 
-    def _touch(self, session_id: str, entry_id: str, *, streamed: bool = False) -> None:
+    def _touch(self, session_id: str, entry_id: str | None, *, streamed: bool = False) -> None:
         """Redraw a single entry — only if the human is looking at this session.
+
+        `None` means "something changed in this session's feed, and this tab
+        does not know which row" — the case a tab that is not this agent's
+        writer is in (`_writes_shared_state`). It redraws the feed instead
+        of one row; only ever reached at human speed (an error, the end of
+        a turn), never from a streamed chunk, which always knows its row.
 
         Otherwise streaming into a background session would make Qt reflow a
         feed nobody is watching. What DOES happen for a background session is
@@ -3243,7 +3287,16 @@ class AgentPanel(QtWidgets.QWidget):
             if state is not None:
                 state.queued = [q for q in state.queued if q.id != entry_id]
                 self._pool.mark_changed(session_id)
-            entry = self._model(session_id).promote_queued(entry_id)
+            model = self._model(session_id)
+            # `promote_queued` returning None does not mean the row is
+            # gone: a sibling tab wired to the same client handles this
+            # same broadcast against the same model, and whichever ran
+            # first has already promoted it. It flips the kind in place on
+            # the SAME entry, so the row is still there under its own id —
+            # look before concluding anything was lost, or the tab holding
+            # the blocks recreates a message the artist sent once and gets
+            # it written twice (reported: 6 duplicated user messages).
+            entry = model.promote_queued(entry_id) or model.entry(entry_id)
             if entry is None:
                 # The artist clicked Remove in the narrow window between
                 # this steer going out and its answer coming back — the
@@ -5650,6 +5703,11 @@ class AgentPanel(QtWidgets.QWidget):
         self._persist_cooldown_active = False
         self._persist_dirty = False
         _live_panels_for(self._agent_id).discard(self)
+        # A closing tab hands nothing on: the next tab to receive an update
+        # claims the job itself (`sessions.is_writer`). Released here as
+        # well as in `_unwire_client` because closing a tab does not unwire
+        # it — the client stays up for whatever tabs are left.
+        sessions.release_writer(self._agent_id, self)
 
         if self._hip_watch_handle is not None:
             scene.unwatch_hip_dir_changes(self._hip_watch_handle)

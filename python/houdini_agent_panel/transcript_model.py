@@ -353,6 +353,33 @@ class TranscriptModel:
         self._entries.append(entry)
         return entry
 
+    def chunk_entry(self, message_id: str, *, thought: bool = False) -> Entry | None:
+        """Where a chunk with this id WOULD land — changing nothing.
+
+        For the tabs that are not this agent's writer (`sessions.is_writer`):
+        they still draw the feed, and drawing needs the entry the chunk went
+        into, but appending it a second time is exactly the corruption a
+        single writer exists to prevent. Reads by the same two rules
+        `apply_chunk` appends by, so the two can never disagree about which
+        entry a chunk belongs to.
+        """
+        kind: EntryKind = "thought" if thought else "agent"
+        if message_id:
+            return self._by_message_id.get((kind, message_id))
+        last = self._entries[-1] if self._entries else None
+        if last is not None and last.kind == kind and last.id.startswith(_UNKEYED_PREFIX):
+            return last
+        return None
+
+    def entry(self, entry_id: str) -> Entry | None:
+        """The row with this id, or None if the feed no longer has one.
+
+        A linear scan on purpose: the only caller is `_on_steered`'s
+        "was this row already promoted, or genuinely removed?" question,
+        which happens at most once per steered message.
+        """
+        return next((entry for entry in self._entries if entry.id == entry_id), None)
+
     def apply_tool_call(self, call: Any) -> Entry:
         tool_call_id = call.tool_call_id
         # Same redelivery this class already guards `apply_chunk` against
@@ -422,6 +449,18 @@ class TranscriptModel:
         return self._plan_entry
 
     def apply_permission(self, view: PermissionView) -> Entry:
+        # The same redelivery guard `apply_tool_call` has, for the same
+        # reason: `request_key` identifies the REQUEST, so a second
+        # delivery of it — the protocol repeating itself, or a second panel
+        # tab handling the one broadcast (`sessions.is_writer`) — belongs
+        # to the row that already exists. Appending anyway drew a second
+        # row sharing the first one's id, and `resolve_permission` then
+        # answered only one of them. Returned unchanged rather than
+        # refreshed: an already-answered request must not come back
+        # unanswered.
+        existing = self._by_request_key.get(view.request_key)
+        if existing is not None:
+            return existing
         entry = Entry(kind="permission", id=view.request_key, permission=view)
         self._by_request_key[view.request_key] = entry
         self._entries.append(entry)

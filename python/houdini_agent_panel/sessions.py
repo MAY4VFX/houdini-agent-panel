@@ -10,6 +10,7 @@ process, different `current` (see docs/architecture.md §7 and
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass, field
 
 from .transcript_model import Entry, TranscriptModel
@@ -224,6 +225,56 @@ _model_pools: dict[str, dict[str, TranscriptModel]] = {}
 #: saved twice, under two different ids.
 _conversation_id_pools: dict[str, dict[str, str]] = {}
 
+#: Which tab APPLIES this one agent id's updates, process-wide — the half
+#: of the problem `_model_pools` above left open. It made a session's
+#: transcript shared by every tab on the agent; what stayed on the tab was
+#: the applying. The shared client broadcasts `message_chunk` and friends
+#: to every wired tab (`ui/panel.py::AgentPanel._wire_client`), so with two
+#: tabs open every APPEND landed twice on that one shared model: an answer
+#: came out with each of its chunks duplicated ("…по рефлексу: по
+#: рефлексу:"), an error drew two rows, "Agent stopped" drew two, and the
+#: artist's own steered message was written twice. Reported from the
+#: owner's own store, 2026-08-31 — 52 of 111 messages in one conversation,
+#: on the first day in the whole panel log with two tabs in one Houdini
+#: process, which is why a bug dating from `c4a1231` waited three weeks to
+#: show itself.
+#:
+#: Only what appends needs a single writer. Anything keyed by an id the
+#: agent supplies dedups on that key instead (`apply_tool_call`,
+#: `apply_permission`), which also covers the protocol's own redelivery.
+#: A chunk of text has no such key — two identical deltas in a row are
+#: perfectly legal — so text is the case that needs one writer rather than
+#: a guess.
+_writers: dict[str, "weakref.ReferenceType"] = {}
+
+
+def is_writer(agent_id: str, tab: object) -> bool:
+    """Whether `tab` is the one tab that applies this agent's updates.
+
+    Claimed, not assigned: the first tab to ask gets the job, and once that
+    tab is gone — `release_writer`, or simply collected — the next one
+    asking takes it over. Nothing has to hand the job on, so no order of
+    opening and closing tabs can leave a live conversation with no writer.
+    """
+    ref = _writers.get(agent_id)
+    current = ref() if ref is not None else None
+    if current is None or current is tab:
+        _writers[agent_id] = weakref.ref(tab)
+        return True
+    return False
+
+
+def release_writer(agent_id: str, tab: object) -> None:
+    """`tab` is closing, or moving to a different agent.
+
+    Nothing is promoted here on purpose: the next tab to ask claims the job
+    itself (`is_writer`), which is one rule instead of two and cannot
+    promote a tab that is on its way out.
+    """
+    ref = _writers.get(agent_id)
+    if ref is None or ref() is tab or ref() is None:
+        _writers.pop(agent_id, None)
+
 
 def models(agent_id: str) -> dict[str, TranscriptModel]:
     """This one agent id's transcripts, process-wide — see `_model_pools`."""
@@ -238,7 +289,8 @@ def conversation_ids(agent_id: str) -> dict[str, str]:
 
 def reset_pool_for_tests() -> None:
     """Tests only: the singletons would otherwise survive between tests."""
-    global _pools, _model_pools, _conversation_id_pools
+    global _pools, _model_pools, _conversation_id_pools, _writers
     _pools = {}
     _model_pools = {}
     _conversation_id_pools = {}
+    _writers = {}
