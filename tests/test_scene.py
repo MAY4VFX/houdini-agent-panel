@@ -681,3 +681,51 @@ def test_is_bindable_says_yes_for_a_free_port():
         probe.bind(("127.0.0.1", 0))
         free = probe.getsockname()[1]
     assert scene._is_bindable(free) is True
+
+
+# --- Houdini's own backup copies -------------------------------------------
+#
+# Houdini writes a versioned copy of the scene into `$HIP/backup` on every
+# save, and fires its ordinary "saved" event for that write too — with
+# `hou.hipFile.path()` pointing at the BACKUP file while it happens. Every
+# caller of `hip_dir()` believed it: `AgentPanel._on_hip_dir_changed` moved
+# the live session (and with it the conversation on disk) into
+# `.../backup`, and `_write_context_files` dropped AGENTS.md/CLAUDE.md in
+# there. Reported for real on 2026-08-31: an evening's two conversations
+# were relabelled `/Users/may/BS/airship/backup` at 19:45:57 and 20:41:52 —
+# the exact seconds Houdini wrote `airship_v010_bak2.hip` and `_bak3.hip` —
+# and became invisible from the project folder the artist actually works
+# in. Nothing was lost, but "the panel lost my conversations" is what it
+# looks like from the outside.
+
+
+def test_hip_dir_ignores_houdinis_own_backup_copy(tmp_path):
+    """The scene folder is the project, not the backup subfolder Houdini
+    happened to be writing into at the moment we asked."""
+    project = tmp_path / "airship"
+    backup = project / "backup"
+    backup.mkdir(parents=True)
+    _install_fake_hou(is_new_file=False, path=str(backup / "airship_v010_bak2.hip"))
+
+    assert scene.real_hip_dir() == str(project)
+
+
+def test_hip_dir_keeps_a_scene_whose_own_name_ends_in_bak(tmp_path):
+    """`shot010_bak1.hip` sitting in the project itself is a file the artist
+    named, not Houdini's bookkeeping — both signals have to agree before we
+    override what Houdini told us."""
+    project = tmp_path / "airship"
+    project.mkdir()
+    _install_fake_hou(is_new_file=False, path=str(project / "shot010_bak1.hip"))
+
+    assert scene.real_hip_dir() == str(project)
+
+
+def test_hip_dir_keeps_a_real_scene_inside_a_folder_named_backup(tmp_path):
+    """A project folder that happens to be called `backup` is still where
+    the artist is working, as long as the scene isn't a `_bakN` copy."""
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    _install_fake_hou(is_new_file=False, path=str(backup / "airship_v010.hip"))
+
+    assert scene.real_hip_dir() == str(backup)

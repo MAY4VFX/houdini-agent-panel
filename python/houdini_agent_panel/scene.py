@@ -18,6 +18,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -413,10 +414,54 @@ def real_hip_dir() -> str | None:
     if hou.hipFile.isNewFile():
         return None
 
-    directory = Path(hou.hipFile.path()).parent
+    path = Path(hou.hipFile.path())
+    directory = path.parent
+    if _is_backup_copy(path, directory):
+        directory = directory.parent
     if not directory.is_dir():
         return None
     return str(directory)
+
+
+#: Houdini's own versioned copy of a scene: `<name>_bak<N>.hip` (or
+#: `.hipnc`/`.hiplc`), written into the backup folder on every save.
+_BACKUP_COPY_RE = re.compile(r".+_bak\d+\.hip(nc|lc)?$", re.IGNORECASE)
+
+
+def _backup_dir_name() -> str:
+    """What Houdini calls its backup folder — `$HOUDINI_BACKUP_DIR`, or
+    `backup` when it isn't set. Read through `hou.getenv` so a studio that
+    renamed it is covered too; anything unexpected falls back to the
+    default rather than raising inside a path check."""
+    import hou  # noqa: PLC0415 - lazy, same reason as `real_hip_dir`
+
+    getenv = getattr(hou, "getenv", None)
+    if getenv is None:
+        return "backup"
+    try:
+        configured = getenv("HOUDINI_BACKUP_DIR")
+    except Exception:  # noqa: BLE001 - a path check has no right to raise
+        return "backup"
+    return Path(configured).name if configured else "backup"
+
+
+def _is_backup_copy(path: Path, directory: Path) -> bool:
+    """Whether Houdini is telling us about its OWN backup copy rather than
+    the scene the artist has open.
+
+    Houdini fires its ordinary "saved" event for the backup write too, and
+    `hou.hipFile.path()` points at the backup file while it does. Believed
+    literally, that moved a live session — and the conversation on disk
+    with it — into `$HIP/backup`, where the artist never looks, and dropped
+    AGENTS.md/CLAUDE.md in there as well. Measured on 2026-08-31: two
+    conversations relabelled at 19:45:57 and 20:41:52, the exact seconds
+    Houdini wrote `airship_v010_bak2.hip` and `_bak3.hip`.
+
+    BOTH signals have to agree — the `_bakN` name AND the backup folder —
+    so a scene the artist happened to name `shot010_bak1.hip`, or a real
+    project folder called `backup`, is still taken at face value.
+    """
+    return bool(_BACKUP_COPY_RE.match(path.name)) and directory.name == _backup_dir_name()
 
 
 def watch_hip_dir_changes(callback: Callable[[str], None]) -> object:
