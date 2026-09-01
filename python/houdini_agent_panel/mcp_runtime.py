@@ -86,9 +86,10 @@ def is_ephemeral(executable: str | os.PathLike[str]) -> bool:
     it was already gone before Houdini was ever launched: the panel logged
     the right host and port, but the fx MCP server's own process never
     appeared, because the interpreter named in `mcpServers[0].command`
-    didn't exist. Confirmed live: the SAME command run without `--no-cache`
-    writes `~/.cache/uv/archive-v0/<hash>/bin/python`, which survives, and
-    everything works.
+    didn't exist. The SAME command run without `--no-cache` writes
+    `~/.cache/uv/archive-v0/<hash>/bin/python` instead — which is a
+    different, milder problem, and is `is_uv_cache`'s, not this one's: it
+    exists when the install finishes, and only goes away later.
 
     Checked by path, not by asking the OS "is this on a tmpfs" or similar —
     `tempfile.gettempdir()` is exactly what every tool that creates a
@@ -113,6 +114,61 @@ def is_ephemeral(executable: str | os.PathLike[str]) -> bool:
         return False
     try:
         resolved.relative_to(temp_root)
+    except ValueError:
+        return False
+    return True
+
+
+def _uv_cache_root() -> Path | None:
+    """Where uv keeps its unpacked archives — `$UV_CACHE_DIR` if the artist
+    set one, otherwise uv's own per-platform default."""
+    configured = os.environ.get("UV_CACHE_DIR")
+    if configured:
+        return Path(configured)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        return Path(base) / "uv" / "cache" if base else None
+    return Path.home() / ".cache" / "uv"
+
+
+def is_uv_cache(executable: str | os.PathLike[str]) -> bool:
+    """Does this interpreter live inside uv's cache — real today, reclaimed
+    whenever uv next tidies up?
+
+    `is_ephemeral` above used to call this path the good outcome ("which
+    survives, and everything works"). It does not survive: `uv cache prune`,
+    `uv cache clean` and uv's own housekeeping delete the archive, taking
+    the interpreter with it. Measured on the owner's machine, 2026-08-31 —
+    an install recorded `~/.cache/uv/archive-v0/SCnAZuPVQXH2-Rz6laYiw/bin/
+    python` as `HAP_PYTHON`, and by the next Houdini launch the panel was
+    logging "The Houdini MCP server's interpreter is gone": no scene tools
+    at all for that whole session, on a machine where nothing had been
+    uninstalled. `uvx --from houdini-agent-panel …` is the install command
+    the README hands out, so this is the ordinary path, not a corner.
+
+    Deliberately NOT folded into `is_ephemeral`, because the two want
+    opposite handling: a temp-directory interpreter is already gone by the
+    time Houdini starts and must never be recorded, while this one works
+    right now and is still worth recording when there is nothing better to
+    record (`install._mcp_python`).
+
+    Matched against the cache ROOT, not by looking for "uv" in the path: a
+    folder of the artist's own with `uv` somewhere in its name is not uv's
+    cache.
+    """
+    root = _uv_cache_root()
+    if root is None:
+        return False
+    try:
+        resolved = Path(executable).resolve()
+    except OSError:
+        resolved = Path(executable)
+    try:
+        root = root.resolve()
+    except OSError:
+        pass
+    try:
+        resolved.relative_to(root)
     except ValueError:
         return False
     return True

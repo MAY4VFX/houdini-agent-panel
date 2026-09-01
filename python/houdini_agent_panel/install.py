@@ -183,7 +183,12 @@ def _mcp_python(
     this Houdini entirely rather than commit to that.
     """
     ephemeral = mcp_runtime.is_ephemeral(installer_python)
-    if not mcp_runtime.is_houdini_python(installer_python) and not ephemeral:
+    reclaimable = mcp_runtime.is_uv_cache(installer_python)
+    if (
+        not mcp_runtime.is_houdini_python(installer_python)
+        and not ephemeral
+        and not reclaimable
+    ):
         out(f"  HAP_PYTHON: {installer_python} (the installer's own python)")
         return installer_python, None
 
@@ -192,6 +197,13 @@ def _mcp_python(
             f"  installer python is inside a temporary directory ({installer_python}) "
             "and will not exist once this command exits — looking for Houdini's own "
             "plain CPython instead"
+        )
+    elif reclaimable:
+        out(
+            f"  installer python lives in uv's cache ({installer_python}) — it works "
+            "now, but uv reclaims that cache and takes the interpreter with it "
+            "(measured: scene tools gone by the next Houdini launch) — looking for "
+            "Houdini's own plain CPython instead"
         )
     if dry_run:
         out("  [dry-run] would look for Houdini's plain CPython for the MCP server")
@@ -207,6 +219,19 @@ def _mcp_python(
                 "permanent interpreter exists to record."
             )
             return None
+        if reclaimable:
+            # Unlike the temp-directory case above, this interpreter works
+            # today. Skipping the Houdini would leave the artist with no
+            # panel at all, to avoid a failure that may never come — and
+            # `scene.mcp_python_status` already notices the interpreter
+            # going away later and says, in the panel, to run the installer
+            # again.
+            out(
+                "  Houdini's plain CPython not found — recording uv's cached "
+                "interpreter, which works now. If the scene tools ever stop "
+                "appearing, re-run `python -m houdini_agent_panel install`."
+            )
+            return installer_python, None
         out(
             "  Houdini's plain CPython not found — the MCP server will run on "
             "hython, which adds about 10s to opening a conversation"

@@ -209,9 +209,20 @@ def ensure_fx_started() -> None:
 
     if port != _PORT_SCAN_BASE:
         _log.warning(
+            # Deliberately no guess at WHO. This used to say "a wedged
+            # Houdini, most likely", and on the owner's own machine that
+            # sent the reader hunting for a Houdini process that did not
+            # exist: 8100 was held by `hserver`, SideFX's licence daemon,
+            # which runs all the time and had simply taken the port while
+            # no Houdini was up. A log line that names the wrong culprit is
+            # worse than one that names none — the port number is the fact,
+            # and `lsof -nP -iTCP:%s` is one command away for anyone who
+            # needs the rest.
             "ensure_fx_started: port %s is held by another process that isn't "
-            "answering mcp.health (a wedged Houdini, most likely) — starting the "
-            "fx server on %s instead",
+            "answering mcp.health (another Houdini, or anything else that took the "
+            "port — `lsof -nP -iTCP:%s` says which) — starting the fx server on %s "
+            "instead",
+            _PORT_SCAN_BASE,
             _PORT_SCAN_BASE,
             port,
         )

@@ -598,3 +598,58 @@ def test_grant_user_access_survives_a_missing_icacls(monkeypatch, tmp_path):
 def test_running_elevated_is_false_off_windows(monkeypatch):
     monkeypatch.setattr(install_mod.sys, "platform", "darwin")
     assert install_mod._running_elevated() is False
+
+
+# --- installer python inside uv's cache (the ordinary `uvx` install) ------
+
+
+def _uv_cache_python() -> Path:
+    return Path("/opt/uv-cache/archive-v0/SCnAZuPVQXH2/bin/python")
+
+
+def test_install_uv_cache_installer_python_prefers_plain_cpython(fake_houdini, monkeypatch):
+    """`uvx --from houdini-agent-panel …` — the command the README hands
+    out — runs from an unpacked archive in uv's cache. That interpreter
+    exists when the install finishes and disappears the next time uv tidies
+    up: measured on the owner's machine, an install recorded one and by the
+    next Houdini launch the panel was logging "The Houdini MCP server's
+    interpreter is gone", with no scene tools for the whole session.
+    Houdini's own plain CPython lives inside the Houdini install and is
+    preferred, exactly as for the `hython` and temp-directory cases."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod.sys, "executable", str(_uv_cache_python()))
+    plain = Path("/fake/hfs20.5/python/bin/python3.11")
+    monkeypatch.setattr(mcp_runtime, "find", lambda *a, **k: plain)
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    payload = json.loads((fake_houdini / "packages" / houdini_package.PACKAGE_NAME).read_text("utf-8"))
+    assert {"HAP_PYTHON": plain.as_posix()} in payload["env"]
+    assert any("uv" in line and "cache" in line for line in logged)
+
+
+def test_install_uv_cache_installer_python_is_still_recorded_without_a_fallback(
+    fake_houdini, monkeypatch
+):
+    """Unlike the temp-directory case, this interpreter works TODAY. With no
+    plain CPython to prefer, recording it beats skipping the Houdini
+    entirely and leaving the artist with no panel at all — the panel
+    already detects the interpreter going away later and says to re-run the
+    installer."""
+    _stub_hython(monkeypatch)
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: ["ok"])
+    monkeypatch.setattr(install_mod.sys, "executable", str(_uv_cache_python()))
+    monkeypatch.setattr(mcp_runtime, "find", lambda *a, **k: None)
+    logged = []
+
+    code = install_mod.install(out=logged.append)
+
+    assert code == 0
+    payload = json.loads((fake_houdini / "packages" / houdini_package.PACKAGE_NAME).read_text("utf-8"))
+    assert {"HAP_PYTHON": _uv_cache_python().as_posix()} in payload["env"]
+    assert any("re-run" in line.lower() or "run the installer" in line.lower() for line in logged)

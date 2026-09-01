@@ -159,3 +159,62 @@ def test_the_fx_version_is_readable_from_the_tree(tmp_path):
 
     assert installed_version(tmp_path, "fxhoudinimcp") == "2.10.0"
     assert installed_version(tmp_path, "nothing-here") is None
+
+
+# --- is_uv_cache -------------------------------------------------------
+#
+# `is_ephemeral`'s docstring used to name `~/.cache/uv/archive-v0/<hash>/
+# bin/python` as the GOOD case — "which survives, and everything works".
+# It does not. uv reclaims its cache (`uv cache prune`, `uv cache clean`,
+# and its own housekeeping) and the archive goes with it. Measured on the
+# owner's own machine, 2026-08-31: an install recorded
+# `/Users/may/.cache/uv/archive-v0/SCnAZuPVQXH2-Rz6laYiw/bin/python` as
+# HAP_PYTHON, and by the next Houdini launch the panel logged "The Houdini
+# MCP server's interpreter is gone" — no scene tools for that whole
+# session. `uvx --from houdini-agent-panel …` is the install command the
+# README hands out, so this is the DEFAULT path, not a corner.
+#
+# Kept separate from `is_ephemeral` on purpose, because the remedy differs:
+# a temp-directory interpreter is gone before Houdini ever starts and must
+# never be recorded, while a uv-cache one works today and is worth
+# recording if there is nothing better — see `install._mcp_python`.
+#
+# Paths below are deliberately OUTSIDE the system temp directory: under it
+# they would answer through `is_ephemeral`'s own rule and prove nothing.
+
+
+def test_is_uv_cache_true_for_a_python_inside_uvs_cache(monkeypatch):
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+
+    assert mcp_runtime.is_uv_cache("/opt/uv-cache/archive-v0/SCnAZ/bin/python") is True
+
+
+def test_is_uv_cache_true_for_uvs_default_location(monkeypatch):
+    """Nobody sets `UV_CACHE_DIR`; the default is the path the owner\'s own
+    broken install actually recorded."""
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/Users/fake")))
+
+    assert mcp_runtime.is_uv_cache("/Users/fake/.cache/uv/archive-v0/SCnAZ/bin/python") is True
+
+
+def test_is_uv_cache_false_for_an_unrelated_path_containing_uv(monkeypatch):
+    """A folder of the artist\'s own that merely has `uv` in its path is not
+    uv\'s cache — only the cache root counts."""
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+
+    assert mcp_runtime.is_uv_cache("/Users/fake/projects/uv/bin/python") is False
+
+
+def test_is_uv_cache_false_for_an_ordinary_installed_python(monkeypatch):
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+
+    assert mcp_runtime.is_uv_cache("/opt/homebrew/bin/python3.12") is False
+
+
+def test_a_uv_cache_python_is_not_called_ephemeral(monkeypatch):
+    """The two are different problems with different remedies, and
+    `install._mcp_python` branches on which one it is."""
+    monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
+
+    assert mcp_runtime.is_ephemeral("/opt/uv-cache/archive-v0/SCnAZ/bin/python") is False

@@ -135,3 +135,60 @@ def test_unscoped_count_combines_missing_scene_and_missing_agent(data_dir):
     store.save([no_cwd, no_agent, both])
 
     assert store.unscoped_count() == 2, "a conversation scoped to both fields must not count"
+
+
+# --- two writers, one file -------------------------------------------------
+#
+# `save` is the last step of a read-modify-write that starts back in
+# `AgentPanel._persist_conversations`: load everything on disk, update the
+# conversations THIS tab knows about, write the whole set back. Two tabs on
+# DIFFERENT agents each do that against the same file, each knowing only
+# its own agent's conversations — so the slower writer's snapshot, taken
+# before the other one saved, silently erases whatever the other one had
+# just added. The write itself has been atomic since `paths.atomic_write_
+# text`; what was never safe is the gap between the read and the write.
+#
+# Nothing ever asks `save` to DELETE: the store has no delete function, and
+# its one caller only ever adds to what it loaded. So a record on disk that
+# the caller doesn't mention is not "removed", it is "not this writer's" —
+# and keeping it is the whole fix.
+
+
+def test_save_keeps_a_conversation_another_writer_added_since_we_loaded():
+    ours = store.StoredConversation.new("ours", agent_id="claude-acp", cwd="/proj")
+    store.save([ours])
+
+    # Both tabs read the same state here.
+    snapshot = store.load()
+
+    theirs = store.StoredConversation.new("theirs", agent_id="gemini", cwd="/proj")
+    store.save(snapshot + [theirs])
+
+    # The slow tab now writes the snapshot it took BEFORE `theirs` existed,
+    # carrying its own change — `_persist_conversations` stamps a fresh
+    # `updated_at` on anything it actually changed, so this one does too.
+    snapshot[0].title = "ours, renamed"
+    snapshot[0].updated_at += 5
+    store.save(snapshot)
+
+    titles = {c.title for c in store.load()}
+    assert titles == {"ours, renamed", "theirs"}
+
+
+def test_save_prefers_whichever_copy_of_a_conversation_changed_last():
+    """Same id on both sides is a genuine conflict — the newer `updated_at`
+    is the only ordering either writer can agree on."""
+    conversation = store.StoredConversation.new("first", agent_id="claude-acp", cwd="/proj")
+    store.save([conversation])
+
+    fresher = store.StoredConversation.from_dict(conversation.to_dict())
+    fresher.title = "written by the other tab"
+    fresher.updated_at = conversation.updated_at + 10
+    store.save([fresher])
+
+    stale = store.StoredConversation.from_dict(conversation.to_dict())
+    stale.title = "written by the slow tab"
+    stale.updated_at = conversation.updated_at
+    store.save([stale])
+
+    assert [c.title for c in store.load()] == ["written by the other tab"]

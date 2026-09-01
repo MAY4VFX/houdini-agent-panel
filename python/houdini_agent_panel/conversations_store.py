@@ -221,7 +221,7 @@ def save(conversations: list[StoredConversation], *, active_id: str | None = Non
     is no active conversation" — callers that don't track a current
     conversation yet can keep calling `save()` exactly as before.
     """
-    ordered = _ordered(list(conversations))
+    ordered = _ordered(_merged_with_disk(list(conversations)))
     pinned = [c for c in ordered if c.pinned]
     rest = [c for c in ordered if not c.pinned][: max(0, MAX_CONVERSATIONS - len(pinned))]
     keep = _ordered(pinned + rest)
@@ -240,6 +240,49 @@ def save(conversations: list[StoredConversation], *, active_id: str | None = Non
     paths.atomic_write_text(
         store_path(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     )
+
+
+def _merged_with_disk(conversations: list[StoredConversation]) -> list[StoredConversation]:
+    """`conversations` plus anything on disk the caller never saw.
+
+    `save` is the last step of a read-modify-write that begins in
+    `AgentPanel._persist_conversations`: load the whole file, update the
+    conversations THIS tab knows about, write everything back. Two tabs on
+    different agents each do that against this one file, each holding only
+    its own agent's conversations — so the slower writer's snapshot, taken
+    before the other tab saved, erased whatever the other tab had just
+    added. Atomic writing never covered this: the danger is the gap between
+    the read and the write, not the write itself.
+
+    Re-reading here shrinks that gap from seconds (a whole persist pass,
+    including `TranscriptModel.to_records` for every open conversation) to
+    the microseconds between this read and `os.replace`. Not a lock, and
+    not claimed to be one — but it turns "one tab silently drops another
+    tab's conversation" into a race that has to be won inside a single
+    file write to lose anything at all.
+
+    Nothing ever asks `save` to delete: the store has no delete function,
+    and its one caller only adds to what it loaded. A record on disk the
+    caller didn't mention is therefore not "removed", it is "not this
+    writer's". Same id on both sides is a real conflict, and the newer
+    `updated_at` wins — the only ordering two writers can agree on without
+    talking to each other.
+    """
+    payload = _read_payload()
+    if not payload:
+        return conversations
+    mine = {c.id: c for c in conversations}
+    merged = list(conversations)
+    for raw in payload.get("conversations") or []:
+        on_disk = StoredConversation.from_dict(raw)
+        if on_disk is None:
+            continue
+        ours = mine.get(on_disk.id)
+        if ours is None:
+            merged.append(on_disk)
+        elif on_disk.updated_at > ours.updated_at:
+            merged[merged.index(ours)] = on_disk
+    return merged
 
 
 def _ordered(conversations: list[StoredConversation]) -> list[StoredConversation]:
