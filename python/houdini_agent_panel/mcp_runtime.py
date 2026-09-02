@@ -98,25 +98,16 @@ def is_ephemeral(executable: str | os.PathLike[str]) -> bool:
     against it catches the actual mechanism rather than guessing at a
     filesystem property that doesn't reliably correlate with "temporary" at
     all (a real `/tmp` can be a persistent bind mount; a persistent-looking
-    path can still be under `%TEMP%`). Both sides are resolved before
-    comparing: macOS's `TMPDIR` and `/tmp` itself are symlinks
-    (`/private/var/folders/...`, `/private/tmp`), and comparing unresolved
-    paths would silently never match on the one platform the bug was found
-    on.
+    path can still be under `%TEMP%`). The comparison itself is `_within`,
+    which tries both the written and the resolved form — macOS's `TMPDIR`
+    and `/tmp` are symlinks into `/private`, so the resolved one is what
+    matches here.
     """
     try:
-        resolved = Path(executable).resolve()
-    except OSError:
-        resolved = Path(executable)
-    try:
-        temp_root = Path(tempfile.gettempdir()).resolve()
+        temp_root = Path(tempfile.gettempdir())
     except OSError:
         return False
-    try:
-        resolved.relative_to(temp_root)
-    except ValueError:
-        return False
-    return True
+    return _within(Path(executable), temp_root)
 
 
 def _uv_cache_root() -> Path | None:
@@ -157,21 +148,46 @@ def is_uv_cache(executable: str | os.PathLike[str]) -> bool:
     cache.
     """
     root = _uv_cache_root()
-    if root is None:
-        return False
-    try:
-        resolved = Path(executable).resolve()
-    except OSError:
-        resolved = Path(executable)
-    try:
-        root = root.resolve()
-    except OSError:
-        pass
-    try:
-        resolved.relative_to(root)
-    except ValueError:
-        return False
-    return True
+    return root is not None and _within(Path(executable), root)
+
+
+def _within(path: Path, root: Path) -> bool:
+    """Is `path` inside `root` — as written, or once symlinks are followed?
+
+    BOTH forms, because the two questions this module asks need opposite
+    ones and a single answer gets one of them wrong.
+
+    `is_ephemeral` needs the RESOLVED form: macOS's `TMPDIR` and `/tmp` are
+    symlinks into `/private`, so comparing what was written would never
+    match on the one platform that bug was found on.
+
+    `is_uv_cache` needs the form AS WRITTEN: the path uv hands out is
+    itself a symlink pointing OUT of the cache —
+
+        ~/.cache/uv/archive-v0/<hash>/bin/python
+          -> ~/.local/share/uv/python/cpython-3.12.12-.../bin/python3.12
+
+    — and it is the link, inside the cache, that `HAP_PYTHON` records and
+    that uv deletes when it prunes. Resolving first walks out of the cache
+    and answers "not in the cache", which is how the first version of that
+    fix shipped with four passing tests and did nothing at all: every test
+    used a path that did not exist, where `resolve()` changes nothing.
+    """
+    paths = {path}
+    roots = {root}
+    for source, target in ((path, paths), (root, roots)):
+        try:
+            target.add(source.resolve())
+        except OSError:
+            pass
+    for candidate in paths:
+        for base in roots:
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                continue
+            return True
+    return False
 
 
 def plain_python_candidates(hython: Path, pyver: tuple[int, int]) -> list[Path]:

@@ -218,3 +218,30 @@ def test_a_uv_cache_python_is_not_called_ephemeral(monkeypatch):
     monkeypatch.setenv("UV_CACHE_DIR", "/opt/uv-cache")
 
     assert mcp_runtime.is_ephemeral("/opt/uv-cache/archive-v0/SCnAZ/bin/python") is False
+
+
+def test_is_uv_cache_true_for_the_symlink_uv_actually_puts_there(tmp_path, monkeypatch):
+    """The path uv hands out is a SYMLINK out of the cache.
+
+    Measured on the owner's machine while verifying the first version of
+    this fix, which did nothing at all:
+
+        /Users/may/.cache/uv/archive-v0/<hash>/bin/python
+          -> /Users/may/.local/share/uv/python/cpython-3.12.12-.../bin/python3.12
+
+    `HAP_PYTHON` records the path as given — the one inside the cache, the
+    one that disappears when uv prunes — so that is the path this question
+    is about. Resolving it first walks straight out of the cache and
+    answers False, which is how a fix with four passing tests still shipped
+    doing nothing.
+    """
+    cache = tmp_path / "uv-cache"
+    (cache / "archive-v0" / "hash" / "bin").mkdir(parents=True)
+    real = tmp_path / "elsewhere" / "bin"
+    real.mkdir(parents=True)
+    (real / "python3.12").write_text("#!/bin/sh\n")
+    link = cache / "archive-v0" / "hash" / "bin" / "python"
+    link.symlink_to(real / "python3.12")
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+
+    assert mcp_runtime.is_uv_cache(link) is True
