@@ -24,7 +24,17 @@ sdist, or publishing under a different number, means an install that fails
 on the second step, after already having told the person everything's
 fine.
 
-## Order of operations
+## GitHub builds
+
+`.github/workflows/build.yml` runs tests and builds the wheel and sdist when a
+`v*` tag is pushed, or through `workflow_dispatch`. It validates the tag/version,
+package metadata and Houdini plugin files, then uploads `distributions` with
+SHA256 checksums. Download that artifact with `gh run download <run-id> -n
+distributions -D dist`; install and smoke-test that exact wheel locally before
+attaching it to the GitHub release and publishing the same files to PyPI.
+The workflow does not need the PyPI token and does not publish automatically.
+
+## Local fallback
 
 ```bash
 # 1. The version lives in one place — python/houdini_agent_panel/__init__.py and
