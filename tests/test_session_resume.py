@@ -193,9 +193,9 @@ def test_a_second_adopt_while_the_first_is_still_in_flight_does_not_call_load_tw
     widget.shutdown()
 
 
-def test_a_second_adopt_for_a_different_key_is_unaffected(qapp, monkeypatch):
-    """The guard is keyed by restored session id, not a blanket "one resume
-    at a time" — a genuinely different conversation must resume normally."""
+def test_a_second_adopt_for_a_different_key_waits_for_the_first(qapp, monkeypatch):
+    """A tab has one replay target. Another conversation must wait until
+    the first load resolves, otherwise its replay would overwrite that target."""
     a = _stored("Rotor pyro", "make dust", agent_session_id="agent-sess-a")
     b = _stored("Water sim", "splash more", agent_session_id="agent-sess-b")
     store.save([a, b])
@@ -214,6 +214,11 @@ def test_a_second_adopt_for_a_different_key_is_unaffected(qapp, monkeypatch):
     widget._adopt_or_resume(key_a)
     widget._adopt_or_resume(key_b)
 
+    assert calls == ["agent-sess-a"]
+    client.session_loaded.emit("agent-sess-a", sessions.SessionState(
+        "agent-sess-a", "Rotor pyro", "/tmp", 0.0,
+    ))
+    qapp.processEvents()
     assert calls == ["agent-sess-a", "agent-sess-b"]
     widget.shutdown()
 

@@ -198,8 +198,9 @@ Done since, no longer deferred:
   scenarios; NOT independently confirmed yet against a real
   `@agentclientprotocol/claude-agent-acp` process, which requires a live,
   signed-in agent this environment doesn't have) and a conversation with a
-  surviving `StoredConversation.agent_session_id`, reopening it and typing
-  resumes the SAME agent session — the agent replays its own history via
+  surviving `StoredConversation.agent_session_id`, selecting it in the drawer
+  resumes the SAME agent session without requiring a new prompt — the agent
+  replays its own history via
   `session_update` per the ACP spec, and the panel continues into it
   rather than opening a fresh, memory-less one. See `ui/panel.py::
   AgentPanel._adopt_or_resume` and `docs/architecture.md`'s `AcpClient.

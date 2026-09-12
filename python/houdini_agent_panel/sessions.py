@@ -225,6 +225,26 @@ _model_pools: dict[str, dict[str, TranscriptModel]] = {}
 #: saved twice, under two different ids.
 _conversation_id_pools: dict[str, dict[str, str]] = {}
 
+
+@dataclass(frozen=True)
+class HistorySnapshot:
+    """Last locally loaded/saved content, independent of newer on-disk writes."""
+
+    title: str
+    cwd: str
+    agent_id: str
+    agent_session_id: str
+    records_json: str
+
+
+# Shared just like the models: another tab's save advances the same baseline.
+_persistence_snapshots: dict[str, dict[str, HistorySnapshot]] = {}
+
+
+def persistence_snapshots(agent_id: str) -> dict[str, HistorySnapshot]:
+    return _persistence_snapshots.setdefault(agent_id, {})
+
+
 #: Which tab APPLIES this one agent id's updates, process-wide — the half
 #: of the problem `_model_pools` above left open. It made a session's
 #: transcript shared by every tab on the agent; what stayed on the tab was
@@ -289,8 +309,9 @@ def conversation_ids(agent_id: str) -> dict[str, str]:
 
 def reset_pool_for_tests() -> None:
     """Tests only: the singletons would otherwise survive between tests."""
-    global _pools, _model_pools, _conversation_id_pools, _writers
+    global _pools, _model_pools, _conversation_id_pools, _writers, _persistence_snapshots
     _pools = {}
     _model_pools = {}
     _conversation_id_pools = {}
     _writers = {}
+    _persistence_snapshots = {}
