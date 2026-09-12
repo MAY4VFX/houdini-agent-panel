@@ -276,3 +276,149 @@ def test_resuming_old_history_keeps_its_position_in_the_drawer(qapp, monkeypatch
     widget.shutdown()
     assert before == ['Newer chat', 'Older chat']
     assert after == before, 'opening history must not make it a newly created conversation'
+
+
+@pytest.mark.parametrize('reading_back', [False, True])
+def test_delayed_resume_keeps_the_visible_message_in_place(qapp, monkeypatch, reading_back):
+    conversation = _stored('History', 'question', agent_session_id='saved-session')
+    conversation.entries = [
+        {'kind': 'agent', 'id': f'agent:m{i}', 'text': f'Reply {i}\n' + 'some prose ' * 30}
+        for i in range(35)
+    ]
+    store.save([conversation])
+    widget = _make_widget()
+    qapp.processEvents()
+    widget.resize(640, 640)
+    widget.show()
+    client = panel_mod.shared_client('claude-acp')
+    client._agent_info = _info()
+    client._running = True
+    monkeypatch.setattr(client, 'load_session', lambda **kw: None)
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    widget._conversations.session_selected.emit(key)
+    for _ in range(5):
+        qapp.processEvents()
+    view = widget._transcript
+    bar = view.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum() // 2 if reading_back else bar.maximum())
+    for _ in range(3):
+        qapp.processEvents()
+    before = bar.value()
+    before_max = bar.maximum()
+    # A later event-loop turn, after the user has already started reading.
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 1000))
+    for _ in range(5):
+        qapp.processEvents()
+    after = bar.value()
+    after_max = bar.maximum()
+    current_conversation = widget._conversation_ids[widget._current_session_id]
+    widget.shutdown()
+    assert current_conversation == conversation.id
+    assert abs(after - before) <= 4, (before, after, before_max, after_max)
+
+
+def test_replayed_events_do_not_pull_the_reader_below_the_saved_reply(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from houdini_agent_panel.ui.qt import QtCore
+
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    model = widget._model(key)
+    for i in range(20):
+        model.apply_chunk(f'm{i}', f'Saved reply {i}: ' + 'long answer ' * 25)
+    widget.resize(640, 640)
+    widget.show()
+    widget._conversations.session_selected.emit(key)
+    for _ in range(5):
+        qapp.processEvents()
+    view = widget._transcript
+    last_row = view._rows['agent:m19']
+    before = last_row.mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
+    for i in range(8):
+        client.tool_call.emit('saved-session', SimpleNamespace(
+            tool_call_id=f'historical-tool-{i}', title=f'Earlier tool {i}',
+            kind='read', status='completed', content=[], locations=[],
+        ))
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    for _ in range(5):
+        qapp.processEvents()
+    after = view._rows['agent:m19'].mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
+    widget.shutdown()
+    assert abs(after - before) <= 4, (before, after)
+
+
+def test_history_refresh_has_an_explicit_status_without_moving_the_feed(qapp, monkeypatch):
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
+    view = widget._transcript
+    assert view.history_status_text() == 'Showing saved history · refreshing…'
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    assert view.history_status_text() == 'History refreshed'
+    widget.shutdown()
+
+
+def test_refresh_preserves_the_reading_anchor_when_an_earlier_reply_grows(qapp, monkeypatch):
+    from houdini_agent_panel.ui.qt import QtCore
+
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    key = panel_mod._RESTORED_PREFIX + conversation.id
+    for i in range(30):
+        widget._model(key).apply_chunk(f'm{i}', f'Reply {i}: ' + 'saved text ' * 30)
+    widget.resize(640, 640)
+    widget.show()
+    widget._conversations.session_selected.emit(key)
+    for _ in range(5):
+        qapp.processEvents()
+    view = widget._transcript
+    bar = view.verticalScrollBar()
+    bar.setValue(bar.maximum() // 2)
+    row_id, row = next((key, row) for key, row in view._rows.items()
+                       if row.y() + row.height() > bar.value())
+    before = row.mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
+    old_text = widget._model(key).chunk_entry('m0').text
+    client.message_chunk.emit('saved-session', 'm0', old_text + '\n' + 'extra recovered text ' * 300)
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    for _ in range(8):
+        qapp.processEvents()
+    after = view._rows[row_id].mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
+    widget.shutdown()
+    assert abs(before - after) <= 4, (row_id, before, after)
+
+
+def test_refresh_does_not_clear_a_text_selection(qapp, monkeypatch):
+    from houdini_agent_panel.ui.qt import QtGui, QtWidgets
+
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
+    prose = widget._transcript.findChild(QtWidgets.QTextBrowser)
+    cursor = prose.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(8, QtGui.QTextCursor.KeepAnchor)
+    prose.setTextCursor(cursor)
+    selected = prose.textCursor().selectedText()
+    assert selected
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    assert widget._transcript.findChild(QtWidgets.QTextBrowser) is prose
+    assert prose.textCursor().selectedText() == selected
+    widget.shutdown()
+
+
+def test_leaving_the_conversation_clears_its_refresh_status(qapp, monkeypatch):
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget._pool.add(sessions.SessionState('other', 'Other', '/tmp', 0))
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
+    widget._conversations.session_selected.emit('other')
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    assert widget._current_session_id == 'other'
+    assert widget._transcript.history_status_text() == ''
+    widget.shutdown()
+
+
+def test_disconnect_clears_the_refresh_in_progress_status(qapp, monkeypatch):
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
+    widget._on_disconnected('lost connection')
+    text = widget._transcript.history_status_text()
+    widget.shutdown()
+    assert text == 'Showing saved history · agent disconnected'

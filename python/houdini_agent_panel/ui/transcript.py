@@ -91,7 +91,7 @@ class TranscriptView(QtWidgets.QScrollArea):
 
         self._content = QtWidgets.QWidget(self)
         self._layout = QtWidgets.QVBoxLayout(self._content)
-        self._layout.setContentsMargins(14, 39, 14, 8)
+        self._layout.setContentsMargins(14, 15, 14, 8)
         self._layout.setSpacing(14)
         # Activity rows stay in the chronology: user -> Worked for… -> answer.
         self._layout.addStretch(1)
@@ -141,11 +141,86 @@ class TranscriptView(QtWidgets.QScrollArea):
         # however many layout passes it takes to settle.
         bar.rangeChanged.connect(self._on_scroll_range_changed)
 
+        # A permanent 24px status band: feedback neither covers messages nor
+        # resizes the viewport when it appears/disappears. Together with the
+        # content's 15px top margin it keeps the original 39px first-row inset.
+        self.setViewportMargins(0, 24, 0, 0)
+        self._history_status = QtWidgets.QLabel(self)
+        self._history_status.setFixedHeight(24)
+        self._history_status.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self._history_status.setStyleSheet(
+            "QLabel { background: palette(window); color: palette(text); padding: 3px 6px; }"
+        )
+        self._history_status.hide()
+        self._reading_anchor: tuple[str, int] | None = None
+        self._anchor_geometry: tuple | None = None
+        self._anchor_scroll_value = 0
+        self._anchor_timer = QtCore.QTimer(self)
+        self._anchor_timer.setSingleShot(True)
+        self._anchor_timer.timeout.connect(self._restore_reading_anchor)
+        bar.sliderPressed.connect(self._cancel_reading_anchor)
+        bar.actionTriggered.connect(self._cancel_reading_anchor)
+        self._history_status_timer = QtCore.QTimer(self)
+        self._history_status_timer.setSingleShot(True)
+        self._history_status_timer.timeout.connect(lambda: self.show_history_status(""))
+
     # --- public API ----------------------------------------------------
 
     def set_model(self, model: TranscriptModel) -> None:
+        if model is self._model:
+            self.sync_model()
+            return
+        self.show_history_status("")
+        self._cancel_reading_anchor()
+        self._follow_bottom = True
         self._model = model
         self.refresh(None)
+
+    def sync_model(self) -> None:
+        """Patch the same conversation without destroying its rows or selection."""
+        if self._model is None:
+            return
+        self._remember_reading_anchor()
+        entries = self._model.entries()
+        visible_ids = {e.id for e in entries if e.kind != "permission"}
+        if set(self._rows) - visible_ids:
+            # Explicit deletions may split an existing tool group.
+            self.refresh(None)
+            return
+        for entry in entries:
+            self._refresh_one(entry.id)
+        self._schedule_scroll()
+
+    def preserve_reading_position(self) -> None:
+        # Resume is not a new live turn. Extra history stays below the reader
+        # instead of pulling them away from the saved message already on screen.
+        self._follow_bottom = False
+        self._remember_reading_anchor()
+
+    def follow_latest(self) -> None:
+        self._cancel_reading_anchor()
+        self._follow_bottom = True
+        self._scroll_timer.start(0)
+
+    def show_history_status(self, text: str, *, finished: bool = False) -> None:
+        self._history_status_timer.stop()
+        self._history_status.setText(text)
+        self._history_status.setVisible(bool(text))
+        self._position_history_status()
+        if finished:
+            self._history_status_timer.start(2500)
+
+    def history_status_text(self) -> str:
+        return self._history_status.text()
+
+    def _position_history_status(self) -> None:
+        label = getattr(self, "_history_status", None)
+        if label is None:
+            return
+        label.setMaximumWidth(max(1, self.viewport().width() - 2 * self._gutter))
+        label.adjustSize()
+        label.move(self._gutter, 0)
+        label.raise_()
 
     def reset_thinking_after_tool(self) -> None:
         for row in reversed(tuple(self._rows.values())):
@@ -156,18 +231,63 @@ class TranscriptView(QtWidgets.QScrollArea):
     def refresh(self, entry_id: str | None = None) -> None:
         if self._model is None:
             return
+        self._remember_reading_anchor()
         if entry_id is None:
             self._rebuild_all()
         else:
             self._refresh_one(entry_id)
-        if self._follow_bottom:
-            # Deferred, not immediate: growing content (a streamed chunk
-            # resizing its `QTextBrowser`) only widens the scrollbar's range
-            # on a LATER layout pass — scrolling to `maximum()` right now
-            # would still snap to the range from before this update, one
-            # chunk behind. `start(0)` queues the actual scroll for the next
-            # event-loop turn, after that layout has caught up.
+        self._schedule_scroll()
+
+    def _schedule_scroll(self) -> None:
+        if self._reading_anchor is not None:
+            self._anchor_timer.start(0)
+        elif self._follow_bottom:
             self._scroll_timer.start(0)
+
+    def _remember_reading_anchor(self) -> None:
+        if self._follow_bottom or self._reading_anchor is not None or self._scroll_timer.isActive():
+            return
+        value = self.verticalScrollBar().value()
+        for entry_id, row in self._rows.items():
+            if row.y() + row.height() > value:
+                self._reading_anchor = (entry_id, value - row.y())
+                self._anchor_scroll_value = value
+                self._anchor_geometry = None
+                return
+
+    def _restore_reading_anchor(self) -> None:
+        if self._reading_anchor is None:
+            return
+        entry_id, offset = self._reading_anchor
+        row = self._rows.get(entry_id)
+        if row is None:
+            self._cancel_reading_anchor()
+            return
+        self._layout.activate()
+        bar = self.verticalScrollBar()
+        geometry = (row.y(), row.height(), bar.maximum())
+        self._scrolling_ourselves = True
+        try:
+            bar.setValue(row.y() + offset)
+            self._anchor_scroll_value = bar.value()
+        finally:
+            self._scrolling_ourselves = False
+        # QTextDocument sizes can settle after the first layout pass. Wait
+        # for stable geometry, not an arbitrary millisecond grace period.
+        if geometry != self._anchor_geometry:
+            self._anchor_geometry = geometry
+            self._anchor_timer.start(0)
+        else:
+            self._cancel_reading_anchor()
+
+    def _cancel_reading_anchor(self, *_args) -> None:
+        self._anchor_timer.stop()
+        self._reading_anchor = None
+        self._anchor_geometry = None
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._cancel_reading_anchor()
+        super().wheelEvent(event)
 
     # --- rebuilding -------------------------------------------------------
 
@@ -333,6 +453,11 @@ class TranscriptView(QtWidgets.QScrollArea):
         if self._scrolling_ourselves:
             return
         bar = self.verticalScrollBar()
+        if self._reading_anchor is not None:
+            clamped = min(max(self._anchor_scroll_value, bar.minimum()), bar.maximum())
+            if value == clamped:
+                return  # Layout clamped the value; it was not a scroll gesture.
+            self._cancel_reading_anchor()
         self._follow_bottom = value >= bar.maximum() - _BOTTOM_EPSILON
 
     def _on_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
@@ -341,8 +466,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         This is what makes following survive a slow layout: the range widens
         one pass later than the content arrives, and this fires then.
         """
-        if self._follow_bottom:
-            self._scroll_timer.start(0)
+        self._schedule_scroll()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -354,6 +478,7 @@ class TranscriptView(QtWidgets.QScrollArea):
             self.gutter_changed.emit(gutter)
         margins = self._layout.contentsMargins()
         self._layout.setContentsMargins(gutter, margins.top(), gutter, margins.bottom())
+        self._position_history_status()
 
     def current_gutter(self) -> int:
         """The empty margin left of the reading column at the current width.
@@ -703,6 +828,9 @@ class _ProseBlock(QtWidgets.QTextBrowser):
         self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
 
     def set_text(self, text: str) -> None:
+        if getattr(self, "_source_text", None) == text:
+            return
+        self._source_text = text
         if _HAS_MARKDOWN:
             self.setMarkdown(text)
         else:  # pragma: no cover — present on every target Qt (5.14+, facts/houdini.md §3)
@@ -746,7 +874,11 @@ class _CodeBlock(QtWidgets.QPlainTextEdit):
         self.set_code(code)
 
     def set_code(self, code: str) -> None:
-        self.setPlainText(code.rstrip("\n"))
+        code = code.rstrip("\n")
+        if getattr(self, "_source_code", None) == code:
+            return
+        self._source_code = code
+        self.setPlainText(code)
         self._sync_height()
 
     def _sync_height(self) -> None:

@@ -1719,6 +1719,8 @@ class AgentPanel(QtWidgets.QWidget):
         self._offer_notice(ann.id, lambda a=ann: self._notice.show_notice(a))
 
     def _on_disconnected(self, reason: str) -> None:
+        if self._loading_session_id is not None and self._is_current(self._adopting_restored):
+            self._transcript.show_history_status("Showing saved history · agent disconnected")
         self._loading_session_id = None
         self._adopting_restored = None
         self._deferred_restored = None
@@ -2004,6 +2006,10 @@ class AgentPanel(QtWidgets.QWidget):
         client = shared_client(self._agent_id)
         self._adopting_restored = restored_key
         self._loading_session_id = agent_session_id
+        model = self._model(restored_key)
+        for panel in _live_panels_for(self._agent_id):
+            if panel._transcript._model is model:
+                panel._transcript.show_history_status("Showing saved history · refreshing…")
         if any(
             p is not self and p._loading_session_id == agent_session_id
             for p in _live_panels_for(self._agent_id)
@@ -2070,6 +2076,10 @@ class AgentPanel(QtWidgets.QWidget):
         if session_id != self._loading_session_id or self._adopting_restored is None:
             return
         _log.info("session/load resolved: agent=%s session=%s", self._agent_id, session_id)
+        model = self._model(session_id)
+        for panel in _live_panels_for(self._agent_id):
+            if panel._transcript._model is model:
+                panel._transcript.preserve_reading_position()
         self._composer.finish_boot()
         adopted = self._adopting_restored
         was_visible = self._is_current(adopted) or self._is_current(session_id)
@@ -2104,8 +2114,11 @@ class AgentPanel(QtWidgets.QWidget):
             self._sync_agent_auth_row(info)
         if was_visible:
             self._set_current_session(session_id)
-            self._show_session(session_id)
             self._show_page(self.PAGE_TRANSCRIPT)
+        for panel in _live_panels_for(self._agent_id):
+            if panel._transcript._model is model:
+                panel._transcript.sync_model()
+                panel._transcript.show_history_status("History refreshed", finished=True)
         self._complete_pending_auth_switch()
         if self._pending_prompt and self._pending_prompt_session_id in (None, adopted):
             pending, self._pending_prompt = self._pending_prompt, None
@@ -2154,6 +2167,9 @@ class AgentPanel(QtWidgets.QWidget):
             restored_key = self._adopting_restored
             self._adopting_restored = None
             self._composer.finish_boot()
+            if self._is_current(restored_key):
+                self._transcript.preserve_reading_position()
+                self._transcript.show_history_status("Showing saved history · refresh failed")
             entry = self._model(restored_key).append_error(
                 f"Could not refresh this conversation ({message}). Showing saved history."
             )
@@ -2496,6 +2512,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._unwire_pool()
         # Whatever this tab was waiting on belonged to the agent it's
         # leaving — the new one has sent nothing yet.
+        self._transcript.show_history_status("")
         self._loading_session_id = None
         self._adopting_restored = None
         self._deferred_restored = None
@@ -2590,27 +2607,34 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _on_history_selected(self, session_id: str) -> None:
+        was_current = self._is_current(session_id)
         self._refresh_stored_history(session_id)
         self._set_current_session(session_id)
-        # Selecting the same row again also needs to draw refreshed disk data.
         if self._is_current(session_id):
-            self._show_session(session_id)
+            if was_current:
+                self._show_session(session_id)
             self._load_visible_history()
 
     def _load_visible_history(self) -> None:
         current = self._current_session()
+        if current is None or not current.session_id.startswith(_RESTORED_PREFIX):
+            return
+        if self._adopting_restored == current.session_id:
+            return
         client = shared_client(self._agent_id)
         info = client.agent_info()
-        if (
-            current is None or not current.session_id.startswith(_RESTORED_PREFIX)
-            or self._adopting_restored is not None or not client.is_running()
-            or info is None or not info.supports_load_session
-        ):
+        if not client.is_running() or info is None:
+            self._transcript.show_history_status("Showing saved history · agent offline")
+            return
+        if self._adopting_restored is not None:
+            self._transcript.show_history_status("Showing saved history · waiting to refresh…")
             return
         conversation_id = self._conversation_ids.get(current.session_id)
         stored = next((c for c in self._restored if c.id == conversation_id), None)
-        if stored is not None and stored.agent_session_id:
+        if info.supports_load_session and stored is not None and stored.agent_session_id:
             self._adopt_or_resume(current.session_id)
+        else:
+            self._transcript.show_history_status("Showing saved history")
 
     def _set_current_session(self, session_id: str) -> None:
         """Make `session_id` the one on screen in THIS tab, and only this one.
@@ -2740,7 +2764,6 @@ class AgentPanel(QtWidgets.QWidget):
         self._render_timer.stop()
         state = self._pool.get(session_id)
         self._transcript.set_model(self._model(session_id))
-        self._transcript.refresh(None)
         if state is not None:
             self._composer.set_busy(state.busy)
             self._composer.set_usage(state.usage)
@@ -3338,6 +3361,8 @@ class AgentPanel(QtWidgets.QWidget):
         if state is not None:
             state.busy = True
         if self._is_current(session_id):
+            self._transcript.show_history_status("")
+            self._transcript.follow_latest()
             self._composer.set_busy(True)
             self._composer.trigger_buddy()
             self._update_escape_shortcut_enabled()
