@@ -34,6 +34,23 @@ distributions -D dist`; install and smoke-test that exact wheel locally before
 attaching it to the GitHub release and publishing the same files to PyPI.
 The workflow does not need the PyPI token and does not publish automatically.
 
+## Native history-transition check
+
+After installing the GitHub-built wheel, run this for each installed Houdini's
+`hython` (from the repository root):
+
+```sh
+/path/to/hython tests/smoke_history_transition.py --expected-version X.Y.Z
+```
+
+Use `--source` before packaging to test the checkout instead. The script uses
+isolated temporary data and a simulated agent with a one-second replay delay;
+it never sends a real model/API request. It checks conversation identity, list
+order, selected text, recovered content and every painted frame's reading
+position. It prints the results and paths to temporary before/after screenshots.
+This native check is necessary: Houdini's Qt 6.5/6.8 showed a wrong intermediate
+frame even while final-position assertions and the stock PySide6 tests passed.
+
 ## Local fallback
 
 ```bash

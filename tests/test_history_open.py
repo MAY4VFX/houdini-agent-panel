@@ -359,7 +359,7 @@ def test_history_refresh_has_an_explicit_status_without_moving_the_feed(qapp, mo
 
 
 def test_refresh_preserves_the_reading_anchor_when_an_earlier_reply_grows(qapp, monkeypatch):
-    from houdini_agent_panel.ui.qt import QtCore
+    from houdini_agent_panel.ui.qt import QtCore, QtWidgets
 
     widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
     key = panel_mod._RESTORED_PREFIX + conversation.id
@@ -376,14 +376,28 @@ def test_refresh_preserves_the_reading_anchor_when_an_earlier_reply_grows(qapp, 
     row_id, row = next((key, row) for key, row in view._rows.items()
                        if row.y() + row.height() > bar.value())
     before = row.mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
+    paint_positions = []
+    prose = row.findChild(QtWidgets.QTextBrowser)
+
+    class PaintSpy(QtCore.QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QtCore.QEvent.Paint and obj in (row, prose.viewport(), view.viewport()):
+                paint_positions.append(row.mapTo(view.viewport(), QtCore.QPoint()).y())
+            return False
+
+    spy = PaintSpy()
+    qapp.installEventFilter(spy)
     old_text = widget._model(key).chunk_entry('m0').text
     client.message_chunk.emit('saved-session', 'm0', old_text + '\n' + 'extra recovered text ' * 300)
     client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
     for _ in range(8):
         qapp.processEvents()
+    qapp.removeEventFilter(spy)
     after = view._rows[row_id].mapTo(view.viewport(), QtCore.QPoint(0, 0)).y()
     widget.shutdown()
     assert abs(before - after) <= 4, (row_id, before, after)
+    assert paint_positions, "the test must observe actual painted frames"
+    assert all(abs(y - before) <= 4 for y in paint_positions), (before, paint_positions)
 
 
 def test_refresh_does_not_clear_a_text_selection(qapp, monkeypatch):

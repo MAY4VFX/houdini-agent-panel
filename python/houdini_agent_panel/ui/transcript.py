@@ -155,6 +155,7 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._reading_anchor: tuple[str, int] | None = None
         self._anchor_geometry: tuple | None = None
         self._anchor_scroll_value = 0
+        self._anchor_suspended_updates = False
         self._anchor_timer = QtCore.QTimer(self)
         self._anchor_timer.setSingleShot(True)
         self._anchor_timer.timeout.connect(self._restore_reading_anchor)
@@ -253,6 +254,12 @@ class TranscriptView(QtWidgets.QScrollArea):
                 self._reading_anchor = (entry_id, value - row.y())
                 self._anchor_scroll_value = value
                 self._anchor_geometry = None
+                # Layout can expose an intermediate, shifted frame before the
+                # zero timer restores the anchor. Keep the current backing image
+                # until geometry is stable, not just the final scroll value.
+                self._anchor_suspended_updates = self.viewport().updatesEnabled()
+                if self._anchor_suspended_updates:
+                    self.viewport().setUpdatesEnabled(False)
                 return
 
     def _restore_reading_anchor(self) -> None:
@@ -284,6 +291,9 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._anchor_timer.stop()
         self._reading_anchor = None
         self._anchor_geometry = None
+        if self._anchor_suspended_updates:
+            self._anchor_suspended_updates = False
+            self.viewport().setUpdatesEnabled(True)
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
         self._cancel_reading_anchor()
