@@ -97,32 +97,14 @@ def _is_agent_signed_in(
     auth_info: "settings_module.AgentAuthInfo | None",
     current_settings: "settings_module.Settings",
 ) -> bool:
-    """Same guess `AgentPanel._is_signed_in` makes for the tab's own
-    current agent (a completed turn, cached persistently — see that
-    method's own docstring for why an open session is not evidence),
-    generalised to any agent id a Settings row might show, connected or
-    not: `signed_in_agents` is a plain settings list, not scoped to one
-    tab. `auth_info.methods` must be non-empty too — an agent with NO
-    advertised methods (claude-acp) has no account to switch between, so
-    it keeps saying "Sign in…" regardless of what a completed turn alone
-    might otherwise suggest (docs/facts/acp-sdk.md §11: claude-acp opens
-    a session happily with zero auth methods advertised at all).
+    """Authentication evidence is independent of advertised login/logout methods.
 
-    That "no methods → no account" rule is narrowed, not overridden, by
-    one exception: `settings_module.agent_owns_token` — an agent whose
-    credential the PANEL captured and stores itself (currently claude-acp
-    only, §21/§27). For that one case a completed turn is no longer the
-    only evidence available: the token sitting in `agent_oauth_tokens`
-    already IS the account, so "no advertised methods" no longer means
-    "nothing to be signed into." Reported live: a real, verified sign-in
-    (token captured whole, liveness check `valid`, the agent answering
-    prompts) still showed "Sign in…" on this row, because claude-acp's
-    empty `authMethods` made the rule above absolute where it should only
-    have applied to agents the panel has no OTHER way of knowing about.
+    Claude can complete authenticated turns through its CLI credentials while
+    exposing no ACP authentication controls. Do not offer another Sign in then.
     """
     if settings_module.agent_owns_token(agent_id, current_settings):
         return True
-    return agent_id in current_settings.signed_in_agents and bool(auth_info and auth_info.methods)
+    return agent_id in current_settings.signed_in_agents
 
 
 def _can_sign_out_agent(
@@ -205,74 +187,13 @@ def _clear_layout(layout: "QtWidgets.QLayout") -> None:
 
 
 class _AgentRow(QtWidgets.QWidget):
-    """One row: a registry agent, or a "custom agent" entry.
+    """Agent installation controls and the known authentication state.
 
-    Two lines for any installed (or custom) agent: the usual name/state/
-    install-update-remove line, and a second, INDENTED line beneath it —
-    Sign in, Sign out (if the agent implements logout) and whatever the
-    last attempt did.
-
-    "Sign in…" is offered from the moment the row exists, not only once
-    the panel happens to have connected to that agent and cached what
-    `initialize` said. Reported for real: the button only appeared after
-    the artist had clicked through every agent once, which reads as a
-    Settings screen that grows controls as a reward for poking around.
-    There is no way to know an agent's methods before `initialize` — so
-    this does not pretend to; clicking it is what starts that agent and
-    opens its sign-in screen once it connects
-    (`AgentPanel._on_agent_row_sign_in`/`_complete_pending_auth_switch`).
-    Cached methods, when present, only REFINE the row afterward — adding
-    Sign out (once `supports_logout` is actually known) and the last
-    attempt's result — they are never what makes Sign in exist.
-
-    Not gated on whether the panel currently believes this one is signed
-    in or out, either — that belief is a guess (`AgentPanel._is_signed_
-    in`, docs/facts/acp-sdk.md §11), and gating reachability on a guess is
-    exactly how someone got stranded (issue #33). SOME control is always
-    reachable here regardless of the guess; only WHICH one is drawn
-    follows it.
-
-    One control, not two. This used to draw "Sign in…"/"Switch account…"
-    next to "Sign out" whenever both were possible, and the owner pushed
-    back on that, twice: first that offering "Sign in…" beside "Sign out"
-    states something false about his current state (signed into Codex,
-    seeing both, asking a fair question — why is it still offering to
-    sign in?); then, once that became "Switch account…", that this reads
-    as a riddle too — switch to WHAT? He settled the reasoning himself:
-    these CLIs only ever have one active login. Moving to a different
-    method means signing OUT of the current one first — there is no
-    second account to switch to while already signed in, so there is
-    nothing for a "switch" affordance to do. One control, matching what
-    is actually known, is the whole model:
-      - `is_signed_in` true AND `can_sign_out` true (a completed turn
-        happened, and the agent actually implements logout): "Sign out"
-        is the only control. Clicking it lands back on this same row's
-        "Sign in…", automatically — `do_logout` re-raises `auth_required`
-        with the same methods `initialize` gave it, which is exactly the
-        signal an ordinary "not signed in yet" state produces
-        (`AgentPanel._on_logout_requested`/`_on_auth_required`).
-      - Anything else — no evidence yet, or evidence but no logout
-        capability to act on (an agent can advertise auth methods without
-        implementing `logout`) — falls back to "Sign in…". This is also
-        the escape route if a "Sign out" click ever could not actually do
-        anything (agent not running — `AgentPanel._on_logout_requested`
-        checks for exactly that before calling out, since the alternative
-        is a click that visibly does nothing forever).
-    `is_signed_in` is never true for an agent with no methods at all
-    (claude-acp) on a completed turn alone: there is no account to switch
-    between, so a turn by itself keeps this row saying "Sign in…" (see
-    `_is_agent_signed_in`'s own docstring for that guard). Narrowed, not
-    reopened, by one exception: an agent whose credential the PANEL
-    captures and stores itself (`settings.agent_oauth_tokens`, currently
-    claude-acp only — docs/facts/acp-sdk.md §21/§27) has a second, stronger
-    kind of evidence available — the token sitting in settings already IS
-    the account, not a guess about one. For that case `is_signed_in` AND
-    `can_sign_out` both follow `settings_module.agent_owns_token` instead
-    (`_is_agent_signed_in`/`_can_sign_out_agent`), and clicking "Sign out"
-    does not go through `do_logout`/`auth_required` at all — there is no
-    protocol logout to call — it forgets the stored token and restarts the
-    process instead (`AgentPanel._on_agent_row_sign_out`/`_forget_agent_
-    oauth_token`).
+    An authenticated agent gets Sign out only when the panel can actually
+    perform logout (through ACP or a token the panel owns). External CLI
+    authentication without logout support is shown as Signed in. Unknown or
+    signed-out state gets Sign in. Capability flags do not override evidence
+    from a successful authenticated turn.
     """
 
     install_requested = Signal()
@@ -376,26 +297,26 @@ class _AgentRow(QtWidgets.QWidget):
             # left edge either. Reported live: flush with the row, Sign
             # in/out read as belonging to the row BELOW rather than this
             # one — the indent is what ties it back to the name above it.
-            # Sign in is unconditional (see this class's own docstring for
-            # why); Sign out (only once `supports_logout` is actually
-            # known) and the last attempt's result are the only parts that
-            # wait on a cache — reachable here at any time, for any
-            # installed agent, whether or not it's the one this tab is
-            # connected to right now (`AgentPanel._on_agent_row_sign_in`/
-            # `_sign_out` handle switching to it first when it isn't).
+            # Authentication state and available actions are independent;
+            # successful CLI authentication does not imply ACP logout support.
             auth_row = QtWidgets.QHBoxLayout()
             auth_row.setContentsMargins(_AUTH_ROW_INDENT, 0, 0, 0)
             auth_row.setSpacing(6)
             # One control, matching what is actually known (see this
             # class's own docstring for the owner's reasoning): "Sign out"
             # only once there is BOTH real evidence of a signed-in account
-            # AND a logout to actually invoke; "Sign in…" for everything
-            # else, which is also what a "Sign out" click falls back to if
-            # it could not act (`AgentPanel._on_logout_requested`).
+            # AND a logout to actually invoke. Otherwise show Signed in
+            # for known authentication, or Sign in when it is not known.
             if is_signed_in and can_sign_out:
                 sign_out_btn = _compact_button("Sign out", self)
                 sign_out_btn.clicked.connect(self.sign_out_requested.emit)
                 auth_row.addWidget(sign_out_btn)
+            elif is_signed_in:
+                signed_in = QtWidgets.QLabel("Signed in", self)
+                signed_in.setToolTip("Authentication is managed by the agent's CLI.")
+                auth_row.addWidget(signed_in)
+                if auth_status == "Signed in.":
+                    auth_status = ""
             else:
                 sign_in_btn = _compact_button("Sign in…", self)
                 sign_in_btn.clicked.connect(self.sign_in_requested.emit)

@@ -631,17 +631,10 @@ def test_the_button_still_says_sign_in_when_not_yet_proven_signed_in(qapp, monke
     assert "Sign out" not in buttons
 
 
-def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qapp, monkeypatch):
-    """claude-acp's own shape (docs/facts/acp-sdk.md §11): it advertises
-    NO auth methods at all and still opens a session happily, so a
-    completed turn alone would otherwise mark it "signed in" with nothing
-    real behind that — there is no account to switch between, so the
-    label must not follow `signed_in_agents` here regardless of what it
-    says. Team lead's own wording: "it has no account to switch". This
-    part of the shape survived the owner's "one button, not two" change
-    (`_AgentRow`'s own docstring) unchanged — it was never in the
-    "Switch account…"/"Sign out" pair to begin with, since `can_sign_out`
-    is also always false with no methods to log out of."""
+def test_authenticated_claude_without_logout_does_not_offer_sign_in(qapp, monkeypatch):
+    """A completed Claude turn proves authentication even without ACP logout.
+    The owner's settings contained claude-acp in signed_in_agents while the
+    row still offered Sign in. Auth capability is not login state."""
     monkeypatch.setattr("houdini_agent_panel.registry.platform_key", lambda: "fake-platform")
     entry = AgentEntry(
         id="claude-acp",
@@ -661,7 +654,8 @@ def test_an_agent_with_no_auth_methods_keeps_sign_in_even_if_marked_signed_in(qa
     row = view._rows_by_id["claude-acp"]
 
     buttons = {b.text() for b in row.findChildren(QtWidgets.QPushButton)}
-    assert "Sign in…" in buttons
+    assert "Sign in…" not in buttons
+    assert "Signed in" in {w.text() for w in row.findChildren(QtWidgets.QLabel)}
     assert "Switch account…" not in buttons
     assert "Sign out" not in buttons
 
