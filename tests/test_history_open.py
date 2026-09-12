@@ -246,3 +246,33 @@ def test_interrupted_history_load_does_not_block_future_loads(qapp, monkeypatch,
     widget.shutdown()
     assert pending_load is None
     assert adopting is None
+
+
+@pytest.mark.parametrize('completion', ['load', 'new_session_fallback'])
+def test_resuming_old_history_keeps_its_position_in_the_drawer(qapp, monkeypatch, completion):
+    old = _stored('Older chat', 'old question', agent_session_id='old-session')
+    old.created_at = old.updated_at = 100.0
+    newer = _stored('Newer chat', 'new question', agent_session_id='newer-session')
+    newer.created_at = newer.updated_at = 200.0
+    store.save([old, newer])
+    widget = _make_widget()
+    qapp.processEvents()
+    client = panel_mod.shared_client('claude-acp')
+    client._agent_info = _info(supports_load_session=completion == 'load')
+    client._running = True
+    monkeypatch.setattr(client, 'load_session', lambda **kw: None)
+    monkeypatch.setattr(client, 'new_session', lambda **kw: None)
+    key = panel_mod._RESTORED_PREFIX + old.id
+    before = [button.toolTip() for button in widget._conversations._buttons.values()]
+    widget._conversations._buttons[key].click()
+    if completion == 'new_session_fallback':
+        # The same identity transplant is used when an agent cannot resume.
+        widget._adopt_or_resume(key)
+    resumed = sessions.SessionState('old-session', 'New chat', '/tmp', 1000.0)
+    signal = client.session_loaded if completion == 'load' else client.session_started
+    signal.emit('old-session', resumed)
+    qapp.processEvents()
+    after = [button.toolTip() for button in widget._conversations._buttons.values()]
+    widget.shutdown()
+    assert before == ['Newer chat', 'Older chat']
+    assert after == before, 'opening history must not make it a newly created conversation'

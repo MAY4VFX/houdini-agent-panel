@@ -1884,6 +1884,7 @@ class AgentPanel(QtWidgets.QWidget):
             restored_state = self._pool.get(adopted)
             if restored_state is not None:
                 state.title = restored_state.title
+                state.created_at = restored_state.created_at
                 # Anything still queued when this conversation was written
                 # to disk (`_restore_conversations` rebuilds it from the
                 # `queued`-kind entries) rides along the same way the
@@ -2083,6 +2084,9 @@ class AgentPanel(QtWidgets.QWidget):
         restored_state = self._pool.get(adopted)
         if restored_state is not None:
             state.title = restored_state.title
+            # The transport was just loaded; the conversation was not just
+            # created. The drawer sorts on this date, so keep its position.
+            state.created_at = restored_state.created_at
             state.queued = restored_state.queued
         import uuid as _uuid
 
