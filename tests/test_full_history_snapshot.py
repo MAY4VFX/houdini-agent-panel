@@ -61,3 +61,16 @@ def test_zero_duration_activity_remains_zero_after_restart():
     model = TranscriptModel()
     model.load_records([{'kind': 'activity', 'id': 'a', 'text': '', 'elapsed': 0.0}])
     assert model.to_records()[0]['elapsed'] == 0.0
+
+
+def test_replay_of_an_old_identical_prompt_does_not_acknowledge_a_new_queued_message():
+    model = TranscriptModel()
+    old = model.append_user('again')
+    model.apply_chunk('answer', 'done')
+    model.queue_message('pending', 'again')
+    model.replace_from_replay([
+        _text('user_message_chunk', 'old-user-id', 'again'),
+        _text('agent_message_chunk', 'answer', 'done'),
+    ])
+    assert [(e.id, e.kind) for e in model.entries()] == [
+        (old.id, 'user'), ('agent:answer', 'agent'), ('pending', 'queued')]

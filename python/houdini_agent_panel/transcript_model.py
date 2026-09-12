@@ -639,9 +639,10 @@ class TranscriptModel:
         # tail of a long conversation, while the agent replays the whole thing.
         candidates: dict[tuple[str, str], list[Entry]] = {}
         for entry in self._entries:
-            if entry.kind in ("user", "queued", "agent", "thought"):
-                kind = "user" if entry.kind == "queued" else entry.kind
-                candidates.setdefault((kind, entry.text.strip()), []).append(entry)
+            if entry.kind in ("user", "agent", "thought"):
+                # Matching old text is not an acknowledgement of a newly
+                # queued send, even when both prompts happen to be identical.
+                candidates.setdefault((entry.kind, entry.text.strip()), []).append(entry)
         matched = {e.id for e in fresh._entries}
         anchors = {e.id: e.id for e in fresh._entries}
         for entry in reversed(fresh._entries):
