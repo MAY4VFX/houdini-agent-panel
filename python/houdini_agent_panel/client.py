@@ -572,6 +572,10 @@ class AcpWorker(QtCore.QThread):
         #: incident and a real replay-timing race both look identical from
         #: the log alone (docs/facts/acp-sdk.md §32).
         self._load_update_counts: dict[str, dict[str, int]] = {}
+        self._history_replays: dict[str, list] = {}
+        self._received_updates: dict[str, int] = {}
+        self._handled_updates: dict[str, int] = {}
+        self._history_progress: dict[str, asyncio.Event] = {}
 
     # --- loop plumbing ------------------------------------------------
 
@@ -624,11 +628,48 @@ class AcpWorker(QtCore.QThread):
         # callback.
         pass
 
+    def _observe_stream(self, event: Any) -> None:
+        # This hook runs in receive order BEFORE the SDK queues notifications.
+        # Responses bypass that queue, so merely awaiting load_session is not
+        # a notification barrier. Record counts only, never log message content.
+        if getattr(event.direction, "value", event.direction) != "incoming":
+            return
+        message = event.message
+        if message.get("method") == "session/update":
+            session_id = (message.get("params") or {}).get("sessionId")
+            if session_id:
+                self._received_updates[session_id] = self._received_updates.get(session_id, 0) + 1
+
+    async def _drain_history(self, session_id: str) -> None:
+        target = self._received_updates.get(session_id, 0)
+        progress = self._history_progress[session_id]
+        while self._handled_updates.get(session_id, 0) < target:
+            progress.clear()
+            await progress.wait()
+
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
+        try:
+            self._apply_session_update(session_id, update)
+        finally:
+            self._handled_updates[session_id] = self._handled_updates.get(session_id, 0) + 1
+            progress = self._history_progress.get(session_id)
+            if progress is not None:
+                progress.set()
+
+    def _apply_session_update(self, session_id: str, update: Any) -> None:
+        if self._closing:
+            return
         kind = update.session_update
         counts = self._load_update_counts.get(session_id)
         if counts is not None:
             counts[kind] = counts.get(kind, 0) + 1
+        replay = self._history_replays.get(session_id)
+        if replay is not None and kind in (
+            "user_message_chunk", "agent_message_chunk", "agent_thought_chunk",
+            "tool_call", "tool_call_update", "plan",
+        ):
+            replay.append(update)
+            return
         if kind == "agent_message_chunk":
             text = _chunk_text(update.content)
             self.message_chunk.emit(session_id, update.message_id or "", text)
@@ -787,7 +828,9 @@ class AcpWorker(QtCore.QThread):
             self._reader = reader
             self._writer = writer
             self._stderr_reader = stderr_reader
-            conn = acp.connect_to_agent(self, writer, reader)
+            self._received_updates.clear()
+            self._handled_updates.clear()
+            conn = acp.connect_to_agent(self, writer, reader, observers=[self._observe_stream])
             self._conn = conn
 
             self._exited = self.loop.create_future()
@@ -887,6 +930,8 @@ class AcpWorker(QtCore.QThread):
         then wait for/kill the process. We carry it here by hand — when
         `spawn_agent_process` went away, so did its automatic call to it."""
         self._closing = True
+        self._history_replays.clear()
+        self._history_progress.clear()
         await self._cancel_and_await(self._stderr_task, self._exit_watch_task)
         self._stderr_task = None
         self._exit_watch_task = None
@@ -1049,31 +1094,12 @@ class AcpWorker(QtCore.QThread):
         mcp_servers: list[dict],
         session_meta: dict[str, Any] | None = None,
     ) -> None:
-        """`session/load` — the protocol's own way to resume a session, as
-        opposed to `conversations_store.py`'s read-only replay off disk.
+        """Load a session and deliver one complete, ordered history snapshot.
 
-        Per the ACP spec (agentclientprotocol.com/protocol/session-setup,
-        confirmed by reading it, not assumed): the agent MUST replay the
-        entire conversation as ordinary `session_update` notifications
-        BEFORE answering this request. That guarantee does not survive
-        this codebase's own worker-thread -> Qt-cross-thread-signal path
-        to the main thread — measured live, docs/facts/acp-sdk.md §32:
-        replay updates for the SAME real conversation landed entirely
-        before this call's own response in one run, and 40% of them
-        AFTER it in another. `ui/panel.py::_on_session_loaded` no longer
-        assumes replay is done by the time it runs — it keeps the local,
-        already-complete transcript instead of rebuilding from replay —
-        so this method does not need to wait for anything here either;
-        replay still lands, through the ordinary per-kind signals, into
-        whichever model is current for `session_id` whenever it arrives.
-
-        `session_meta` — same `claude_session_meta(...)` `do_new_session`
-        gets, and needed here too: `claude-agent-acp`'s own `loadSession`
-        forwards `params._meta` into the identical session-creation path
-        `session/new` uses (`getOrCreateSession` -> `createSession`,
-        confirmed by reading the adapter, docs/facts/acp-sdk.md §30) — a
-        resumed session must not silently regain the host's MCP servers or
-        skills just because it came back through this call instead.
+        The SDK receives responses before its queued notification callbacks
+        necessarily run. A receive/handled counter barrier drains exactly the
+        updates already on the wire, without a timing-based grace period.
+        Only then can the UI reveal the complete tail in one operation.
         """
         if self._conn is None:
             self.session_load_failed.emit(session_id, "no connection to the agent")
@@ -1085,21 +1111,40 @@ class AcpWorker(QtCore.QThread):
         # a load actually carried, and, from the two summaries below, how
         # much of it straddled the response itself.
         self._load_update_counts[session_id] = {}
+        self._history_replays[session_id] = []
+        self._history_progress[session_id] = asyncio.Event()
         try:
             servers = _build_mcp_servers(mcp_servers)
             response = await self._conn.load_session(
                 cwd=cwd, session_id=session_id, mcp_servers=servers, **(session_meta or {})
             )
+            await asyncio.wait_for(self._drain_history(session_id), timeout=10.0)
+        except asyncio.CancelledError:
+            self._history_replays.pop(session_id, None)
+            self._history_progress.pop(session_id, None)
+            self._load_update_counts.pop(session_id, None)
+            raise
         except acp.RequestError as exc:
+            # Discard a failed load's partial replay only after its queued
+            # notifications have been consumed, so none become live updates.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._drain_history(session_id), timeout=10.0)
             _log.warning("session/load failed: session=%s error=%s", session_id, exc)
             self._load_update_counts.pop(session_id, None)
+            self._history_replays.pop(session_id, None)
+            self._history_progress.pop(session_id, None)
+            if self._closing:
+                return
             if not self._emit_if_auth_required(exc):
                 self.session_load_failed.emit(session_id, str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             _log.warning("session/load failed: session=%s error=%r", session_id, exc)
             self._load_update_counts.pop(session_id, None)
-            self.session_load_failed.emit(session_id, str(exc))
+            self._history_replays.pop(session_id, None)
+            self._history_progress.pop(session_id, None)
+            if not self._closing:
+                self.session_load_failed.emit(session_id, str(exc) or type(exc).__name__)
             return
         counts_at_response = dict(self._load_update_counts.get(session_id, {}))
         _log.info(
@@ -1127,7 +1172,9 @@ class AcpWorker(QtCore.QThread):
             current_mode_id=current_mode_id,
             available_modes=available_modes,
             available_commands=[],
+            replay_updates=self._history_replays.pop(session_id, []),
         )
+        self._history_progress.pop(session_id, None)
         self.session_loaded.emit(session_id, state)
         options = (
             _config_options_from(getattr(response, "config_options", None))

@@ -82,8 +82,9 @@ def test_open_refreshes_newer_local_user_and_agent_messages_even_offline(qapp):
     assert texts == ['previous question', 'latest question', 'latest answer']
 
 
-def _connected_history(qapp, monkeypatch):
+def _connected_history(qapp, monkeypatch, *, complete=False):
     conversation = _stored('History', 'previous question', agent_session_id='saved-session')
+    conversation.transcript_version = 2 if complete else 1
     store.save([conversation])
     widget = _make_widget()
     qapp.processEvents()
@@ -285,6 +286,7 @@ def test_delayed_resume_keeps_the_visible_message_in_place(qapp, monkeypatch, re
         {'kind': 'agent', 'id': f'agent:m{i}', 'text': f'Reply {i}\n' + 'some prose ' * 30}
         for i in range(35)
     ]
+    conversation.transcript_version = 2
     store.save([conversation])
     widget = _make_widget()
     qapp.processEvents()
@@ -322,7 +324,7 @@ def test_replayed_events_do_not_pull_the_reader_below_the_saved_reply(qapp, monk
     from types import SimpleNamespace
     from houdini_agent_panel.ui.qt import QtCore
 
-    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch, complete=True)
     key = panel_mod._RESTORED_PREFIX + conversation.id
     model = widget._model(key)
     for i in range(20):
@@ -352,16 +354,18 @@ def test_history_refresh_has_an_explicit_status_without_moving_the_feed(qapp, mo
     widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
     widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
     view = widget._transcript
-    assert view.history_status_text() == 'Showing saved history · refreshing…'
+    assert view.history_status_text() == 'Loading conversation…'
+    assert view.is_history_loading()
     client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
-    assert view.history_status_text() == 'History refreshed'
+    assert view.history_status_text() == ''
+    assert not view.is_history_loading()
     widget.shutdown()
 
 
 def test_refresh_preserves_the_reading_anchor_when_an_earlier_reply_grows(qapp, monkeypatch):
     from houdini_agent_panel.ui.qt import QtCore, QtWidgets
 
-    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch, complete=True)
     key = panel_mod._RESTORED_PREFIX + conversation.id
     for i in range(30):
         widget._model(key).apply_chunk(f'm{i}', f'Reply {i}: ' + 'saved text ' * 30)
@@ -403,7 +407,7 @@ def test_refresh_preserves_the_reading_anchor_when_an_earlier_reply_grows(qapp, 
 def test_refresh_does_not_clear_a_text_selection(qapp, monkeypatch):
     from houdini_agent_panel.ui.qt import QtGui, QtWidgets
 
-    widget, client, conversation, calls = _connected_history(qapp, monkeypatch)
+    widget, client, conversation, calls = _connected_history(qapp, monkeypatch, complete=True)
     widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + conversation.id)
     prose = widget._transcript.findChild(QtWidgets.QTextBrowser)
     cursor = prose.textCursor()
@@ -436,3 +440,73 @@ def test_disconnect_clears_the_refresh_in_progress_status(qapp, monkeypatch):
     text = widget._transcript.history_status_text()
     widget.shutdown()
     assert text == 'Showing saved history · agent disconnected'
+
+
+def test_legacy_history_loads_once_then_its_complete_tail_opens_from_disk(qapp, monkeypatch, tmp_path):
+    from tests.test_client import _connect, _pump_until
+
+    old = _stored('History', 'question', agent_session_id='saved-session')
+    old.entries.append({'kind': 'agent', 'id': 'agent:answer', 'text': 'Final answer'})
+    store.save([old])
+    widget = _make_widget()
+    qapp.processEvents()
+    widget.resize(640, 640)
+    widget.show()
+    monkeypatch.setattr(widget, '_maybe_offer_sign_in', lambda info: None)
+    client = panel_mod.shared_client('claude-acp')
+    _connect(qapp, client, 'load-full', tmp_path)
+    _pump_until(qapp, lambda: any(not s.session_id.startswith(panel_mod._RESTORED_PREFIX)
+                                for s in widget._pool.all()), 'initial empty session')
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + old.id)
+    assert widget._transcript.is_history_loading()
+    assert widget._transcript._content.isHidden(), 'do not first paint the legacy partial tail'
+    _pump_until(qapp, lambda: widget._current_session_id == 'saved-session'
+                and not widget._transcript._revealing_history, 'complete tail')
+    model = widget._model('saved-session')
+    expected = ['user', 'agent', 'thought', 'tool', 'agent']
+    assert [e.kind for e in model.entries()] == expected
+    assert model.entries()[-1].text == 'Final answer'
+    bar = widget._transcript.verticalScrollBar()
+    assert bar.maximum() > 0
+    assert bar.value() == bar.maximum()
+    widget._persist_conversations()
+    saved = next(c for c in store.load() if c.id == old.id)
+    assert saved.transcript_version == 2
+    assert [e['kind'] for e in saved.entries] == expected
+    widget.shutdown()
+    panel_mod.reset_shared_state_for_tests()
+
+    # A fresh Houdini/panel process can now draw the entire tail immediately,
+    # even while the agent's own resume remains pending in the background.
+    again = _make_widget()
+    qapp.processEvents()
+    again.resize(640, 640)
+    again.show()
+    client = panel_mod.shared_client('claude-acp')
+    client._agent_info = _info()
+    client._running = True
+    monkeypatch.setattr(client, 'load_session', lambda **kw: None)
+    again._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + old.id)
+    for _ in range(8):
+        qapp.processEvents()
+    assert not again._transcript.is_history_loading()
+    assert again._transcript._content.isVisible()
+    assert [e.kind for e in again._transcript._model.entries()] == expected
+    bar = again._transcript.verticalScrollBar()
+    assert bar.value() == bar.maximum()
+    again.shutdown()
+
+
+def test_switching_between_legacy_chats_never_reveals_the_partial_cache(qapp, monkeypatch):
+    widget, client, old, calls = _connected_history(qapp, monkeypatch)
+    other = _stored('Other history', 'other question', agent_session_id='other-session')
+    store.save([*store.load(), other])
+    widget._restore_conversations()
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + old.id)
+    widget._conversations.session_selected.emit(panel_mod._RESTORED_PREFIX + other.id)
+    hidden_while_waiting = widget._transcript.is_history_loading()
+    client.session_loaded.emit('saved-session', sessions.SessionState('saved-session', '', '/tmp', 0))
+    still_hidden = widget._transcript.is_history_loading()
+    widget.shutdown()
+    assert hidden_while_waiting, 'do not show the second legacy cache while the first load finishes'
+    assert still_hidden

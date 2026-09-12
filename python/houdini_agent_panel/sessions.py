@@ -98,6 +98,8 @@ class SessionState:
     #: conversation like everything else here: switching to a different one
     #: must never show or send another conversation's still-typed words.
     queued: list[QueuedMessage] = field(default_factory=list)
+    # One complete protocol replay, consumed atomically by the panel.
+    replay_updates: list | None = None
 
 
 class SessionPool(QtCore.QObject):

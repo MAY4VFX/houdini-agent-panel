@@ -243,14 +243,7 @@ def test_connect_reports_load_session_support(qapp, make_client, tmp_path):
 
 
 def test_load_session_replays_history_under_the_same_session_id(qapp, make_client, tmp_path):
-    """Per the ACP spec (agentclientprotocol.com/protocol/session-setup),
-    the agent replays the whole conversation as `session_update`
-    notifications BEFORE answering `session/load` — the fake agent's
-    ``load`` scenario does exactly that. Those notifications go through the
-    ordinary `session_update` handler, same as a live turn, so a plain
-    `message_chunk` recorder is enough to prove the replay arrived, keyed
-    by the SAME session id that was asked for (not a new one — unlike
-    `session/new`, `session/load` never mints one)."""
+    """The complete replay travels with the loaded state, under the same ID."""
     client = make_client()
     _connect(qapp, client, "load", tmp_path)
     session_id = _new_session(qapp, client, tmp_path)
@@ -265,26 +258,15 @@ def test_load_session_replays_history_under_the_same_session_id(qapp, make_clien
     assert not load_failed.calls
     assert loaded.calls[0][0] == session_id
     assert loaded.calls[0][1].session_id == session_id
-    replayed = [c for c in messages.calls if c[0] == session_id]
-    assert replayed and "rotor pyro" in replayed[0][2]
+    assert not messages.calls
+    replayed = loaded.calls[0][1].replay_updates
+    assert replayed and "rotor pyro" in replayed[0].content.text
 
 
 def test_load_session_replay_lands_before_session_loaded_even_when_slow(
     qapp, make_client, tmp_path
 ):
-    """Pins `fake_agent.py`'s own ``load-slow`` scenario, not a general
-    guarantee — it was written believing this WAS general (docs/facts/
-    acp-sdk.md §32's own earlier account, since corrected): a real
-    `claude-agent-acp`, driven through this same `AcpClient`, measured
-    replay landing AFTER `session_loaded` had already fired — 0-of-10 and
-    6-of-10 updates in two runs of the identical real conversation,
-    non-deterministic. `fake_agent.py`'s sequential `await self._client.
-    session_update(...)` calls, one at a time before answering, happen to
-    preserve order regardless — a property of THIS test double's own
-    implementation, not the protocol. `ui/panel.py::_on_session_loaded`
-    no longer depends on either — see §32's full account and `ui/agents.py`
-    's/`ui/panel.py`'s own kept-alive-model design for why this ordering
-    stopped being load-bearing."""
+    """Even slow replay is buffered on the worker, never streamed into the UI."""
     client = make_client()
     _connect(qapp, client, "load-slow", tmp_path)
     session_id = _new_session(qapp, client, tmp_path)
@@ -295,8 +277,9 @@ def test_load_session_replay_lands_before_session_loaded_even_when_slow(
     client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
     _pump_until(qapp, lambda: loaded.calls, "session/load to answer", timeout=5.0)
 
-    replayed = [c for c in messages.calls if c[0] == session_id]
-    assert [c[2] for c in replayed] == [
+    assert not messages.calls
+    replayed = loaded.calls[0][1].replay_updates
+    assert [u.content.text for u in replayed] == [
         "earlier: rotor pyro setup",
         "earlier: second reply",
     ], "both replay chunks must have already landed by the time session_loaded fires"
@@ -458,24 +441,12 @@ def test_load_session_forwards_claude_session_meta_to_the_wire(qapp, make_client
     _connect(qapp, client, "load", tmp_path)
     session_id = _new_session(qapp, client, tmp_path)
 
-    messages = _Recorder(client.message_chunk)
+    loaded = _Recorder(client.session_loaded)
     meta = claude_session_meta("claude-acp", Settings(claude_show_host_skills=False))
     client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[], session_meta=meta)
-    # Waits for the meta chunk itself, not `session_loaded` — the two are
-    # separate queued cross-thread signals for separate JSON-RPC messages
-    # (a notification, then the response), and waiting on the wrong one
-    # raced: `session_loaded` could observably fire before this chunk's own
-    # queued delivery reached the recorder, even though the agent sends
-    # both notifications before ever answering (per spec, and per fake_
-    # agent.py's own two sequential `await session_update` calls).
-    _pump_until(
-        qapp,
-        lambda: any(c[0] == session_id and "meta=" in c[2] for c in messages.calls),
-        "the meta replay chunk to arrive",
-    )
-
-    replayed = [c for c in messages.calls if c[0] == session_id and "meta=" in c[2]]
-    assert '"settingSources": ["project", "local"]' in replayed[0][2]
+    _pump_until(qapp, lambda: loaded.calls, "the complete replay to arrive")
+    replayed = [u.content.text for u in loaded.calls[0][1].replay_updates if "meta=" in u.content.text]
+    assert '\"settingSources\": [\"project\", \"local\"]' in replayed[0]
 
 
 # --- auth_required -----------------------------------------------------------
@@ -919,3 +890,37 @@ def test_client_works_under_a_haio_like_event_loop_policy(
     )
 
     assert finished.calls[0] == (session_id, "end_turn")
+
+
+def test_history_is_delivered_as_one_snapshot_not_a_second_live_stream(qapp, make_client, tmp_path):
+    client = make_client()
+    _connect(qapp, client, 'load-slow', tmp_path)
+    session_id = _new_session(qapp, client, tmp_path)
+    messages = _Recorder(client.message_chunk)
+    loaded = _Recorder(client.session_loaded)
+    client.load_session(session_id=session_id, cwd=str(tmp_path), mcp_servers=[])
+    _pump_until(qapp, lambda: loaded.calls, 'history snapshot', timeout=5.0)
+    assert not messages.calls, 'replay must not visibly stream into an already displayed cache'
+    updates = loaded.calls[0][1].replay_updates
+    assert [u.content.text for u in updates] == ['earlier: rotor pyro setup', 'earlier: second reply']
+
+
+def test_load_waits_for_notifications_received_before_the_response(qapp, make_client, tmp_path, monkeypatch):
+    from houdini_agent_panel.client import AcpWorker
+    original = AcpWorker.session_update
+
+    async def delayed(self, *args, **kwargs):
+        await asyncio.sleep(0.05)
+        await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AcpWorker, 'session_update', delayed)
+    client = make_client()
+    _connect(qapp, client, 'load', tmp_path)
+    sid = _new_session(qapp, client, tmp_path)
+    loaded = _Recorder(client.session_loaded)
+    messages = _Recorder(client.message_chunk)
+    client.load_session(session_id=sid, cwd=str(tmp_path), mcp_servers=[],
+                        session_meta=claude_session_meta('claude-acp', Settings(claude_show_host_skills=False)))
+    _pump_until(qapp, lambda: loaded.calls, 'complete replay including delayed dispatch')
+    assert len(loaded.calls[0][1].replay_updates) == 2
+    assert not messages.calls

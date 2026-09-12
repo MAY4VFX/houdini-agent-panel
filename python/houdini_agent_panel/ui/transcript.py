@@ -156,6 +156,9 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._anchor_geometry: tuple | None = None
         self._anchor_scroll_value = 0
         self._anchor_suspended_updates = False
+        self._history_loading = False
+        self._revealing_history = False
+        self._bottom_geometry = None
         self._anchor_timer = QtCore.QTimer(self)
         self._anchor_timer.setSingleShot(True)
         self._anchor_timer.timeout.connect(self._restore_reading_anchor)
@@ -173,6 +176,9 @@ class TranscriptView(QtWidgets.QScrollArea):
             return
         self.show_history_status("")
         self._cancel_reading_anchor()
+        self._history_loading = self._revealing_history = False
+        self.viewport().setUpdatesEnabled(True)
+        self._content.show()
         self._follow_bottom = True
         self._model = model
         self.refresh(None)
@@ -190,7 +196,36 @@ class TranscriptView(QtWidgets.QScrollArea):
             return
         for entry in entries:
             self._refresh_one(entry.id)
+        position, seen = 0, set()
+        for entry in entries:
+            row = self._rows.get(entry.id)
+            if row is None or id(row) in seen:
+                continue
+            seen.add(id(row))
+            if self._layout.indexOf(row) != position:
+                self._layout.removeWidget(row)
+                self._layout.insertWidget(position, row)
+            position += 1
         self._schedule_scroll()
+
+    def hide_incomplete_history(self) -> None:
+        self._cancel_reading_anchor()
+        self._scroll_timer.stop()
+        self._history_loading = True
+        self._content.hide()
+        self.show_history_status("Loading conversation…")
+
+    def is_history_loading(self) -> bool:
+        return self._history_loading
+
+    def reveal_history_tail(self) -> None:
+        self._cancel_reading_anchor()
+        self._history_loading = False
+        self._revealing_history = True
+        self._bottom_geometry = None
+        self.viewport().setUpdatesEnabled(False)
+        self._content.show()
+        self.follow_latest()
 
     def preserve_reading_position(self) -> None:
         # Resume is not a new live turn. Extra history stays below the reader
@@ -240,16 +275,19 @@ class TranscriptView(QtWidgets.QScrollArea):
         self._schedule_scroll()
 
     def _schedule_scroll(self) -> None:
+        if self._history_loading:
+            return
         if self._reading_anchor is not None:
             self._anchor_timer.start(0)
         elif self._follow_bottom:
             self._scroll_timer.start(0)
 
     def _remember_reading_anchor(self) -> None:
-        if self._follow_bottom or self._reading_anchor is not None or self._scroll_timer.isActive():
+        if (self._history_loading or self._revealing_history or self._follow_bottom
+                or self._reading_anchor is not None or self._scroll_timer.isActive()):
             return
         value = self.verticalScrollBar().value()
-        for entry_id, row in self._rows.items():
+        for entry_id, row in sorted(self._rows.items(), key=lambda item: item[1].y()):
             if row.y() + row.height() > value:
                 self._reading_anchor = (entry_id, value - row.y())
                 self._anchor_scroll_value = value
@@ -451,12 +489,24 @@ class TranscriptView(QtWidgets.QScrollArea):
     # --- auto-scroll -------------------------------------------------------
 
     def _scroll_to_bottom(self) -> None:
+        if self._history_loading:
+            return
+        if self._revealing_history:
+            self._layout.activate()
         bar = self.verticalScrollBar()
         self._scrolling_ourselves = True
         try:
             bar.setValue(bar.maximum())
         finally:
             self._scrolling_ourselves = False
+        if self._revealing_history:
+            geometry = (bar.maximum(), self.viewport().height(), self._content.height())
+            if geometry != self._bottom_geometry:
+                self._bottom_geometry = geometry
+                self._scroll_timer.start(0)
+            else:
+                self._revealing_history = False
+                self.viewport().setUpdatesEnabled(True)
 
     def _on_scroll_value_changed(self, value: int) -> None:
         """Only the artist's own scrolling decides whether we follow."""

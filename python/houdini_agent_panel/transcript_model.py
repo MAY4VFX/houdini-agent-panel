@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from .logbook import logger as _logbook_logger
@@ -158,6 +158,18 @@ def _attachment_record(block: dict) -> dict:
         else:
             record["text"] = text
     return record
+
+
+def _snapshot_content(value: Any) -> Any:
+    """Keep readable tool output, not embedded binary payloads or unlimited logs."""
+    if isinstance(value, dict):
+        return {key: _snapshot_content(item) for key, item in value.items()
+                if key not in ("data", "blob")}
+    if isinstance(value, list):
+        return [_snapshot_content(item) for item in value[:100]]
+    if isinstance(value, str) and len(value) > 20_000:
+        return value[:20_000] + "\n[Saved output truncated]"
+    return value
 
 
 #: Marks an entry built from chunks that carried no `messageId`, so a
@@ -523,76 +535,155 @@ class TranscriptModel:
 
     # --- persistence ------------------------------------------------------
     #
-    # Only text survives a restart. Tool calls, plans and permission requests
-    # are live state belonging to an agent process that no longer exists —
-    # restoring a permission prompt nobody can answer, or a tool call frozen
-    # at "in progress", would be worse than not restoring it. What the artist
-    # reads back is the conversation, which is the part that was theirs.
+    # Readable history survives a restart, including reasoning and tool rows.
+    # Permission requests remain live-only; restoring their buttons would
+    # invent an action for a request that no longer exists.
 
     def to_records(self) -> list[dict]:
-        # "queued" is in here on purpose: a message the artist typed while
-        # busy is exactly as much theirs as one they typed while idle, and
-        # a hang that loses it is the same bug as the one that motivated
-        # persisting a prompt the instant it exists at all (`ui/panel.py::
-        # _persist_conversations_soon`). An attachment survives as its
-        # stripped record (`_attachment_record`: kind and name, never an
-        # image's payload — a large-paste attachment is the one exception,
-        # its own words up to a cap, see that function's own docstring),
-        # not necessarily as the block needed to actually resend it;
-        # `ui/panel.py::_restore_conversations` rebuilds a plain-text-only
-        # block from this for whatever was still queued.
+        """Persist the readable timeline; permission requests are never replayable."""
         records: list[dict] = []
         for entry in self._entries:
-            if entry.kind not in ("user", "agent", "error", "note", "queued"):
-                continue
-            if not entry.text and not entry.attachments:
+            if entry.kind == "permission":
                 continue
             record = {"kind": entry.kind, "id": entry.id, "text": entry.text}
             if entry.attachments:
                 record["attachments"] = [_attachment_record(a) for a in entry.attachments]
-            records.append(record)
+            if entry.tool is not None:
+                record["tool"] = _snapshot_content(asdict(entry.tool))
+            if entry.plan:
+                record["plan"] = [asdict(item) for item in entry.plan]
+            if entry.activity is not None:
+                end = (entry.activity.finished_at if entry.activity.finished_at is not None
+                       else time.monotonic())
+                record["elapsed"] = max(0.0, end - entry.activity.started_at)
+            if entry.text or entry.attachments or entry.tool or entry.plan or entry.activity:
+                records.append(record)
         return records
 
     def load_records(self, records: list[dict]) -> None:
-        self._entries = [
-            Entry(
+        self._entries = []
+        self._by_message_id.clear()
+        self._by_tool_call_id.clear()
+        self._active_activity = None
+        for record in records or []:
+            if not isinstance(record, dict) or record.get("kind") == "permission":
+                continue
+            entry = Entry(
                 kind=record.get("kind", "agent"),
                 id=str(record.get("id") or uuid.uuid4()),
                 text=str(record.get("text") or ""),
-                attachments=[
-                    a for a in (record.get("attachments") or []) if isinstance(a, dict)
-                ],
+                attachments=[a for a in (record.get("attachments") or []) if isinstance(a, dict)],
             )
-            for record in records or []
-            if isinstance(record, dict) and (record.get("text") or record.get("attachments"))
-        ]
-        self._by_message_id.clear()
-        self._by_tool_call_id.clear()
-        # Rebuilt, not left empty: a restored conversation resumed later
-        # via `session/load` (`ui/panel.py::_on_session_loaded`, which
-        # keeps this model instead of discarding it — docs/facts/
-        # acp-sdk.md §32) needs `apply_chunk`'s own `(kind, message_id)`
-        # dedup to recognise a redelivered agent message as one it already
-        # has, same as it already does for a model that stayed alive
-        # in-process. `apply_chunk`'s own id shape (`f"{kind}:{message_
-        # id}"`, this class's one and only writer of that format) is
-        # reversed here — `_UNKEYED_PREFIX` ids (no message_id at all,
-        # e.g. Grok) are deliberately excluded, same as `apply_chunk`
-        # itself never keys those. Tool calls are not included: `to_
-        # records` never persists them at all (its own docstring — "live
-        # state belonging to an agent process that no longer exists"), so
-        # a restored model never has one to collide with in the first
-        # place; whatever tool activity shows up after a resume comes
-        # from replay alone, by construction.
+            tool = record.get("tool")
+            if entry.kind == "tool" and isinstance(tool, dict):
+                entry.tool = ToolCallView(
+                    tool_call_id=str(tool.get("tool_call_id") or entry.id),
+                    title=str(tool.get("title") or ""), kind=str(tool.get("kind") or "other"),
+                    status=str(tool.get("status") or "completed"),
+                    content=list(tool.get("content") or []), locations=list(tool.get("locations") or []),
+                )
+                self._by_tool_call_id[entry.tool.tool_call_id] = entry
+            if entry.kind == "plan":
+                entry.plan = [PlanEntry(str(p.get("content", "")), str(p.get("priority", "medium")),
+                                        str(p.get("status", "pending")))
+                              for p in (record.get("plan") or []) if isinstance(p, dict)]
+            if entry.kind == "activity" and "elapsed" in record:
+                entry.activity = ActivityView(0.0, max(0.0, float(record["elapsed"])))
+            if not (entry.text or entry.attachments or entry.tool or entry.plan or entry.activity):
+                continue
+            self._entries.append(entry)
+            if entry.kind in ("agent", "thought"):
+                prefix = f"{entry.kind}:"
+                if entry.id.startswith(prefix) and not entry.id.startswith(_UNKEYED_PREFIX):
+                    self._by_message_id[(entry.kind, entry.id[len(prefix):])] = entry
+
+    def replace_from_replay(self, updates: list) -> None:
+        """Build the agent's chronology once, retaining local messages/annotations.
+
+        Replaying tools into a text-only cache appended old actions AFTER the
+        final answer. Building the replay separately also prevents a saved full
+        reply from having its original streaming deltas appended a second time.
+        """
+        fresh = TranscriptModel()
+        user_chunks: dict[str, Entry] = {}
+        for update in updates:
+            kind = getattr(update, "session_update", "")
+            content = getattr(update, "content", None)
+            text = getattr(content, "text", "") if getattr(content, "type", "") == "text" else ""
+            message_id = getattr(update, "message_id", None) or ""
+            if kind == "user_message_chunk":
+                attachments = [] if getattr(content, "type", "") == "text" else [_plain(content)]
+                entry = user_chunks.get(message_id) if message_id else (
+                    fresh._entries[-1] if fresh._entries and fresh._entries[-1].kind == "user" else None
+                )
+                if entry is None:
+                    entry = fresh.append_user(text, attachments)
+                    if message_id:
+                        entry.id = "user:" + message_id
+                        user_chunks[message_id] = entry
+                else:
+                    entry.text += text
+                    entry.attachments.extend(attachments)
+            elif kind in ("agent_message_chunk", "agent_thought_chunk"):
+                fresh.apply_chunk(message_id, text, thought=kind == "agent_thought_chunk")
+            elif kind == "tool_call":
+                fresh.apply_tool_call(update)
+            elif kind == "tool_call_update":
+                fresh.apply_tool_update(update)
+            elif kind == "plan":
+                fresh.apply_plan(update.entries)
+
+        if not fresh._entries:
+            return
+        # Match repeated prompts from the END: the cache may contain only the
+        # tail of a long conversation, while the agent replays the whole thing.
+        candidates: dict[tuple[str, str], list[Entry]] = {}
         for entry in self._entries:
-            if entry.kind not in ("agent", "thought"):
+            if entry.kind in ("user", "queued", "agent", "thought"):
+                kind = "user" if entry.kind == "queued" else entry.kind
+                candidates.setdefault((kind, entry.text.strip()), []).append(entry)
+        matched = {e.id for e in fresh._entries}
+        anchors = {e.id: e.id for e in fresh._entries}
+        for entry in reversed(fresh._entries):
+            if entry.kind not in ("user", "agent", "thought"):
                 continue
-            prefix = f"{entry.kind}:"
-            if not entry.id.startswith(prefix) or entry.id.startswith(_UNKEYED_PREFIX):
-                continue
-            message_id = entry.id[len(prefix):]
-            if message_id:
-                self._by_message_id[(entry.kind, message_id)] = entry
+            matches = candidates.get((entry.kind, entry.text.strip()), [])
+            if matches:
+                local = matches.pop()
+                matched.add(local.id)
+                if entry.kind == "user":
+                    entry.id = local.id
+                    if local.attachments:
+                        entry.attachments = local.attachments
+                anchors[local.id] = entry.id
+
+        # Keep local-only annotations, unsent messages and cached content the
+        # agent omitted. Shared IDs anchor them without reordering replay events.
+        pending: list[Entry] = []
+        saw_anchor = False
+        for local in self._entries:
+            if local.id in anchors:
+                saw_anchor = True
+                if pending:
+                    index = next(i for i, e in enumerate(fresh._entries) if e.id == anchors[local.id])
+                    fresh._entries[index:index] = pending
+                    pending = []
+            elif local.id not in matched and local.kind != "permission":
+                pending.append(local)
+        if not saw_anchor and not any(e.kind == "user" for e in fresh._entries):
+            fresh._entries[0:0] = pending
+        else:
+            fresh._entries.extend(pending)
+        self._entries = fresh._entries
+        self._by_message_id = fresh._by_message_id
+        self._by_tool_call_id = fresh._by_tool_call_id
+        self._active_activity = None
+        # Include retained cached entries in future live-update dedup too.
+        for entry in self._entries:
+            if entry.tool is not None:
+                self._by_tool_call_id[entry.tool.tool_call_id] = entry
+            if entry.kind in ("agent", "thought") and entry.id.startswith(entry.kind + ":"):
+                self._by_message_id[(entry.kind, entry.id.split(":", 1)[1])] = entry
 
     def entries(self) -> list[Entry]:
         return list(self._entries)

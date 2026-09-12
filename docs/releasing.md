@@ -48,6 +48,10 @@ isolated temporary data and a simulated agent with a one-second replay delay;
 it never sends a real model/API request. It checks conversation identity, list
 order, selected text, recovered content and every painted frame's reading
 position. It prints the results and paths to temporary before/after screenshots.
+Use `--mode warm`, `--mode cold` or `--mode reading` to isolate a case;
+the default runs all three. The cold case verifies the first visible frame is
+the completed tail, while warm cache and reading cases verify stability.
+
 This native check is necessary: Houdini's Qt 6.5/6.8 showed a wrong intermediate
 frame even while final-position assertions and the stock PySide6 tests passed.
 

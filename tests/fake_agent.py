@@ -54,6 +54,7 @@ from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
     AgentThoughtChunk,
+    UserMessageChunk,
     AuthMethodAgent,
     CurrentModeUpdate,
     Implementation,
@@ -128,7 +129,7 @@ class FakeAgent:
         return acp.InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
-                load_session=SCENARIO in ("load", "load-fail", "load-slow"),
+                load_session=SCENARIO in ("load", "load-fail", "load-slow", "load-full"),
                 prompt_capabilities=prompt_caps,
                 auth=auth_caps,
             ),
@@ -192,6 +193,17 @@ class FakeAgent:
         if SCENARIO == "load-fail":
             raise RequestError.resource_not_found(session_id)
         self._sessions[session_id] = None
+        if SCENARIO == "load-full":
+            for update in (
+                UserMessageChunk(session_update="user_message_chunk", message_id="u1", content=text_block("question")),
+                _message_chunk("Earlier reply. " * 500, "earlier"),
+                _thought_chunk("Checking the scene", "thought"),
+                start_tool_call("history-tool", "Inspect scene", kind="read", status="completed"),
+                _message_chunk("Final answer", "answer"),
+            ):
+                await self._client.session_update(session_id=session_id, update=update)
+                await asyncio.sleep(0.08)
+            return acp.LoadSessionResponse()
         if SCENARIO == "load-slow":
             await asyncio.sleep(0.2)
             await self._client.session_update(

@@ -1719,8 +1719,11 @@ class AgentPanel(QtWidgets.QWidget):
         self._offer_notice(ann.id, lambda a=ann: self._notice.show_notice(a))
 
     def _on_disconnected(self, reason: str) -> None:
-        if self._loading_session_id is not None and self._is_current(self._adopting_restored):
+        if (self._transcript.is_history_loading()
+                or self._loading_session_id is not None and self._is_current(self._adopting_restored)):
             self._transcript.show_history_status("Showing saved history · agent disconnected")
+            if self._transcript.is_history_loading():
+                self._transcript.reveal_history_tail()
         self._loading_session_id = None
         self._adopting_restored = None
         self._deferred_restored = None
@@ -1771,6 +1774,13 @@ class AgentPanel(QtWidgets.QWidget):
         self._pending_logout_agent = None
 
     def _on_auth_required(self, methods: list) -> None:
+        if self._loading_session_id is not None:
+            if self._transcript.is_history_loading():
+                self._transcript.show_history_status("Sign in to load full history")
+                self._transcript.reveal_history_tail()
+            self._loading_session_id = None
+            self._adopting_restored = None
+            self._deferred_restored = None
         # Whatever we thought, the agent has just said otherwise.
         self._remember_signed_in(False)
         # A fresh `auth_required` moots any wait already in progress —
@@ -2007,9 +2017,14 @@ class AgentPanel(QtWidgets.QWidget):
         self._adopting_restored = restored_key
         self._loading_session_id = agent_session_id
         model = self._model(restored_key)
+        conversation_id = self._conversation_ids.get(restored_key)
+        stored = next((c for c in self._restored if c.id == conversation_id), None)
         for panel in _live_panels_for(self._agent_id):
             if panel._transcript._model is model:
-                panel._transcript.show_history_status("Showing saved history · refreshing…")
+                if stored is not None and stored.transcript_version < 2 and not self._pending_prompt:
+                    panel._transcript.hide_incomplete_history()
+                else:
+                    panel._transcript.show_history_status("")
         if any(
             p is not self and p._loading_session_id == agent_session_id
             for p in _live_panels_for(self._agent_id)
@@ -2027,56 +2042,22 @@ class AgentPanel(QtWidgets.QWidget):
         )
 
     def _on_session_loaded(self, session_id: str, state: Any) -> None:
-        """`session/load` came back.
+        """Adopt a loaded session and apply its replay as one ordered snapshot.
 
-        This USED to drop our own local model here and trust the agent's
-        replay alone to rebuild the transcript — measured, live, to be
-        wrong on two counts (docs/facts/acp-sdk.md §32, full account):
-
-        1. **Timing.** The protocol requires replay to happen before
-           `session/load` answers, but that guarantee doesn't survive this
-           object's own worker-thread → Qt-cross-thread-signal path to
-           the main thread: two runs of the SAME six-turn conversation
-           saw 0-of-10 and 6-of-10 replay updates arrive AFTER this
-           handler's own signal had already fired. No wait here — no
-           `processEvents()` loop, no grace period — closes that; a
-           handler cannot outrun signals its own connection hasn't
-           delivered yet, whatever the wire timing looked like.
-        2. **Content.** `client.py::session_update` has always dropped
-           `user_message_chunk` outright (the artist's own words render
-           locally the moment they're sent — see `_on_submitted` — so a
-           LIVE turn never needed the agent's echo of them). Replay is
-           the one case that comment didn't anticipate: nothing in
-           `client.py` distinguishes "echo of what I just typed" from
-           "the only copy of a question typed hours ago", so every one of
-           the artist's own past messages was silently absent no matter
-           how the timing above landed.
-
-        So: the local model is transplanted onto `session_id`, exactly
-        like `_on_session_started`'s adoption of a brand-new session
-        below already does — never dropped. `session/load` still serves
-        the reason it exists: giving the AGENT its own memory back, for
-        continuity the model needs internally. It is no longer this
-        transcript's only source for what the artist sees; that was
-        always our own record, complete and correctly ordered on its
-        own — replay is a bonus confirmation of it, not a replacement.
-
-        Nothing double-counts when replay content still lands in this
-        SAME, kept-alive model, whenever it lands: `apply_chunk`'s own
-        `(kind, message_id)` key and `apply_tool_call`'s matching
-        `tool_call_id` key (added specifically for this — see its own
-        docstring) both merge a redelivery into the entry that id already
-        names, verified live, message id for message id and tool-call id
-        for tool-call id, against a real six-turn conversation and its
-        own real replay (docs/facts/acp-sdk.md §32). `user_message_chunk`
-        never reaching this model at all is exactly why the artist's own
-        old messages can only ever come from the kept-alive local copy —
-        which is the whole point, not a gap to close.
+        Legacy text-only caches stay hidden until the complete tail is ready.
+        Full snapshots are immediately readable; a background resume preserves
+        their reading position and any local-only messages or annotations.
         """
         if session_id != self._loading_session_id or self._adopting_restored is None:
             return
         _log.info("session/load resolved: agent=%s session=%s", self._agent_id, session_id)
         model = self._model(session_id)
+        before = model.to_records()
+        replay = getattr(state, "replay_updates", None)
+        if replay is not None:
+            model.replace_from_replay(replay)
+            state.replay_updates = None
+        changed = model.to_records() != before
         for panel in _live_panels_for(self._agent_id):
             if panel._transcript._model is model:
                 panel._transcript.preserve_reading_position()
@@ -2097,7 +2078,8 @@ class AgentPanel(QtWidgets.QWidget):
             # The transport was just loaded; the conversation was not just
             # created. The drawer sorts on this date, so keep its position.
             state.created_at = restored_state.created_at
-            state.queued = restored_state.queued
+            queued_ids = {entry.id for entry in model.entries() if entry.kind == "queued"}
+            state.queued = [message for message in restored_state.queued if message.id in queued_ids]
         import uuid as _uuid
 
         self._conversation_ids.setdefault(session_id, _uuid.uuid4().hex)
@@ -2118,7 +2100,11 @@ class AgentPanel(QtWidgets.QWidget):
         for panel in _live_panels_for(self._agent_id):
             if panel._transcript._model is model:
                 panel._transcript.sync_model()
-                panel._transcript.show_history_status("History refreshed", finished=True)
+                if panel._transcript.is_history_loading():
+                    panel._transcript.show_history_status("")
+                    panel._transcript.reveal_history_tail()
+                elif changed:
+                    panel._transcript.show_history_status("History updated", finished=True)
         self._complete_pending_auth_switch()
         if self._pending_prompt and self._pending_prompt_session_id in (None, adopted):
             pending, self._pending_prompt = self._pending_prompt, None
@@ -2170,6 +2156,8 @@ class AgentPanel(QtWidgets.QWidget):
             if self._is_current(restored_key):
                 self._transcript.preserve_reading_position()
                 self._transcript.show_history_status("Showing saved history · refresh failed")
+                if self._transcript.is_history_loading():
+                    self._transcript.reveal_history_tail()
             entry = self._model(restored_key).append_error(
                 f"Could not refresh this conversation ({message}). Showing saved history."
             )
@@ -2316,7 +2304,7 @@ class AgentPanel(QtWidgets.QWidget):
         if entry is not None:
             self._touch(session_id, entry.id, streamed=True)
             state = self._pool.get(session_id)
-            if not thought and state is not None and not state.busy:
+            if state is not None and not state.busy:
                 # Replay can arrive after session_loaded and has no turn_finished
                 # of its own. Save these late messages without waiting for a prompt.
                 self._persist_conversations_soon()
@@ -2324,6 +2312,7 @@ class AgentPanel(QtWidgets.QWidget):
     def _on_tool_call(self, session_id: str, call: Any) -> None:
         entry = self._model(session_id).apply_tool_call(call)
         self._touch(session_id, entry.id)
+        self._persist_conversations_soon()
         if self._is_current(session_id):
             self._transcript.reset_thinking_after_tool()
 
@@ -2331,6 +2320,7 @@ class AgentPanel(QtWidgets.QWidget):
         entry = self._model(session_id).apply_tool_update(update)
         if entry is not None:
             self._touch(session_id, entry.id)
+            self._persist_conversations_soon()
 
     def _on_plan_changed(self, session_id: str, entries: list) -> None:
         entry = self._model(session_id).apply_plan(entries)
@@ -2619,19 +2609,23 @@ class AgentPanel(QtWidgets.QWidget):
         current = self._current_session()
         if current is None or not current.session_id.startswith(_RESTORED_PREFIX):
             return
-        if self._adopting_restored == current.session_id:
-            return
         client = shared_client(self._agent_id)
         info = client.agent_info()
         if not client.is_running() or info is None:
             self._transcript.show_history_status("Showing saved history · agent offline")
-            return
-        if self._adopting_restored is not None:
-            self._transcript.show_history_status("Showing saved history · waiting to refresh…")
+            if self._transcript.is_history_loading():
+                self._transcript.reveal_history_tail()
             return
         conversation_id = self._conversation_ids.get(current.session_id)
         stored = next((c for c in self._restored if c.id == conversation_id), None)
-        if info.supports_load_session and stored is not None and stored.agent_session_id:
+        can_load = info.supports_load_session and stored is not None and stored.agent_session_id
+        if can_load and stored.transcript_version < 2:
+            # This also covers switching to B while A is still loading: B's
+            # incomplete cache must not flash before its request can start.
+            self._transcript.hide_incomplete_history()
+        if self._adopting_restored is not None:
+            return
+        if can_load:
             self._adopt_or_resume(current.session_id)
         else:
             self._transcript.show_history_status("Showing saved history")
@@ -5621,7 +5615,12 @@ class AgentPanel(QtWidgets.QWidget):
                     else new_agent_session_id,
                     records,
                 )
-                if local_snapshot == baseline:
+                new_transcript_version = (
+                    conversation.transcript_version if session_id.startswith(_RESTORED_PREFIX) else 2
+                )
+                if local_snapshot == baseline and (
+                    prior is None or prior.transcript_version == new_transcript_version
+                ):
                     # An unchanged local copy has no authority to replace
                     # a newer (or deleted) record written by another process.
                     continue
@@ -5645,12 +5644,14 @@ class AgentPanel(QtWidgets.QWidget):
                     or prior.agent_id != new_agent_id
                     or prior.agent_session_id != new_agent_session_id
                     or prior.entries != records
+                    or prior.transcript_version != new_transcript_version
                 )
                 conversation.title = new_title
                 conversation.cwd = new_cwd
                 conversation.agent_id = new_agent_id
                 conversation.agent_session_id = new_agent_session_id
                 conversation.entries = records
+                conversation.transcript_version = new_transcript_version
                 if changed:
                     conversation.updated_at = time.time()
                     touched += 1

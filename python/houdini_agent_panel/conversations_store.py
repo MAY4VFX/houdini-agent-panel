@@ -73,6 +73,8 @@ class StoredConversation:
     #: brand new session.
     agent_session_id: str = ""
     entries: list[dict] = field(default_factory=list)
+    # 1: legacy text-only cache; 2: readable timeline including tools/thoughts.
+    transcript_version: int = 1
 
     @staticmethod
     def new(
@@ -99,6 +101,7 @@ class StoredConversation:
             "cwd": self.cwd,
             "agent_session_id": self.agent_session_id,
             "entries": self.entries[-MAX_ENTRIES:],
+            "transcript_version": self.transcript_version,
         }
 
     @classmethod
@@ -119,6 +122,7 @@ class StoredConversation:
             cwd=str(payload.get("cwd") or ""),
             agent_session_id=str(payload.get("agent_session_id") or ""),
             entries=[e for e in (entries or []) if isinstance(e, dict)][-MAX_ENTRIES:],
+            transcript_version=2 if payload.get("transcript_version") == 2 else 1,
         )
 
 
