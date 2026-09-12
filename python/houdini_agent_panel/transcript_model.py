@@ -643,14 +643,20 @@ class TranscriptModel:
                 # Matching old text is not an acknowledgement of a newly
                 # queued send, even when both prompts happen to be identical.
                 candidates.setdefault((entry.kind, entry.text.strip()), []).append(entry)
+        local_by_id = {e.id: e for e in self._entries if e.kind != "queued"}
         matched = {e.id for e in fresh._entries}
         anchors = {e.id: e.id for e in fresh._entries}
         for entry in reversed(fresh._entries):
             if entry.kind not in ("user", "agent", "thought"):
                 continue
             matches = candidates.get((entry.kind, entry.text.strip()), [])
-            if matches:
-                local = matches.pop()
+            local = local_by_id.get(entry.id)
+            if local is None or local.kind != entry.kind:
+                local = next((candidate for candidate in reversed(matches)
+                              if entry.kind == "user" or not candidate.id.startswith(entry.kind + ":")), None)
+            if local is not None:
+                if local in matches:
+                    matches.remove(local)
                 matched.add(local.id)
                 if entry.kind == "user":
                     entry.id = local.id

@@ -74,3 +74,16 @@ def test_replay_of_an_old_identical_prompt_does_not_acknowledge_a_new_queued_mes
     ])
     assert [(e.id, e.kind) for e in model.entries()] == [
         (old.id, 'user'), ('agent:answer', 'agent'), ('pending', 'queued')]
+
+
+def test_equal_reply_text_does_not_discard_a_newer_cached_message_with_another_id():
+    model = TranscriptModel()
+    first = model.append_user('first question')
+    model.apply_chunk('a1', 'Done')
+    second = model.append_user('second question')
+    model.apply_chunk('a2', 'Done')
+    model.replace_from_replay([
+        _text('user_message_chunk', 'u1', 'first question'),
+        _text('agent_message_chunk', 'a1', 'Done'),
+    ])
+    assert [e.id for e in model.entries()] == [first.id, 'agent:a1', second.id, 'agent:a2']
