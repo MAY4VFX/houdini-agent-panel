@@ -22,6 +22,7 @@ from . import attachments as attachment_view
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import ThinkingIndicator
+from .file_paths import PathClickMixin
 
 #: The longest edge of an image preview inside a sent message. Big enough to
 #: recognise the render you attached, small enough that three of them don't
@@ -856,7 +857,7 @@ class _AttachmentStrip(QtWidgets.QWidget):
         return chip
 
 
-class _ProseBlock(QtWidgets.QTextBrowser):
+class _ProseBlock(PathClickMixin, QtWidgets.QTextBrowser):
     """One chunk of a message's markdown prose — no frame, word wrap on.
 
     Height follows the content: an inner vertical scrollbar isn't needed, the
@@ -906,7 +907,7 @@ class _ProseBlock(QtWidgets.QTextBrowser):
         self.setFixedHeight(max(int(self.document().size().height()) + 4, 1))
 
 
-class _CodeBlock(QtWidgets.QPlainTextEdit):
+class _CodeBlock(PathClickMixin, QtWidgets.QPlainTextEdit):
     """A code block from a ```fence``` — monospace, with its own horizontal scroll.
 
     `NoWrap` is deliberate: wrapping would break VEX/Python indentation. A

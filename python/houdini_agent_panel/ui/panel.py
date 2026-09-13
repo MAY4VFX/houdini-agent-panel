@@ -2757,6 +2757,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._dirty_entries.clear()
         self._render_timer.stop()
         state = self._pool.get(session_id)
+        self._transcript._path_base = state.cwd if state else ""
         self._transcript.set_model(self._model(session_id))
         if state is not None:
             self._composer.set_busy(state.busy)
