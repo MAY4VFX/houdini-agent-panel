@@ -37,3 +37,27 @@ for cls in [_ProseBlock, _CodeBlock]:
     assert opened[-1] == file
     widget.close()
 print('PASS', __version__, QtCore.qVersion(), 'prose + code; Cmd-click; spaces and emoji; ordinary click unchanged')
+
+# A named markdown link must never navigate the QTextBrowser into binary data.
+video = root / 'binary.mp4'
+video.write_bytes(b'\x00\x00binary video\xff\xfe')
+urls = []
+QtGui.QDesktopServices.openUrl = lambda url: urls.append(url) or True
+widget = _ProseBlock()
+widget.set_text(f'[Download preview]({video})')
+widget.resize(900, 100)
+widget.show()
+app.processEvents()
+cursor = widget.textCursor()
+cursor.setPosition(3)
+point = QtCore.QPointF(widget.cursorRect(cursor).center())
+for modifier in [QtCore.Qt.NoModifier, QtCore.Qt.ControlModifier]:
+    for kind, buttons in [(QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton),
+                          (QtCore.QEvent.MouseButtonRelease, QtCore.Qt.NoButton)]:
+        event = QtGui.QMouseEvent(kind, point, QtCore.Qt.LeftButton, buttons, modifier)
+        app.sendEvent(widget.viewport(), event)
+    assert widget.toPlainText() == 'Download preview'
+assert urls == [QtCore.QUrl.fromLocalFile(str(video))]
+assert opened[-1] == video
+widget.close()
+print('PASS named binary link: normal click opens externally, Cmd-click reveals; message preserved')

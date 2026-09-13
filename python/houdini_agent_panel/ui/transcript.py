@@ -22,7 +22,7 @@ from . import attachments as attachment_view
 from . import theme
 from .qt import QtCore, QtGui, QtWidgets, Signal
 from .thinking import ThinkingIndicator
-from .file_paths import PathClickMixin
+from .file_paths import PathClickMixin, link_path, path_base
 
 #: The longest edge of an image preview inside a sent message. Big enough to
 #: recognise the render you attached, small enough that three of them don't
@@ -871,7 +871,11 @@ class _ProseBlock(PathClickMixin, QtWidgets.QTextBrowser):
         self.setReadOnly(True)
         # Links open in the external browser: the panel is neither a file
         # manager nor a web view.
-        self.setOpenExternalLinks(True)
+        # QTextBrowser still navigates file/relative links internally when
+        # openExternalLinks is true. Never let a message become a document viewer.
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.anchorClicked.connect(self._open_link)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -887,6 +891,12 @@ class _ProseBlock(PathClickMixin, QtWidgets.QTextBrowser):
         self.setStyleSheet("QTextBrowser { background: transparent; }")
         self.viewport().setStyleSheet("background: transparent;")
         self.document().documentLayout().documentSizeChanged.connect(self._sync_height)
+
+    def _open_link(self, url: QtCore.QUrl) -> None:
+        path = link_path(url, path_base(self))
+        if path is not None:
+            url = QtCore.QUrl.fromLocalFile(str(path))
+        QtGui.QDesktopServices.openUrl(url)
 
     def set_text(self, text: str) -> None:
         if getattr(self, "_source_text", None) == text:

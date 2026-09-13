@@ -40,6 +40,28 @@ def path_at(text: str, position: int, base: str = "") -> Path | None:
     return None
 
 
+def path_base(widget) -> str:
+    while widget is not None:
+        if hasattr(widget, '_path_base'):
+            return widget._path_base
+        widget = widget.parentWidget()
+    return ''
+
+
+def link_path(url, base: str = '') -> Path | None:
+    if url.scheme() not in ('', 'file'):
+        return None
+    value = url.toLocalFile() if url.isLocalFile() else url.path()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        if not base:
+            return None
+        path = Path(base) / path
+    return path
+
+
 def reveal(path: Path) -> None:
     if sys.platform == 'darwin':
         argv = ['open', str(path)] if path.is_dir() else ['open', '-R', str(path)]
@@ -68,14 +90,11 @@ class PathClickMixin:
             cursor = self.cursorForPosition(point)
             text = self.toPlainText()
             position = len(text.encode('utf-16-le')[:cursor.position() * 2].decode('utf-16-le', errors='ignore'))
-            parent = self
-            base = ''
-            while parent is not None:
-                if hasattr(parent, '_path_base'):
-                    base = parent._path_base
-                    break
-                parent = parent.parentWidget()
-            path = path_at(text, position, base)
+            base = path_base(self)
+            anchor = self.anchorAt(point) if hasattr(self, 'anchorAt') else ''
+            path = link_path(QtCore.QUrl(anchor), base) if anchor else None
+            if path is None:
+                path = path_at(text, position, base)
             if path is not None:
                 reveal(path)
                 event.accept()
