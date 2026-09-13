@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Never reach out to PyPI (requires --find-links with all dependencies)",
     )
+    install_parser.add_argument("--fx-version", help="Install and verify this exact fxhoudinimcp version")
     install_parser.add_argument(
         "--skip-deps",
         action="store_true",
@@ -96,6 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             find_links=args.find_links,
             offline=args.offline,
             skip_deps=args.skip_deps,
+            fx_version=args.fx_version,
             source=Path(args.dev).expanduser().resolve() if args.dev else None,
             dry_run=args.dry_run,
         )

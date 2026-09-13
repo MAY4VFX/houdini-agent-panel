@@ -705,3 +705,33 @@ def test_voice_section_shown_when_recording_is_available(qapp, monkeypatch):
     view.show()
 
     assert view._voice_section.isVisible() is True
+
+
+def test_fx_update_row_tracks_installation_and_ignores_stale_check(qapp):
+    from houdini_agent_panel.updates import Update
+    view = SettingsView()
+    view.show()
+    update = Update("fx", "fxhoudinimcp", "MCP upstream", "2.10.0", "2.14.2")
+    view._on_check_now_done({"fx": update})
+    view.set_package_update_state(update, "running")
+    assert "updating to 2.14.2" in view._fx_version_label.text()
+    assert not view._fx_update_button.isVisible()
+    view.set_package_update_state(update, "succeeded")
+    view._on_check_now_done({"fx": update})
+    assert "restart Houdini" in view._fx_version_label.text()
+    assert not view._fx_update_button.isVisible()
+    assert view._pending_fx_update is None
+
+
+def test_fx_update_failure_is_visible_in_settings_and_retryable(qapp):
+    from houdini_agent_panel.updates import Update
+    view = SettingsView()
+    view.show()
+    update = Update("fx", "fxhoudinimcp", "MCP upstream", "2.10.0", "2.14.2")
+    view.set_package_update_state(update, "failed", "download failed")
+    assert "download failed" in view._fx_version_label.text()
+    assert view._fx_update_button.isVisible()
+    requested = []
+    view.panel_update_requested.connect(requested.append)
+    view._fx_update_button.click()
+    assert requested == [update]

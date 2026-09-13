@@ -266,11 +266,15 @@ def install(
     find_links: str | None = None,
     offline: bool = False,
     skip_deps: bool = False,
+    fx_version: str | None = None,
     source: Path | None = None,
     dry_run: bool = False,
     fetch: Fetcher | None = None,
     out=print,
 ) -> int:
+    if fx_version and skip_deps:
+        out("--fx-version cannot be combined with --skip-deps")
+        return 1
     package_dirs, reason = _resolve_package_dirs(houdini_dir)
     if not package_dirs:
         # NOT "no Houdini on this machine" — detection only ever looks for
@@ -297,6 +301,7 @@ def install(
     installer_python = sys.executable
     panel_version = _panel_version()
     any_ok = False
+    update_failed = False
     #: Set once, if any target's `install_deps` leaves a version behind that
     #: differs from `panel_version` — see the notice printed at the end of
     #: this function, and `docs/facts/houdini.md` §15 for why this can
@@ -353,6 +358,7 @@ def install(
                     hython,
                     target=target,
                     requirement=requirement,
+                    extra_requirements=[f"{_FX_PACKAGE}=={fx_version}"] if fx_version else [],
                     find_links=find_links,
                     offline=offline,
                     dry_run=dry_run,
@@ -360,9 +366,17 @@ def install(
                 )
             except deps_mod.DepsError as exc:
                 out(f"  dependency install failed: {exc}")
+                update_failed = True
                 continue
 
             if not dry_run:
+                if fx_version:
+                    actual_fx = deps_mod.installed_version(target, _FX_PACKAGE)
+                    if actual_fx != fx_version:
+                        out(f"  fx update verification failed: expected {fx_version}, found {actual_fx or 'missing'}")
+                        update_failed = True
+                        continue
+                    out(f"  verified {_FX_PACKAGE} {actual_fx} in {target}")
                 installed = deps_mod.installed_version(target, _PACKAGE)
                 if installed and installed != panel_version:
                     self_updated_to = installed
@@ -427,7 +441,7 @@ def install(
         if cleared is not None:
             out(f"  removed the duplicate on the package path: {cleared}")
 
-    result = 0 if any_ok else 1
+    result = 0 if any_ok and not update_failed else 1
 
     if agents:
         agents_result = _install_agents(agents, dry_run=dry_run, fetch=fetch, out=out)

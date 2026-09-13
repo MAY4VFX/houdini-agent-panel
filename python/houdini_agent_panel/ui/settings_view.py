@@ -503,6 +503,7 @@ class SettingsView(QtWidgets.QWidget):
         # on — set by `_on_check_now_done`, read by `_on_panel_update_
         # clicked`/`_on_fx_update_clicked`, cleared whenever a fresh check
         # starts.
+        self._package_update_states: dict[str, tuple] = {}
         self._pending_panel_update: "Update | None" = None
         self._pending_fx_update: "Update | None" = None
         # The text appended after " — " on each row: "", "checking…", "up
@@ -1045,7 +1046,31 @@ class SettingsView(QtWidgets.QWidget):
             text += f" — {self._fx_status_suffix}"
         self._fx_version_label.setText(text)
 
+    def set_package_update_state(self, update, state: str, message: str = "") -> None:
+        """Keep the clicked row truthful while the shared installer runs."""
+        self._package_update_states[update.kind] = (update, state, message)
+        self._apply_package_update_states()
+
+    def _apply_package_update_states(self) -> None:
+        busy = any(state == "running" for _, state, _ in self._package_update_states.values())
+        for kind, (update, state, message) in self._package_update_states.items():
+            if state == "running":
+                suffix = f"updating to {update.latest}…"
+            elif state == "succeeded":
+                suffix = f"installed {update.latest} — restart Houdini"
+            else:
+                suffix = f"update failed: {message}"
+            setattr(self, f"_{kind}_status_suffix", suffix)
+            setattr(self, f"_pending_{kind}_update", update if state == "failed" else None)
+            getattr(self, f"_{kind}_update_button").setVisible(state == "failed")
+        for kind in ("panel", "fx"):
+            getattr(self, f"_{kind}_update_button").setEnabled(not busy)
+        self._render_panel_row()
+        self._render_fx_row()
+
     def _on_check_updates_now_clicked(self) -> None:
+        if any(state == "running" for _, state, _ in self._package_update_states.values()):
+            return
         if self._check_now_worker is not None:
             return  # already running — a second click while it's in flight is a no-op, not a second check
         self._pending_panel_update = None
@@ -1096,6 +1121,8 @@ class SettingsView(QtWidgets.QWidget):
         self._render_panel_row()
         self._render_fx_row()
 
+        self._apply_package_update_states()
+
     def _on_check_now_failed(self, message: str) -> None:
         # A single shared failure: `_CheckUpdatesNowWorker` checks the
         # panel first and lets a `NetworkError` propagate immediately
@@ -1107,6 +1134,8 @@ class SettingsView(QtWidgets.QWidget):
         self._fx_status_suffix = f"check failed: {message}"
         self._render_panel_row()
         self._render_fx_row()
+
+        self._apply_package_update_states()
 
     def _on_panel_update_clicked(self) -> None:
         if self._pending_panel_update is not None:

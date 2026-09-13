@@ -653,3 +653,42 @@ def test_install_uv_cache_installer_python_is_still_recorded_without_a_fallback(
     payload = json.loads((fake_houdini / "packages" / houdini_package.PACKAGE_NAME).read_text("utf-8"))
     assert {"HAP_PYTHON": _uv_cache_python().as_posix()} in payload["env"]
     assert any("re-run" in line.lower() or "run the installer" in line.lower() for line in logged)
+
+
+def test_fx_update_pins_and_verifies_installed_version(fake_houdini, monkeypatch):
+    _stub_hython(monkeypatch)
+    calls = []
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: calls.append(k) or [])
+    monkeypatch.setattr(deps_mod, "installed_version", lambda target, name: "2.14.2" if name == "fxhoudinimcp" else install_mod._panel_version())
+    assert install_mod.install(fx_version="2.14.2", out=lambda *_: None) == 0
+    assert calls[0]["extra_requirements"] == ["fxhoudinimcp==2.14.2"]
+
+
+def test_fx_update_cannot_report_success_when_version_did_not_change(fake_houdini, monkeypatch):
+    _stub_hython(monkeypatch)
+    monkeypatch.setattr(deps_mod, "install_deps", lambda *a, **k: [])
+    monkeypatch.setattr(deps_mod, "installed_version", lambda *a: "2.10.0")
+    output = []
+    assert install_mod.install(fx_version="2.14.2", out=output.append) == 1
+    assert any("verification failed" in line for line in output)
+
+
+def test_fx_update_does_not_allow_skipping_the_install(fake_houdini):
+    assert install_mod.install(fx_version="2.14.2", skip_deps=True, out=lambda *_: None) == 1
+
+
+def test_one_successful_tree_cannot_hide_an_fx_update_failure(fake_houdini, monkeypatch):
+    _stub_hython(monkeypatch)
+    second = fake_houdini.parent / '22.0' / 'packages'
+    second.mkdir(parents=True)
+    monkeypatch.setattr(install_mod, '_resolve_package_dirs', lambda _: ([fake_houdini / 'packages', second], 'test'))
+    calls = []
+    def install_tree(*a, **k):
+        calls.append(k)
+        if len(calls) == 2:
+            raise deps_mod.DepsError('second tree failed')
+        return []
+    monkeypatch.setattr(deps_mod, 'install_deps', install_tree)
+    monkeypatch.setattr(deps_mod, 'installed_version', lambda target, name: '2.14.2' if name == 'fxhoudinimcp' else install_mod._panel_version())
+    assert install_mod.install(fx_version='2.14.2', out=lambda *_: None) == 1
+    assert len(calls) == 2

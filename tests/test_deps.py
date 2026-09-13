@@ -457,3 +457,10 @@ def test_find_hython_without_a_version_finds_nothing_when_there_is_nothing(tmp_p
     monkeypatch.setattr(deps, "_MAC_APPLICATIONS_ROOT", tmp_path / "nothing")
 
     assert deps.find_hython(None) is None
+
+
+def test_requested_fx_version_reaches_pip(tmp_path):
+    output = []
+    deps.install_deps(Path('/fake/hython'), target=tmp_path, requirement='houdini-agent-panel==0.8.46',
+                      extra_requirements=['fxhoudinimcp==2.14.2'], dry_run=True, out=output.append)
+    assert 'fxhoudinimcp==2.14.2' in output[0]

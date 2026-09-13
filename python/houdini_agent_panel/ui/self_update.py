@@ -27,7 +27,13 @@ Houdini and run it again" is the only honest thing to say to a platform
 that could not be tested directly, and it must never be confused with a
 download that simply failed.
 
-Runs `uvx --refresh --from <target>==<version> python -m houdini_agent_panel
+For an fx update the environment must also contain the panel installer:
+`--from houdini-agent-panel==<running version> --with fxhoudinimcp==<requested>`.
+The inner install receives `--fx-version` and verifies the version on disk.
+Previously `--from fxhoudinimcp` alone failed with "No module named
+houdini_agent_panel" before any files were installed.
+
+For a panel update, runs `uvx --refresh --from <target>==<version> python -m houdini_agent_panel
 install` — literally the manual command this notice already told the artist
 to type by hand — rather than re-deriving the Houdini-detection/hython-
 selection logic that command already does correctly in `install.py`.
@@ -66,7 +72,7 @@ import threading
 from shutil import which
 from types import SimpleNamespace
 
-from .. import childproc
+from .. import __version__, childproc
 from .qt import Signal
 from .terminal_login import TerminalLoginWorker
 from .worker import Worker, WorkerStopped
@@ -83,7 +89,7 @@ _UPDATE_TIMEOUT = 600.0
 _NO_UV_MESSAGE = (
     "uv isn't on this machine's PATH, so the panel can't run the update itself. "
     "Install uv (https://astral.sh/uv), or run this by hand:\n"
-    "    uvx --refresh --from {spec} python -m houdini_agent_panel install"
+    "    uvx --refresh --from {spec}{uv_args} python -m houdini_agent_panel install{install_args}"
 )
 
 #: Substrings from pip's own output that mean "a file could not be
@@ -194,12 +200,21 @@ class SelfUpdateWorker(Worker):
 
         uvx = which("uvx", path=env.get("PATH", ""))
         spec = f"{self._target}=={self._version}"
+        installer_spec = (
+            f"houdini-agent-panel=={__version__}" if self._target == "fxhoudinimcp" else spec
+        )
+        uv_args = ["--with", spec] if self._target == "fxhoudinimcp" else []
+        install_args = ["--fx-version", self._version] if self._target == "fxhoudinimcp" else []
         if uvx is None:
-            raise SelfUpdateError(_NO_UV_MESSAGE.format(spec=spec))
+            raise SelfUpdateError(_NO_UV_MESSAGE.format(
+                spec=installer_spec,
+                uv_args=" " + " ".join(uv_args) if uv_args else "",
+                install_args=" " + " ".join(install_args) if install_args else "",
+            ))
 
         argv = [
-            uvx, "--refresh", "--from", spec,
-            "python", "-m", "houdini_agent_panel", "install",
+            uvx, "--refresh", "--from", installer_spec, *uv_args,
+            "python", "-u", "-m", "houdini_agent_panel", "install", *install_args,
         ]
         # The exact command belongs in the log, not in the notice strip —
         # an artist reading the notice needs to know an update is under

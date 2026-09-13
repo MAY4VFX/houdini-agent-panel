@@ -4013,6 +4013,7 @@ class AgentPanel(QtWidgets.QWidget):
                 return  # already running — a second click while it's in flight is a no-op, not a second update
             from .self_update import SelfUpdateWorker
 
+            self._settings_view.set_package_update_state(update, "running")
             self._panel_update_worker = SelfUpdateWorker(update.target, update.latest, parent=self)
             self._panel_update_worker.progressed.connect(
                 lambda line, u=update: self._on_panel_update_progressed(u, line)
@@ -4081,6 +4082,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._panel_update_display_line = ""
 
     def _on_panel_update_succeeded(self, update: Any) -> None:
+        self._settings_view.set_package_update_state(update, "succeeded")
         self._stop_panel_update_tick()
         self._panel_update_worker = None
         self._panel_update_restart_pending = update
@@ -4110,6 +4112,7 @@ class AgentPanel(QtWidgets.QWidget):
         self._notice_shown = (ann.id, lambda: self._show_panel_update_restart_notice())
 
     def _on_panel_update_failed(self, update: Any, message: str) -> None:
+        self._settings_view.set_package_update_state(update, "failed", message)
         self._stop_panel_update_tick()
         self._panel_update_worker = None
         # `message` is already classified (`self_update._classify_failure`)

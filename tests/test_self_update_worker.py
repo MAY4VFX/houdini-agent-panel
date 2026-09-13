@@ -297,3 +297,19 @@ def test_pythonpath_is_stripped_before_spawning_the_child(qapp, tmp_path, monkey
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
         line = next(l for l in progress if l.startswith(f"{name}:"))
         assert line == f"{name}:<unset>", f"{name} leaked into the child: {line}"
+
+
+def test_fx_update_runs_the_panel_installer_and_pins_the_inner_install(qapp, tmp_path, monkeypatch):
+    _fake_uvx(tmp_path, monkeypatch, "echo_argv_and_env")
+    worker = SelfUpdateWorker("fxhoudinimcp", "2.14.2")
+    progress, succeeded = [], []
+    worker.progressed.connect(progress.append)
+    worker.succeeded.connect(lambda: succeeded.append(True))
+    worker.start()
+    _wait_until(qapp, lambda: succeeded)
+    worker.wait(3000)
+    argv = next(line for line in progress if line.startswith("ARGV:"))
+    from houdini_agent_panel import __version__
+    assert f"--from houdini-agent-panel=={__version__}" in argv
+    assert "--with fxhoudinimcp==2.14.2" in argv
+    assert "install --fx-version 2.14.2" in argv

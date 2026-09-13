@@ -199,6 +199,7 @@ def install_deps(
     *,
     target: Path,
     requirement: str,
+    extra_requirements: Sequence[str] = (),
     find_links: str | None = None,
     offline: bool = False,
     dry_run: bool = False,
@@ -218,7 +219,7 @@ def install_deps(
     (`acp`, `pydantic`) from, because `--no-index` shut those off too.
     """
     argv: list[str] = [
-        str(hython), "-m", "pip", "install", "--upgrade", "--target", str(target), requirement,
+        str(hython), "-m", "pip", "install", "--upgrade", "--target", str(target), requirement, *extra_requirements,
     ]
     if find_links:
         argv += ["--find-links", find_links]
