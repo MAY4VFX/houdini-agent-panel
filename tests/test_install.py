@@ -72,10 +72,11 @@ def test_install_writes_package_json_with_correct_deps_path(fake_houdini, monkey
     fx_package_path = fake_houdini / "packages" / "fxhoudinimcp.json"
     assert fx_package_path.exists()
     fx_payload = json.loads(fx_package_path.read_text("utf-8"))
-    assert fx_payload == {
-        "env": [{"FXHOUDINIMCP": f"{expected_deps}/fxhoudinimcp/houdini"}],
-        "path": "$FXHOUDINIMCP",
-    }
+    # Only what we point it at is ours to check: fxhoudinimcp's own installer
+    # writes this file and adds settings of its own across versions (2.x
+    # started adding FXHOUDINIMCP_PORT, _AUTOSTART, ...).
+    assert fx_payload["env"][0] == {"FXHOUDINIMCP": f"{expected_deps}/fxhoudinimcp/houdini"}
+    assert fx_payload["path"] == "$FXHOUDINIMCP"
 
 
 def test_install_records_the_installers_python_with_a_reason(fake_houdini, monkeypatch):
