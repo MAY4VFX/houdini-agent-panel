@@ -30,7 +30,7 @@ import shutil
 import time
 import weakref
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 
 from .. import client as acp_client
 from .. import context_files, refresh, scene, sessions, settings as settings_mod
@@ -2030,6 +2030,22 @@ class AgentPanel(QtWidgets.QWidget):
             for p in _live_panels_for(self._agent_id)
         ):
             return  # Join the existing load; the same signal completes both tabs.
+        # `session/load` bakes `mcp_servers()` into the resumed session
+        # exactly like `session/new` does, so it needs the same fx start and
+        # bounded wait — without them a conversation reopened from history
+        # right after Houdini's launch comes back toolless.
+        self._ensure_fx_started()
+        if scene.fx_pending():
+            self._begin_fx_wait(lambda: self._send_session_load(agent_session_id))
+            return
+        self._send_session_load(agent_session_id)
+
+    def _send_session_load(self, agent_session_id: str) -> None:
+        """The actual `session/load` round trip, with `scene.mcp_servers()`
+        read at THIS moment — after any fx wait, not before it."""
+        client = shared_client(self._agent_id)
+        if not client.is_running():
+            return  # the agent went away while this was waiting on fx
         problem = scene.mcp_python_status()
         if problem:
             self._note(problem, error=True)
@@ -2930,14 +2946,17 @@ class AgentPanel(QtWidgets.QWidget):
         # free and then fails at bind. `ensure_fx_started` is a no-op unless
         # the server is genuinely down, and flips `fx_pending()` True when it
         # does start one, so the bounded wait just below picks it up.
-        try:
-            scene.ensure_fx_started()
-        except Exception:  # noqa: BLE001 - "+" must work even if this doesn't
-            _log.exception("new session: ensure_fx_started failed — continuing without it")
+        self._ensure_fx_started()
         if scene.fx_pending():
-            self._begin_fx_wait()
+            self._begin_fx_wait(self._open_new_session)
             return
         self._open_new_session()
+
+    def _ensure_fx_started(self) -> None:
+        try:
+            scene.ensure_fx_started()
+        except Exception:  # noqa: BLE001 - a session must open even if this doesn't
+            _log.exception("ensure_fx_started failed — continuing without it")
 
     def _set_new_session_busy(self, busy: bool) -> None:
         """The visible half of `_new_session_pending` — both "+" doors
@@ -2972,7 +2991,7 @@ class AgentPanel(QtWidgets.QWidget):
         if model.update_note(note_entry_id, "The new conversation opened — it was just slower than usual.") is not None:
             self._touch(note_session_id, note_entry_id)
 
-    def _begin_fx_wait(self) -> None:
+    def _begin_fx_wait(self, then: Callable[[], None]) -> None:
         """Entered once, right before the first `_poll_fx_wait` tick — the
         one place that announces the wait, so a poll firing every
         `_FX_WAIT_POLL_MS` doesn't repeat itself in the feed.
@@ -2991,9 +3010,14 @@ class AgentPanel(QtWidgets.QWidget):
         )
         if not self._composer.boot_status().is_booting():
             self._note("Waiting for Houdini's MCP server to finish starting…")
-        self._poll_fx_wait(_FX_WAIT_CEILING_MS)
+        self._poll_fx_wait(_FX_WAIT_CEILING_MS, then)
 
-    def _poll_fx_wait(self, remaining_ms: int) -> None:
+    def _poll_fx_wait(
+        self,
+        remaining_ms: int,
+        then: Callable[[], None] | None = None,
+        retried: bool = False,
+    ) -> None:
         """One tick of the bounded wait `_begin_fx_wait` started.
 
         Never `sleep`/`while`/`processEvents` — this is a `QTimer.
@@ -3001,13 +3025,30 @@ class AgentPanel(QtWidgets.QWidget):
         exactly like `_report_stalled_new_session`'s own grace timer just
         below. Houdini stays responsive for the whole wait.
         """
+        if then is None:
+            then = self._open_new_session
         if self._closed:
             return  # the tab went away while this was waiting
         if not scene.fx_pending():
-            # Either the port is in by now, or fxhoudinimcp's own poll gave
-            # up on its own — either way there is nothing left to wait FOR.
-            _log.info("new session: fx wait ended, port=%s", scene.fx_port())
-            self._open_new_session()
+            port = scene.fx_port()
+            if port is None and not retried:
+                # The start we waited on gave up. That is the normal outcome
+                # of fxhoudinimcp's OWN auto-start whenever 8100 is held by a
+                # non-Houdini process — on the owner's machine it is always
+                # `hserver`, SideFX's licence daemon — because its port pick
+                # calls a silent port free and then fails at bind. `ensure_fx_
+                # started` returned early while that auto-start was in flight,
+                # so now is the first moment it can step in with a port that
+                # is actually bindable. Once only: a second failure is real.
+                _log.info("new session: fx wait ended without a port — starting the fx server ourselves")
+                self._ensure_fx_started()
+                if scene.fx_pending():
+                    self._poll_fx_wait(_FX_WAIT_CEILING_MS, then, retried=True)
+                    return
+            # Either the port is in by now, or the start gave up for good —
+            # either way there is nothing left to wait FOR.
+            _log.info("new session: fx wait ended, port=%s", port if port is not None else scene.fx_port())
+            then()
             return
         if remaining_ms <= 0:
             _log.warning(
@@ -3021,13 +3062,14 @@ class AgentPanel(QtWidgets.QWidget):
                 "chat once it's ready.",
                 error=True,
             )
-            self._open_new_session()
+            then()
             return
         self._composer.set_boot_phase(
             PHASE_SESSION, "Waiting for Houdini's MCP server to finish starting…"
         )
         QtCore.QTimer.singleShot(
-            _FX_WAIT_POLL_MS, lambda: self._poll_fx_wait(remaining_ms - _FX_WAIT_POLL_MS)
+            _FX_WAIT_POLL_MS,
+            lambda: self._poll_fx_wait(remaining_ms - _FX_WAIT_POLL_MS, then, retried),
         )
 
     def _open_new_session(self) -> None:

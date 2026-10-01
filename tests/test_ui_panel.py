@@ -3258,6 +3258,7 @@ def test_new_session_waits_for_the_fx_server_this_panel_just_started(qapp, monke
 
     monkeypatch.setattr(panel_mod.scene, "ensure_fx_started", ensure)
     monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: pending[0])
+    monkeypatch.setattr(panel_mod.scene, "fx_port", lambda: None if pending[0] else 8101)
 
     widget._start_new_session()
     assert not calls, "opened a toolless session instead of waiting for the start it just triggered"
@@ -3293,4 +3294,113 @@ def test_new_session_survives_a_failing_ensure_fx_started(qapp, monkeypatch):
     widget._start_new_session()
 
     assert calls, "a failing ensure_fx_started took the whole new session down"
+    widget.shutdown()
+
+
+# The incident behind the retry: 8100 held by `hserver` (SideFX's licence
+# daemon), so fxhoudinimcp's own auto-start always picks 8100 and fails at
+# bind. `ensure_fx_started` sat that out because the auto-start was still in
+# flight on "+", the wait ended with no port, and the session went out
+# toolless. Both session/new and session/load must start it themselves then.
+
+
+def _fx_failed_autostart(monkeypatch):
+    """`fx_pending` True until the wait polls once, then the auto-start
+    gives up with no port; `ensure_fx_started` only does something once
+    the auto-start is no longer in flight — as the real one does."""
+    state = {"pending": True, "port": None, "ensured": 0}
+
+    def ensure():
+        if state["pending"]:
+            return  # someone else's start is in flight — the real early return
+        state["ensured"] += 1
+        state["pending"] = True
+
+    monkeypatch.setattr(panel_mod.scene, "ensure_fx_started", ensure)
+    monkeypatch.setattr(panel_mod.scene, "fx_pending", lambda: state["pending"])
+    monkeypatch.setattr(panel_mod.scene, "fx_port", lambda: state["port"])
+    monkeypatch.setattr(panel_mod.scene, "mcp_python_status", lambda: None)
+    monkeypatch.setattr(
+        panel_mod.scene,
+        "mcp_servers",
+        lambda: [{"name": "fxhoudini", "env": [] if state["port"] is None else [{"name": "HOUDINI_PORT", "value": str(state["port"])}]}],
+    )
+    return state
+
+
+def test_new_session_restarts_the_fx_server_after_its_autostart_gave_up(qapp, monkeypatch):
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    state = _fx_failed_autostart(monkeypatch)
+
+    widget._start_new_session()
+    assert not calls
+
+    state["pending"] = False  # the auto-start gave up, no port
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS)
+    assert state["ensured"] == 1, "the panel never started the fx server after the auto-start failed"
+    assert not calls, "opened a toolless session instead of waiting for its own start"
+
+    state["pending"], state["port"] = False, 8101
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS, retried=True)
+    assert calls[-1]["mcp_servers"][0]["env"] == [{"name": "HOUDINI_PORT", "value": "8101"}]
+    widget.shutdown()
+
+
+def test_new_session_retries_the_fx_start_only_once(qapp, monkeypatch):
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    calls = []
+    monkeypatch.setattr(client, "new_session", lambda **kwargs: calls.append(kwargs))
+    state = _fx_failed_autostart(monkeypatch)
+
+    widget._start_new_session()
+    state["pending"] = False
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS)
+    state["pending"] = False  # our own start failed too
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS, retried=True)
+
+    assert state["ensured"] == 1
+    assert calls, "a second failure must open the session, not loop"
+    widget.shutdown()
+
+
+def test_session_load_waits_for_the_fx_server_too(qapp, monkeypatch):
+    current = settings_mod.load()
+    current.default_agent = "claude-acp"
+    current.autostart_agent = False
+    settings_mod.save(current)
+
+    widget = _make_panel(qapp)
+    client = panel_mod.shared_client("claude-acp")
+    monkeypatch.setattr(client, "is_running", lambda: True)
+    loads = []
+    monkeypatch.setattr(client, "load_session", lambda **kwargs: loads.append(kwargs))
+    state = _fx_failed_autostart(monkeypatch)
+
+    widget._start_loaded_session("restored-1", "agent-session-1")
+    assert not loads, "session/load went out before the fx server was up"
+
+    state["pending"] = False
+    widget._poll_fx_wait(panel_mod._FX_WAIT_CEILING_MS, lambda: widget._send_session_load("agent-session-1"))
+    state["pending"], state["port"] = False, 8101
+    widget._poll_fx_wait(
+        panel_mod._FX_WAIT_CEILING_MS, lambda: widget._send_session_load("agent-session-1"), retried=True
+    )
+    assert loads and loads[-1]["mcp_servers"][0]["env"] == [{"name": "HOUDINI_PORT", "value": "8101"}]
+    assert loads[-1]["session_id"] == "agent-session-1"
     widget.shutdown()
