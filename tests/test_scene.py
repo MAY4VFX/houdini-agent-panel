@@ -5,6 +5,7 @@ designed to work.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 
@@ -729,3 +730,21 @@ def test_hip_dir_keeps_a_real_scene_inside_a_folder_named_backup(tmp_path):
     _install_fake_hou(is_new_file=False, path=str(backup / "airship_v010.hip"))
 
     assert scene.real_hip_dir() == str(backup)
+
+
+def test_pin_fx_port_env_skips_a_port_held_by_a_non_houdini(monkeypatch):
+    """8100 held by `hserver` (answers nothing, but can't be bound): fx's
+    auto-start must be pointed past it before it ever binds."""
+    monkeypatch.delenv("FXHOUDINIMCP_PORT", raising=False)
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: port != 8100)
+
+    assert scene.pin_fx_port_env() == 8101
+    assert os.environ["FXHOUDINIMCP_PORT"] == "8101"
+
+
+def test_pin_fx_port_env_keeps_a_free_base(monkeypatch):
+    monkeypatch.setenv("FXHOUDINIMCP_PORT", "8100")
+    monkeypatch.setattr(scene, "_is_bindable", lambda port: True)
+
+    assert scene.pin_fx_port_env() == 8100
+    assert os.environ["FXHOUDINIMCP_PORT"] == "8100"

@@ -154,6 +154,34 @@ def _first_bindable_port() -> int | None:
     return None
 
 
+def pin_fx_port_env() -> int | None:
+    """Point fxhoudinimcp's own auto-start at a port it can actually bind.
+
+    Runs from our `pythonrc.py`, before fx's `uiready.py` auto-start ever
+    calls `hwebserver.run()`. That first call is the only one that counts:
+    on Houdini 22 a second `hwebserver.run()` in a process whose first one
+    failed to bind kills the process (segfault, reproduced in hython), so
+    `ensure_fx_started` can't repair a failed auto-start after the fact.
+    And the auto-start does fail whenever 8100 is held by something that
+    doesn't answer `mcp.health` — on the owner's machine, after a reboot,
+    `hserver` itself sat on 8100 and every Houdini came up without tools.
+
+    `FXHOUDINIMCP_PORT` is fx's own setting for its base port, read when
+    `start()` runs; its `_pick_free_port` still steps over ports another
+    Houdini is serving on, so several Houdinis keep landing on 8101, 8102…
+    """
+    raw = os.environ.get("FXHOUDINIMCP_PORT")
+    try:
+        base = int(raw) if raw else _PORT_SCAN_BASE
+    except ValueError:
+        base = _PORT_SCAN_BASE
+    for port in range(base, base + _PORT_SCAN_COUNT):
+        if _is_bindable(port):
+            os.environ["FXHOUDINIMCP_PORT"] = str(port)
+            return port
+    return None
+
+
 def ensure_fx_started() -> None:
     """Start the fx server in THIS process when its own auto-start couldn't.
 
