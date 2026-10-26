@@ -108,6 +108,23 @@ _OURS_PREFIX = "HAP_"
 #: be a strictly worse bug than the one this fixes.
 _TIMEOUT = 10.0
 
+#: Windows has no login shell to ask: Houdini there is started by Explorer,
+#: `SHELL` is unset and `/bin/sh` does not exist, so the capture below finds
+#: nothing and the agent is left with the SDK's six variables - no
+#: `CLAUDE_CODE_OAUTH_TOKEN`, no API keys, no proxy. Measured on Windows 11 +
+#: Houdini 22.0.368: `claude setup-token`, then `setx CLAUDE_CODE_OAUTH_TOKEN`,
+#: and the panel's Claude Agent still answered "401 OAuth access token has
+#: expired" from a stale credentials file. The Windows equivalent of "the
+#: artist's profile" is the user's own environment block in the registry
+#: (`HKCU\Environment`, what `setx` and the System Properties dialog write) -
+#: read directly, because Houdini's inherited copy is only as fresh as the
+#: Explorer that started it.
+_ON_WINDOWS = os.name == "nt"
+
+#: Registry values that are only half of what the process needs (the user
+#: part of PATH) or that point at per-session places.
+_REGISTRY_SKIP = frozenset({"PATH", "TEMP", "TMP"})
+
 _cache: dict[str, str] | None = None
 _lock = threading.Lock()
 
@@ -183,6 +200,9 @@ def capture(*, force: bool = False) -> dict[str, str]:
     except (OSError, subprocess.SubprocessError, ValueError):
         captured = {}
 
+    if not captured and _ON_WINDOWS:
+        captured = _windows_user_env()
+
     for key in _SHELL_OWN:
         captured.pop(key, None)
     for key in [k for k in captured if k.startswith(_OURS_PREFIX)]:
@@ -191,6 +211,36 @@ def capture(*, force: bool = False) -> dict[str, str]:
     with _lock:
         _cache = dict(captured)
     return dict(captured)
+
+
+def _windows_user_env() -> dict[str, str]:
+    """The user's environment variables as the registry holds them now.
+
+    Never raises: like a shell that fails, a registry we cannot read is a
+    missing convenience, not a reason to refuse to launch.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return {}
+    found: dict[str, str] = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            index = 0
+            while True:
+                try:
+                    name, value, kind = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                if not isinstance(value, str) or name.upper() in _REGISTRY_SKIP:
+                    continue
+                if kind == winreg.REG_EXPAND_SZ:
+                    value = os.path.expandvars(value)
+                found[name] = value
+    except OSError:
+        return {}
+    return found
 
 
 def merged(base: dict[str, str], overrides: dict[str, str] | None = None) -> dict[str, str]:

@@ -17,7 +17,10 @@ from houdini_agent_panel import shellenv
 
 
 @pytest.fixture(autouse=True)
-def fresh():
+def fresh(monkeypatch):
+    # The shell-only behaviour is what most tests here pin down; the Windows
+    # registry fallback is switched on explicitly by the tests that cover it.
+    monkeypatch.setattr(shellenv, "_ON_WINDOWS", False)
     shellenv.reset_cache_for_tests()
     yield
     shellenv.reset_cache_for_tests()
@@ -215,3 +218,34 @@ def test_the_shell_is_asked_interactively(monkeypatch):
     flags = seen[0][1]
     assert "i" in flags, f"a non-interactive shell misses ~/.zshrc entirely: {flags!r}"
     assert "l" in flags, f"a non-login shell misses ~/.zprofile: {flags!r}"
+
+
+def test_windows_falls_back_to_the_users_registry_environment(monkeypatch):
+    """No login shell on Windows: the variables `setx` wrote (a Claude
+    subscription token, an API key) still have to reach the agent."""
+    def _no_shell(*_args, **_kwargs):
+        raise OSError("no /bin/sh on Windows")
+
+    monkeypatch.setattr(subprocess, "run", _no_shell)
+    monkeypatch.setattr(shellenv, "_ON_WINDOWS", True)
+    monkeypatch.setattr(
+        shellenv, "_windows_user_env", lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "HAP_DEPS": "x"}
+    )
+    env = shellenv.capture()
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert "HAP_DEPS" not in env
+
+
+def test_a_working_shell_wins_over_the_registry_on_windows(monkeypatch):
+    """Git Bash/MSYS users do have a shell, and its PATH is the useful one."""
+    monkeypatch.setattr(subprocess, "run", _fake_run(b"PATH=/usr/bin\0KEY=from-shell\0"))
+    monkeypatch.setattr(shellenv, "_ON_WINDOWS", True)
+    monkeypatch.setattr(shellenv, "_windows_user_env", lambda: {"KEY": "from-registry"})
+    assert shellenv.capture()["KEY"] == "from-shell"
+
+
+@pytest.mark.skipif(not shellenv._ON_WINDOWS, reason="reads the real Windows registry")
+def test_the_real_registry_read_never_returns_path():
+    env = shellenv._windows_user_env()
+    assert isinstance(env, dict)
+    assert "PATH" not in {k.upper() for k in env}
