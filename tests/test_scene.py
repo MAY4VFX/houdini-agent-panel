@@ -748,3 +748,40 @@ def test_pin_fx_port_env_keeps_a_free_base(monkeypatch):
 
     assert scene.pin_fx_port_env() == 8100
     assert os.environ["FXHOUDINIMCP_PORT"] == "8100"
+
+
+# --- with_pth_dirs ---------------------------------------------------------
+
+
+def test_pth_dirs_are_added_to_the_mcp_pythonpath(monkeypatch, tmp_path):
+    """pywin32's `.pth` is never read from a PYTHONPATH entry, so the fx
+    server died on `import pywintypes` on Windows: its directories have to
+    be spelled out."""
+    (tmp_path / "win32" / "lib").mkdir(parents=True)
+    (tmp_path / "pythonwin").mkdir()
+    (tmp_path / "pywin32.pth").write_text(
+        "# .pth file for the PyWin32 extensions\nwin32\nwin32\lib\npythonwin\n"
+        "import pywin32_bootstrap\n".replace("\\", "/"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scene, "fx_port", lambda: 8100)
+    monkeypatch.setenv("HAP_MCP_PATH", str(tmp_path))
+
+    entry = scene.mcp_servers()[0]
+    value = [item["value"] for item in entry["env"] if item["name"] == "PYTHONPATH"][0]
+    parts = value.split(os.pathsep)
+
+    assert parts[0] == str(tmp_path)
+    assert str(tmp_path / "win32") in parts
+    assert str(tmp_path / "win32" / "lib") in parts
+    assert str(tmp_path / "pythonwin") in parts
+    assert not any("pywin32_bootstrap" in p for p in parts)
+
+
+def test_pth_lines_that_are_not_directories_are_ignored(tmp_path):
+    (tmp_path / "x.pth").write_text("missing_dir\nimport something\n\n", encoding="utf-8")
+    assert scene.with_pth_dirs(str(tmp_path)) == str(tmp_path)
+
+
+def test_a_path_without_pth_files_is_unchanged():
+    assert scene.with_pth_dirs("/no/such/deps") == "/no/such/deps"

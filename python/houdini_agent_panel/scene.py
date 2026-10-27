@@ -360,6 +360,44 @@ runpy.run_module("fxhoudinimcp", run_name="__main__")
 """
 
 
+def with_pth_dirs(path: str) -> str:
+    """`path` plus the directories its entries' `.pth` files would have added.
+
+    The deps tree reaches the fx server through `PYTHONPATH`, and Python
+    reads `.pth` files only in real site directories, never in `PYTHONPATH`
+    entries. pywin32 depends on its `.pth` to put `win32` and `win32/lib` on
+    `sys.path`; without them the MCP SDK's Windows stdio transport fails on
+    `import pywintypes` and the fx server dies at startup - the agent then
+    answers, but has no Houdini tools at all. Measured on Windows 11 +
+    Houdini 22.0.368 with the bundled pywin32 312. Only directory lines are
+    taken; `import` lines (pywin32_bootstrap) are skipped, the fx server does
+    not need them once `win32/lib` is on the path.
+    """
+    entries = [e for e in path.split(os.pathsep) if e]
+    extra: list[str] = []
+    for entry in entries:
+        base = Path(entry)
+        try:
+            pth_files = sorted(base.glob("*.pth"))
+        except OSError:
+            continue
+        for pth in pth_files:
+            try:
+                lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith(("#", "import ", "import	")):
+                    continue
+                candidate = base / line
+                if candidate.is_dir():
+                    text = str(candidate)
+                    if text not in entries and text not in extra:
+                        extra.append(text)
+    return os.pathsep.join(entries + extra)
+
+
 def mcp_servers() -> list[dict]:
     """Exactly what goes into session/new as mcpServers.
 
@@ -396,7 +434,7 @@ def mcp_servers() -> list[dict]:
     # compiled for a different Python version.
     mcp_path = os.environ.get("HAP_MCP_PATH")
     if mcp_path:
-        env.append({"name": "PYTHONPATH", "value": mcp_path})
+        env.append({"name": "PYTHONPATH", "value": with_pth_dirs(mcp_path)})
     else:
         # Explicit, not merely absent: an entry here OVERRIDES whatever
         # PYTHONPATH the agent process this server is spawned under
